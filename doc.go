@@ -25,7 +25,9 @@
 //     kernel 的服务变更全树广播，成本随插件树规模线性增长（实测 ≈ +47ns/插件/请求）。
 //   - **Dispose 先于写响应**：请求 scope 在 handler 返回后立即回收，慢客户端不会
 //     钉住请求级资源（DB 事务、锁）。
-//   - **Ctx 不可跨 goroutine**：需要异步时用 Ctx.Detach() 取独立的值与 kernel 句柄。
+//   - **Ctx 不可跨 goroutine**：它与其绑定的 ResponseWriter 都不得跨 goroutine
+//     使用；异步场景要用的 `Ctx.Detach()`（独立值 + 进程级 kernel 句柄）
+//     见**下一票**，本版尚未提供。
 //   - **中间件无例外**：Static 注册的静态资源同样经过全局与分组中间件。
 //   - **错误脱敏**：HTTPError.cause 与 panic 栈只进观测记录，绝不进响应体。
 //
