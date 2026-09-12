@@ -6,7 +6,7 @@
 - **一等观测**——每请求 TraceID、结构化记录、装配诊断，默认装配
 - **零第三方依赖**——只使用 stdlib 与 pulse 的两个基座包（kernel / observability）
 
-> 状态：**设计阶段**。设计文档见 [`docs/design/web-framework-design.md`](docs/design/web-framework-design.md)。
+> 状态：**设计阶段**。设计与评审在 [Issue #1](https://github.com/Luo-root/pulse-web/issues/1) 进行，完整设计见 [`docs/design/web-framework-design.md`](docs/design/web-framework-design.md)。
 
 ## 预览（API 草案）
 

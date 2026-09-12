@@ -1,6 +1,6 @@
 # feat: pulse-web 框架设计——kernel 装配内核 + HTTP 语义层（设计票）
 
-> 完整设计文档（v1 收缩版）。Issue 摘要见发布正文；本文档随仓库落在 `docs/design/web-framework-design.md`。
+> 完整设计文档（v1）。设计票与评审记录见 [Issue #1](https://github.com/Luo-root/pulse-web/issues/1)。
 > 包名 `web`，模块 `github.com/Luo-root/pulse-web`——不与 pulse 根包（`package pulse`）冲突。
 
 ## 一句话
