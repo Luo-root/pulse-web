@@ -57,24 +57,27 @@ func DefaultServerConfig() ServerConfig {
 type Option func(*config)
 
 type config struct {
-	root         *kernel.Context
-	sink         observability.Sink
-	hostID       string
-	trace        bool
-	accessLog    bool
-	traceHeader  string
-	minimal      bool
-	errorHandler ErrorHandler
-	server       ServerConfig
+	root             *kernel.Context
+	sink             observability.Sink
+	hostID           string
+	trace            bool
+	trustTraceHeader bool
+	accessLog        bool
+	traceHeader      string
+	minimal          bool
+	errorHandler     ErrorHandler
+	server           ServerConfig
+	templates        *TemplateConfig
 }
 
 func defaultConfig() config {
 	return config{
-		hostID:      defaultHostID,
-		trace:       true,
-		accessLog:   true,
-		traceHeader: "X-Trace-Id",
-		server:      DefaultServerConfig(),
+		hostID:           defaultHostID,
+		trace:            true,
+		trustTraceHeader: true,
+		accessLog:        true,
+		traceHeader:      "X-Trace-Id",
+		server:           DefaultServerConfig(),
 	}
 }
 
@@ -88,6 +91,14 @@ func WithRoot(root *kernel.Context) Option {
 // 它只换出口，不开启任何被 Minimal 关掉的观测。
 func WithSink(sink observability.Sink) Option {
 	return func(cfg *config) { cfg.sink = sink }
+}
+
+// WithTrustedTraceHeader 控制是否采纳入站链路头（W3C traceparent / B3），默认 true。
+//
+// 关闭后总是自生成 TraceID：好处是客户端无法伪造 trace-id 污染日志，
+// 代价是网关后部署时链路在此断裂——按部署形态二选一。
+func WithTrustedTraceHeader(trust bool) Option {
+	return func(cfg *config) { cfg.trustTraceHeader = trust }
 }
 
 // WithHostID 设置宿主标识（出现在全部观测记录与装配横幅中）。
@@ -151,13 +162,15 @@ type Engine struct {
 	kernel *kernel.Context
 	mux    *http.ServeMux
 
-	sink         observability.Sink
-	hostID       string
-	trace        bool
-	accessLog    bool
-	traceHeader  string
-	server       ServerConfig
-	errorHandler ErrorHandler
+	sink             observability.Sink
+	hostID           string
+	trace            bool
+	trustTraceHeader bool
+	accessLog        bool
+	traceHeader      string
+	server           ServerConfig
+	errorHandler     ErrorHandler
+	templates        *templateSet
 
 	prefix string
 	mw     []Middleware
@@ -198,16 +211,25 @@ func New(opts ...Option) *Engine {
 	}
 
 	e := &Engine{
-		kernel:       root,
-		mux:          http.NewServeMux(),
-		sink:         sink,
-		hostID:       cfg.hostID,
-		trace:        cfg.trace,
-		accessLog:    cfg.accessLog,
-		traceHeader:  cfg.traceHeader,
-		server:       cfg.server,
-		errorHandler: handler,
-		life:         &lifecycle{},
+		kernel:           root,
+		mux:              http.NewServeMux(),
+		sink:             sink,
+		hostID:           cfg.hostID,
+		trace:            cfg.trace,
+		trustTraceHeader: cfg.trustTraceHeader,
+		accessLog:        cfg.accessLog,
+		traceHeader:      cfg.traceHeader,
+		server:           cfg.server,
+		errorHandler:     handler,
+		life:             &lifecycle{},
+	}
+
+	if cfg.templates != nil {
+		ts, err := newTemplateSet(*cfg.templates)
+		if err != nil {
+			panic("web: templates: " + err.Error())
+		}
+		e.templates = ts
 	}
 
 	if sink != nil && !cfg.minimal {
@@ -352,7 +374,12 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		started: time.Now(),
 	}
 	if e.trace {
-		c.traceID = e.resolveTraceID(r)
+		if e.trustTraceHeader {
+			c.traceID = e.resolveTraceID(r)
+		} else {
+			// 不信任入站头：客户端无法伪造 trace-id（代价是网关处链路断裂）
+			c.traceID = generateTraceID()
+		}
 		if e.traceHeader != "" {
 			rw.Header().Set(e.traceHeader, c.traceID)
 		}

@@ -427,10 +427,11 @@ pulse-web/
 ├── errors.go                  # HTTPError / StatusCoder / PanicError / 默认 mapper
 ├── observe.go                 # TraceID 生成与上游头解析（32hex）
 ├── wrap.go                    # stdlib 互操作（Wrap）
+├── detach.go                  # Detached 值袋子（跨 goroutine 的安全值）
+├── templates.go               # html/template 薄封装 + web.H
+├── debug.go                   # 装配诊断端点（FiberSnapshots 的 JSON 视图）
 ├── bench/                     # 性能回归基线（go test -bench . ./bench/）
 └── .github/workflows/ci.yml   # build / vet / test -race
-
-> 规划中（下一票）：`detach.go`（Detached 值袋子）、`templates.go`（html/template 薄封装 + web.H）。
 ```
 
 ## 验收标准
