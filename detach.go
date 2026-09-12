@@ -31,21 +31,9 @@ func (c *Ctx) Detach() Detached {
 }
 
 // Observe 直写一条记录到 Sink（不经 scope、零广播），与请求共享 TraceID。
-// 与 Ctx.Observe 同构。
+// 实现见 writeObservation（与 Ctx.Observe 共用）。
 func (d Detached) Observe(event string, set func(*observability.Attrs)) {
-	if d.Sink == nil {
-		return
-	}
-	rec := observability.Record{
-		HostID:  d.HostID,
-		TraceID: d.TraceID,
-		Source:  observability.SourceAdapter,
-		Event:   event,
-	}
-	if set != nil {
-		set(&rec.Attrs)
-	}
-	d.Sink.Write(rec)
+	writeObservation(d.Sink, d.HostID, d.TraceID, event, set)
 }
 
 // Service 读取全局服务（kernel root 仓库）—— 取全局服务不需要作用域。
