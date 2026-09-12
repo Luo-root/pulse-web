@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,6 +24,11 @@ const (
 	defaultHostID = "pulse-web"
 	eventHTTPReq  = "http.request"
 	sourceHTTP    = "http"
+
+	// sinkFlushTimeout 是关闭时序第 ⑤ 步（Sink flush）的独立预算：
+	// 它在 root.Dispose() 之后另起，**不在 ShutdownTimeout 之内**，
+	// 所以总关闭时长上限 = ShutdownTimeout + sinkFlushTimeout。
+	sinkFlushTimeout = 3 * time.Second
 )
 
 // ServerConfig 是 http.Server 参数；零值字段取默认（见 DefaultServerConfig）。
@@ -205,8 +211,12 @@ func New(opts ...Option) *Engine {
 	}
 
 	if sink != nil && !cfg.minimal {
-		// Bootstrap 必须是宿主树最先 Use 的插件：后装只能靠快照横幅兜底。
-		// Minimal 表示"零默认观测"，此时连装配期记录也不装。
+		// Bootstrap 必须是宿主树最先 Use 的插件：kernel 事件不回放，
+		// 后装只能靠快照横幅兜底。
+		//
+		// 已知限制（WithRoot 场景）：传入的树若已装过插件，本次装载拿到的是
+		// 当前快照，**此前的 fiber 迁移轨迹缺失**。需要完整装载轨迹时，
+		// 应在 WithRoot 传入前不要 Use 任何插件（即由 pulse-web 最先装配）。
 		if _, err := kernel.Use(root, observability.Bootstrap(cfg.hostID, sink)); err != nil {
 			panic("web: observability bootstrap failed: " + err.Error())
 		}
@@ -263,11 +273,15 @@ func (e *Engine) Group(prefix string, mw ...Middleware) *Engine {
 
 // Static 在 prefix 下提供 dir 的静态文件，注册的是前缀模式 "<prefix>/"。
 //
+// 静态资源同样经过全局与分组中间件（auth / CORS / 限流不会有例外），
+// 与普通路由共用同一条注册路径。
+//
 // 注意：再注册 "GET <prefix>/{file...}" 会遮蔽本静态服务（方法限定模式优先）；
 // 要放行个别路径请用字面量（字面量赢通配），如 app.GET("/static/health", h)。
 func (e *Engine) Static(prefix, dir string) {
 	full := e.prefix + prefix
-	e.mux.Handle(full+"/", http.StripPrefix(full, http.FileServer(http.Dir(dir))))
+	fs := http.StripPrefix(full, http.FileServer(http.Dir(dir)))
+	e.register(full+"/", Wrap(fs), nil)
 }
 
 func (e *Engine) chainMW(extra []Middleware) []Middleware {
@@ -361,8 +375,9 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (e *Engine) finish(c *Ctx, rw *responseWriter) {
 	if c.err != nil && !rw.wrote {
 		if herr := e.mapErrorSafely(c, c.err); herr != nil {
-			// 映射器自身失败：兜底 500，且不影响 AccessLog 对原始 error 的记录。
-			writeFallback500(rw)
+			// 映射器自身失败：兜底 500（与默认 mapper 同源），
+			// 且不影响 AccessLog 对原始 error 的记录。
+			writeErrorPayload(rw, http.StatusInternalServerError, "internal", http.StatusText(http.StatusInternalServerError))
 			slog.Warn("pulse.web: error handler failed", "err", herr.Error(), "trace_id", c.traceID)
 		}
 	}
@@ -390,13 +405,20 @@ func (e *Engine) mapErrorSafely(c *Ctx, err error) (out error) {
 	return e.errorHandler(c, err)
 }
 
-func writeFallback500(rw *responseWriter) {
-	if rw.wrote {
+// writeErrorPayload 写出统一格式的错误响应。
+// 与默认 mapper 共用 errorPayload —— fallback 与正常映射的响应体形状永远一致，
+// 改一处即两处同步。
+func writeErrorPayload(w *responseWriter, status int, code, message string) {
+	if w.wrote {
 		return
 	}
-	rw.Header().Set("Content-Type", "application/json; charset=utf-8")
-	rw.WriteHeader(http.StatusInternalServerError)
-	_, _ = rw.Write([]byte(`{"error":{"code":"internal","message":"Internal Server Error"}}`))
+	body, err := json.Marshal(errorPayload{Error: errorDetail{Code: code, Message: message}})
+	if err != nil {
+		body = []byte(`{"error":{"code":"internal","message":"Internal Server Error"}}`)
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
 }
 
 func (e *Engine) writeAccessLog(c *Ctx, rw *responseWriter) {
@@ -432,14 +454,33 @@ func routePattern(r *http.Request) string {
 	return p
 }
 
+// statusCode 从错误里取 HTTP 状态码（*HTTPError 或实现 StatusCoder 的自定义错误）。
+func statusCode(err error) int {
+	var herr *HTTPError
+	if errors.As(err, &herr) {
+		return herr.Status
+	}
+	var sc StatusCoder
+	if errors.As(err, &sc) {
+		return sc.StatusCode()
+	}
+	return 0
+}
+
+// errCategory 把错误分类为稳定的聚合维度（进 AccessLog 的 error.type）。
+// 有状态码的错误按区间分，避免把「客户端 4xx」与「服务端 5xx」混进同一个桶。
 func errCategory(err error) string {
 	var perr *PanicError
 	if errors.As(err, &perr) {
 		return "panic"
 	}
-	var herr *HTTPError
-	if errors.As(err, &herr) {
-		return "http"
+	switch status := statusCode(err); {
+	case status >= 500:
+		return "http_5xx"
+	case status >= 400:
+		return "http_4xx"
+	case status >= 300:
+		return "http_3xx"
 	}
 	return "internal"
 }
@@ -533,11 +574,11 @@ func (e *Engine) shutdown(srv *http.Server) error {
 	// ④ 终局：级联回收全部 kernel 资源
 	e.dispose()
 
-	// ⑤ Sink flush（若出口实现了 Flusher）
+	// ⑤ Sink flush（若出口实现了 Flusher；独立预算，见 sinkFlushTimeout）
 	if f, ok := e.sink.(interface {
 		Flush(context.Context) error
 	}); ok {
-		flushCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		flushCtx, cancel := context.WithTimeout(context.Background(), sinkFlushTimeout)
 		defer cancel()
 		_ = f.Flush(flushCtx)
 	}

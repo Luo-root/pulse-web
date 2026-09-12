@@ -22,9 +22,6 @@ type Key[T any] struct{ name string }
 // NewKey 定义请求级 KV 键。
 func NewKey[T any](name string) Key[T] { return Key[T]{name: name} }
 
-// Name 返回键名（诊断用）。
-func (k Key[T]) Name() string { return k.name }
-
 // Ctx 是一次请求的上下文。
 //
 // 生命周期与线程安全：Ctx 及其绑定的 ResponseWriter **不可跨 goroutine 使用**；

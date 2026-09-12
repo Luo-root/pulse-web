@@ -18,7 +18,7 @@
 7. **进程级装配面**——`app.Root()` / `web.WithRoot(k)`；其余用 kernel 原生 API（`Provide` / `Use` / `Loader`）
 8. **生命周期**——`Run`（信号 → `Server.Shutdown` → `OnShutdown` → `root.Dispose` → Sink flush）、`Serve`、`Handler`
 9. **stdlib 互操作**——`Wrap(http.Handler) Handler`，`Handler()` 反向导出
-10. **静态文件**——`Static(prefix, dir)`
+10. **静态文件**——`Static(prefix, dir)`，**静态资源同样经过全局与分组中间件**（与普通路由共用注册路径）
 11. **流式响应**——直接写 `ResponseWriter` + `Flush`（SSE / 大文件），一条 AccessLog
 12. **HTML 模板**——`c.HTML()`，薄封装 stdlib `html/template`（生产缓存 / 开发热重载）
 
@@ -247,6 +247,12 @@ app.GET("/", func(c *web.Ctx) error {
 - **未配置模板时调用 `c.HTML` 返回明确错误**（不静默 500）
 - 模板自动补 `Content-Type: text/html; charset=utf-8`
 
+### 静态文件与中间件
+
+`Static(prefix, dir)` **走与普通路由同一条注册路径**——静态资源同样经过全局与分组中间件（auth / CORS / 限流不会有例外），也照常进 Trace 与 AccessLog 收尾。内部注册前缀模式 `<prefix>/`，交给 `http.FileServer` 自行处理 404 / 405。
+
+> ⚠️ 再注册 `GET <prefix>/{file...}` 会遮蔽静态服务（方法限定模式优先）；要放行个别路径请用字面量（字面量赢通配），如 `app.GET("/static/health", h)`。
+
 ## 运行时契约
 
 ### 请求作用域的生命周期（关键时序）
@@ -326,10 +332,12 @@ app.POST("/jobs", func(c *web.Ctx) error {
   → ② 超时 → srv.Close() 强制断开
   → ③ OnShutdown 回调                     ← 单回调，用户等待后台任务
   → ④ root.Dispose()                     ← 终局：级联截断
-  → ⑤ Sink flush（若实现 Flusher 接口）
+  → ⑤ Sink flush（若实现 Flusher 接口；**独立预算** `sinkFlushTimeout` = 3s，
+       在 `root.Dispose()` 之后另起，**不计入 `ShutdownTimeout`**：
+       总关闭时长上限 = ShutdownTimeout + 3s）
 ```
 
-- ①②③ 共享**同一个 deadline**（总关闭时长 ≤ `ShutdownTimeout`，与 k8s `terminationGracePeriodSeconds` 对齐）；HTTP 用光预算时回调拿到已过期 ctx，记录"后台任务未等待"
+- ①②③ 共享**同一个 deadline**（这三段总时长 ≤ `ShutdownTimeout`，与 k8s `terminationGracePeriodSeconds` 对齐）；HTTP 用光预算时回调拿到已过期 ctx，记录"后台任务未等待"；⑤ 的 Sink flush 另起独立预算（见上，总上限 = ShutdownTimeout + 3s）
 - **未注册等待的后台任务会被 ④ 截断**——明示行为
 - `Detached.Root` 派生出的 scope 是 root 的子 scope，同样受 ④ 影响
 
@@ -412,15 +420,17 @@ v1 只做当前视图：`app.Debug("/debug/pulse")` 输出 `kernel.FiberSnapshot
 ```
 pulse-web/
 ├── go.mod                     # module github.com/Luo-root/pulse-web（package web）
-├── engine.go                  # Engine、Root/WithRoot、Run/Serve/Handler、OnShutdown
-├── router.go                  # 路由注册 + 分组 + 中间件编译
-├── context.go                 # Ctx
-├── errors.go                  # HTTPError / StatusCoder / 默认 mapper / PanicError
-├── observe.go                 # Trace 中间件、AccessLog 收尾、Collector 装配
-├── detach.go                  # Detached 值袋子
-├── wrap.go                    # stdlib 互操作
-├── templates.go               # html/template 薄封装 + web.H
-└── bench/                     # 性能回归基线（go test -bench . ./bench/）
+├── doc.go                     # 包文档（定位 / 快速开始 / 运行时契约）
+├── engine.go                  # Engine、选项、Root()、路由注册与分组、Static、
+│                              # ServeHTTP（时序）、Engine 层收尾、Run/Serve/Handler/OnShutdown
+├── context.go                 # Ctx、请求级 KV、响应写出、responseWriter 包装器
+├── errors.go                  # HTTPError / StatusCoder / PanicError / 默认 mapper
+├── observe.go                 # TraceID 生成与上游头解析（32hex）
+├── wrap.go                    # stdlib 互操作（Wrap）
+├── bench/                     # 性能回归基线（go test -bench . ./bench/）
+└── .github/workflows/ci.yml   # build / vet / test -race
+
+> 规划中（下一票）：`detach.go`（Detached 值袋子）、`templates.go`（html/template 薄封装 + web.H）。
 ```
 
 ## 验收标准
