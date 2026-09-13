@@ -162,9 +162,14 @@ func Minimal() Option {
 //
 // 插件的私有 scope 是 root 的另一个子节点，与请求 scope 同级，永远读不到；用
 // `kernel.Require(CollectorKey)` 声明依赖的插件会**静默**停在 inactive（探针
-// 实测：`Get` 返回 false、`Apply` 从未调用）。插件在请求路径上其实没有观测
-// 入口——连请求 scope 的 `EmitLocal` 也收不到（只派发本层），收得到的全树
-// `Emit` 比它慢 77 倍、是请求路径禁用的。已上报上游（pulse#189）。
+// 实测：`Get` 返回 false、`Apply` 从未调用）。插件在请求路径上没有**自取**通道
+// ——连请求 scope 的 `EmitLocal` 也收不到（只派发本层），收得到的全树 `Emit`
+// 比它慢 77 倍、是请求路径禁用的。上游 pulse#189 已核销：不改代码，表述收正为
+// 「没有交付通道」。
+//
+// 插件要参与请求级观测，走**宿主交付**：宿主把请求上下文（`*Ctx` / `Detached`，
+// 用 `Observe` 直写、零 scope 开销）或请求 scope（本选项，成本见下）交给它。
+// 两条路都不需要插件自己 lookup。
 //
 // 成本（实测，表 B 口径）：约 **+385 ns / +12 allocs 每请求**（端到端；kernel 层
 // `AttachCollector` 相对基线 +270 ns / +12 allocs），且与插件树规模解耦
