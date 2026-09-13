@@ -84,7 +84,7 @@ func BenchmarkScopeCycle_WithEffects(b *testing.B) {
 	}
 }
 
-// --- 3. 官方式请求观测接线：每请求 AttachCollector（含服务 Provide + 全树广播） ---
+// --- 3. 官方式请求观测接线：每请求 AttachCollector（v0.2.1 起为作用域局部绑定） ---
 
 func BenchmarkRequestCycle_Collector(b *testing.B) {
 	host := kernel.New()
@@ -102,7 +102,7 @@ func BenchmarkRequestCycle_Collector(b *testing.B) {
 	}
 }
 
-// --- 4. 同上，但宿主挂了 50 个插件（量全树广播的规模效应） ---
+// --- 4. 同上，但宿主挂了 50 个插件（v0.2.1 前量全树广播的规模效应；现已解耦） ---
 
 func BenchmarkRequestCycle_Collector_PluginTree50(b *testing.B) {
 	host := newHostWith(50)
@@ -120,7 +120,7 @@ func BenchmarkRequestCycle_Collector_PluginTree50(b *testing.B) {
 	}
 }
 
-// --- 5. 并发：同规模下 8 路并行（量 root 锁与全树广播的竞争） ---
+// --- 5. 并发：同规模下并行（量请求级局部绑定的 root 锁竞争） ---
 
 func BenchmarkRequestCycle_Collector_PluginTree50_Parallel(b *testing.B) {
 	host := newHostWith(50)

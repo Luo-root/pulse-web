@@ -56,7 +56,7 @@
 | API 风格 | echo 式：`func(*Ctx) error` + 集中错误映射 + stdlib 双向兼容 | 与 pulse「不静默吞错」同构、DI 类型安全、可测 |
 | 路由 | stdlib `ServeMux`（Go 1.22+ 模式） | 零依赖、190ns/匹配；**不抽 router 接口**（YAGNI，要换时再抽） |
 | HTTP 中间件 | 闭包组合 | **不用** kernel `Waterfall`——那是事件 around 链，不是 HTTP 洋葱 |
-| kernel 作用 | 每请求派生 scope（默认付 128ns）；**默认路径零 Provide** | 实测：Provide 触发全树广播 = O(插件树) |
+| kernel 作用 | 每请求派生 scope（v0.2.1 实测 74 ns / 2 allocs）；**请求级数据不占全局仓库** | v0.2.1 `#169` 后服务变更按依赖名索引投递（不再 O(插件树)）；请求级值走 `kernel.Local()` 作用域局部绑定 |
 | 依赖方向 | `pulse-web → pulse` 单向 | pulse 永不反向引用 |
 
 ### 路由选型的边界（实测，Go 1.27）
@@ -81,24 +81,31 @@ g2.GET("/users", h, mw3)
 
 中间件在注册期闭包组合（运行期零额外开销）；冲突 panic 包装为带分组上下文的信息（`g1(/api) → g2(/v1)`）。
 
-## 实测数据（2026-09-12，i9-14900HX，`-count=1`）
+## 实测数据（2026-09-13，i9-14900HX，`-benchtime=3000x -count=3` 取中位）
 
-| 场景 | 耗时 | 分配 |
-|---|---|---|
-| stdlib ServeMux 路由匹配 | 190 ns | 5 allocs |
-| kernel 服务读取 `Get` | 11.6 ns | 0 allocs |
-| scope 派生 + 销毁 | 128 ns | 5 allocs |
-| 请求级事件 `EmitLocal` | 32 ns | 2 allocs |
-| 全树事件 `Emit` | 2123 ns | 60 allocs |
-| 每请求 `AttachCollector`（空树） | 357 ns | 15 allocs |
-| 同上（10 / 50 / 100 插件树） | 859 / 2666 / 5140 ns | — |
+同机同轮对照 pulse **v0.2.0 → v0.2.1**：
 
-**结论**：请求作用域与请求级事件便宜；**每请求 Provide 服务 = O(插件树规模)，每插件 +47ns**（根因 `notifyServiceChange` 全树广播）。Go 1.25 → 1.27 同基准：stdlib 路由 244 → 190 ns（−22%），kernel 路径持平。
+| 场景 | v0.2.0 | v0.2.1 | Δ |
+|---|---|---|---|
+| stdlib ServeMux 路由匹配（**对照层**，未被任何改动触及） | 173.6 ns / 5 allocs | 188.8 ns / 5 allocs | +9% |
+| scope 派生 + 销毁 | 119.3 ns / 5 allocs | 74.4 ns / **2** allocs | −38%，allocs −60% |
+| 请求级事件 `EmitLocal` | 27.5 ns / 2 allocs | 23.2 ns / **1** alloc | allocs −50% |
+| 全树事件 `Emit`（50 插件） | 2079 ns / 60 allocs | 1778 ns / **9** allocs | allocs −85% |
+| kernel 服务读取 `Get` | 11.83 ns | 13.13 ns | **+11%**（`Get` 现在先走一遍局部绑定链） |
+| 每请求 `AttachCollector`（空树） | 294.8 ns / 15 allocs | 301.8 ns / 14 allocs | 持平 |
+| 同上（10 / 50 / 100 插件树） | 778 / 2647 / 4946 ns | **314 / 350 / 394 ns** | **−60% / −87% / −92%** |
+| 同上（50 插件，并行） | 1371 ns / 15 allocs | 531 ns / 14 allocs | −61% |
+| Engine 请求路径 `New()` | 2008 ns / 26 allocs | 1961 ns / 22 allocs | allocs −15% |
+| Engine 请求路径 `Minimal()` | 1382 ns / 20 allocs | 1476 ns / 17 allocs | allocs −15% |
+
+**口径**：`-count=3` 取中位。对照层（stdlib 路由，**与本次改动完全无关**）自己涨了 9%，说明第二轮机器状态偏慢——所以上表的 ns 降幅是**保守估计**，跨运行稳定的硬证据是 **alloc 计数**。唯一的真实回退是 `Get` **+11%**：局部绑定的链上查找给全局读取加了一层（本层 miss 才回全局仓库）。
+
+**结论**：v0.2.1（`#169`）把服务变更从「全树广播」改成「按依赖名索引投递」，每请求 Provide 的成本**与插件树规模彻底解耦**（100 插件 4946 → 394 ns）。这正是红线 2 的原始依据——依据消失，红线按新语义重写。请求级数据改用 `kernel.Local()`（作用域局部绑定：不写全局仓库、不投递变更、随作用域销毁撤除），而不是把全局 `Provide` 当请求级容器。
 
 ## 设计红线
 
-1. 请求路径一律 `EmitLocal`，禁用全树 `Emit`（32ns vs 2123ns）
-2. **默认路径零 `Provide`、零 `AttachCollector`**；`WithCollector()` 显式开启后才出现 O(插件树)（且仅限"插件经 `kernel.Get` 打点"场景）
+1. 请求路径一律 `EmitLocal`，禁用全树 `Emit`（v0.2.1 实测 23ns vs 1778ns）
+2. **请求级数据用 `kernel.Local()`，不写全局 `Provide`**——全局命名空间是**装配面**，请求级值写进去会被并发请求互相覆盖。`WithCollector()` 显式开启后才在请求路径上出现局部绑定（实测 +227ns / +12 allocs，与插件树规模无关）
 3. 请求 scope 与"响应是否送达网络"解耦：**`Dispose` 在写响应之前**
 4. `Ctx` 不可跨 goroutine；后台任务用 `Detach`（值 + 进程级 root）
 
@@ -152,7 +159,7 @@ func (c *Ctx) Query(name string) string
 func (c *Ctx) Request() *http.Request
 func (c *Ctx) TraceID() string
 
-// 请求级 KV（框架自有，不进 kernel 仓库）
+// 请求级 KV（框架自有 map —— 不用 kernel.Local()，依据见下「关系澄清」）
 func (c *Ctx) Get[T any](k Key[T]) (T, bool)
 func (c *Ctx) Set[T any](k Key[T], v T)
 
@@ -174,7 +181,9 @@ func (c *Ctx) Flush() error              // 流式
 
 类型约束：`Key[T]` 与 `kernel.ServiceKey[T]` 是不同类型，误用编译期报错——命名是第一道防线，类型是第二道。
 
-**关系澄清**：kernel 里**不存在"scope 局部服务"**——所有服务绑定都在 root 仓库（`kernel/service.go:58`），`Get` 从任何活 scope 出发都读 root。所以 `c.Service(key)` ≡ `kernel.Get(c.Kernel(), key)`；`c.Kernel()` 的用途不是读服务，而是挂请求级资源。请求级数据必须由框架 KV 承担。
+**关系澄清**：kernel **v0.2.1 起存在** scope 局部服务——`kernel.Provide(scope, key, v, kernel.Local())`：绑定存本层，**本 scope 及其后代**可读（`Get` 沿父链近因优先），父 / 兄弟不可读，随作用域销毁撤除；它**不投递服务变更、不参与 fiber 依赖解析**。所以 `c.Service(key)` ≡ `kernel.Get(c.Kernel(), key)`，会先走局部链再回全局仓库。
+
+但**请求级 KV 仍由框架自有 map 承担**，不改用 `Local()`：`Local()` 每条绑定实测 **+325 ns / +12 allocs**（COW map 重建 ×2 + binding + Effect 登记；`Derive + Local Provide + Dispose` = 399 ns / 14 allocs，裸 `Derive + Dispose` = 74 ns / 2 allocs），而 `Ctx.Set/Get` 只是已分配 map 上的一次 store——两条 KV 若走 Local 会吃掉当前请求路径（~1960 ns）的 36%。`Local()` 的定位是「少量**语义性**绑定」（如 Collector），不是通用容器。
 
 **`observability.Set` 的类型约束**：`Set[T AttrValue]` 只接受 `~string | ~int64 | ~float64 | ~bool`——`u.ID` 若是 `int` 或 UUID 类型需显式转换（`int64(u.ID)` 或 `u.ID.String()`）。
 
@@ -332,12 +341,14 @@ app.POST("/jobs", func(c *web.Ctx) error {
   → ② 超时 → srv.Close() 强制断开
   → ③ OnShutdown 回调                     ← 单回调，用户等待后台任务
   → ④ root.Dispose()                     ← 终局：级联截断
-  → ⑤ Sink flush（若实现 Flusher 接口；**独立预算** `sinkFlushTimeout` = 3s，
+  → ⑤ Sink flush（**独立预算** `sinkFlushTimeout` = 3s，
        在 `root.Dispose()` 之后另起，**不计入 `ShutdownTimeout`**：
        总关闭时长上限 = ShutdownTimeout + 3s）
 ```
 
 - ①②③ 共享**同一个 deadline**（这三段总时长 ≤ `ShutdownTimeout`，与 k8s `terminationGracePeriodSeconds` 对齐）；HTTP 用光预算时回调拿到已过期 ctx，记录"后台任务未等待"；⑤ 的 Sink flush 另起独立预算（见上，总上限 = ShutdownTimeout + 3s）
+- **⑤ 的 flush 探测同时认两种出口形态**：`Flush(context.Context) error`（上游 `AsyncSink`）与 `Flush() error`（上游 `LineSink`）。只认其中一种会**静默跳过**另一种——`WithSink(observability.NewLineSink(...))` 下关闭前未达阈值的最后一批记录会随进程消失，且不报错、不告警。flush 返回的错误记 `slog.Warn`（与 ③ 的 `OnShutdown` 错误同一处理：不静默吞，也不让关闭失败）
+- **⑤ 只 flush、不 `Close`**：出口的所有权属装配方。`Detach` 明确允许进程级后台任务继续写同一个 Sink，框架在关闭时 `Close` 它会静默丢弃这些记录。关闭时序只负责"把**已产生**的记录写完"
 - **未注册等待的后台任务会被 ④ 截断**——明示行为
 - `Detached.Root` 派生出的 scope 是 root 的子 scope，同样受 ④ 影响
 
@@ -354,19 +365,29 @@ app.POST("/jobs", func(c *web.Ctx) error {
 
 **`WithSink` 只换出口，不复活 Trace / AccessLog**——要观测就别用 `Minimal()`（或自己 `app.Use(web.Trace())`）。
 
-`WithCollector()` 开启 `AttachCollector`（每请求 Provide，O(插件树)），供"按 `kernel.Get(scope, observability.CollectorKey)` 打点的组件"使用；无 Sink 时装配期 panic。
+`WithCollector()` 每请求把 `observability.Collector` 装进请求作用域（上游 v0.2.1 起是 `kernel.Local()` 作用域局部绑定；实测 +227 ns / +12 allocs，**与插件树规模无关**）。**它服务的是"被交付请求 scope 的组件"，不是"自行 lookup 的插件"**——见下方边界表。无 Sink 时装配期 panic（`Minimal()` 且未 `WithSink` 即此组合）。
 
 `WithoutAccessLog()` 关闭访问日志（用户已接自己的日志系统时用）——只关 AccessLog，`Trace` 与 panic 兜底不受影响。
 
-v1 选项面：`New()` / `Minimal()` / `WithSink` / `WithoutAccessLog` / `WithRoot` / `WithHostID` / `WithServer` / `WithErrorHandler` / `OnShutdown`。第二批（AsyncSink、TrustedTraceHeader）见文末「明确不做」。
+v1 选项面：`New()` / `Minimal()` / `WithSink` / `WithoutAccessLog` / `WithRoot` / `WithHostID` / `WithServer` / `WithErrorHandler` / `WithTemplates` / `WithTrustedTraceHeader` / `WithCollector` / `OnShutdown`。注意 **`AsyncSink` 不在选项面**——它是**出口实现**，用 `WithSink(observability.NewAsyncSink(...))` 接入，框架不另造缓冲层。
 
 ### 打点入口（复用上游，不新造协议）
 
 | 场景 | 实现 |
 |---|---|
-| 请求内业务打点 | `Ctx` **构造**一个 `observability.Collector`（不 Provide），`c.Observe` 内部调 `Collector.WriteAttrs` |
-| 插件经 `kernel.Get` 打点 | `WithCollector()` → `observability.AttachCollector`（这也是唯一 O(插件树) 的 Provide） |
+| 请求内业务打点 | `Ctx.Observe` **直写 Sink**（`writeObservation`，信封填充与 `Collector.write` 同构）——不注册 Collector，因此零 scope 开销 |
+| 被交付请求 scope 的组件 | `WithCollector()` → `observability.AttachCollector`（作用域局部绑定，随 scope 销毁撤除） |
 | AccessLog / panic | 宿主**直写 `observability.Record`**——需要 `Duration` / `Err`，而 Collector 明确不带这两项（`collector.go:60` 注释：状态型事实） |
+
+**`WithCollector()` 的可见性边界**（实测，五条；这也是"为什么不给插件用"的答案）：
+
+| 读方 | 读得到 |
+|---|---|
+| 请求 scope 自身 | ✅ |
+| 请求 scope 的后代 | ✅ |
+| 宿主 root | ❌ |
+| 插件私有 scope（与请求 scope 是**兄弟**） | ❌ |
+| 并发请求各自的 scope | ✅（互不遮蔽，各持自己的 TraceID） |
 
 **不存在自定义的 Observe 协议**——`c.Observe` / `Detached.Observe` 都是 `Collector.write` 的薄包装。
 
@@ -401,7 +422,8 @@ v1 只做当前视图：`app.Debug("/debug/pulse")` 输出 `kernel.FiberSnapshot
 
 | 项 | 去路 |
 |---|---|
-| `AsyncSink`（队列 / Drop / flushTimeout） | **另开 observability 的票**——Sink 契约已写明"需要截止时间的导出器自己持队列"；web 只在关闭时 `if f, ok := sink.(Flusher)` |
+| `AsyncSink`（队列 / Drop / flushTimeout） | **上游已提供**（`observability.NewAsyncSink`，v0.2.1）——web 不另造缓冲层，`WithSink` 接入即可。注意组合语义：`AsyncSink.Flush` 只排空**它自己的**队列、不级联 inner 的 `Flush`，所以异步化的正确组合是 `NewAsyncSink(SlogSink)`；用 `AsyncSink` 包另一个缓冲出口（如 `LineSink`）会留下未落盘的内层缓冲，框架无从代劳 |
+| `Sink.Close`（停协程） | 不做——出口所有权属装配方：`Detach` 允许进程级后台任务继续写同一 Sink，框架在关闭时 `Close` 它会静默丢弃这些记录。关闭时序只负责 flush 并记错误 |
 | 流式双记录（Flush 启发式） | 不做——普通 handler / 中间件的 `Flush()` 会误判；SSE 的语义已由"handler 不返回 ⇒ AccessLog 晚写"覆盖。需要"流开始"再显式另开票 |
 | 假 span-id / traceparent 回写 | 不做（见上） |
 | TTFB / Content-Type 观测 | 不做（TTFB 依赖包装器状态，与"避免额外分配"冲突），另开票 |
@@ -412,7 +434,7 @@ v1 只做当前视图：`app.Debug("/debug/pulse")` 输出 `kernel.FiberSnapshot
 | `Recover()` 中间件 | 不做（Engine `defer` 兜底已覆盖） |
 | `HoldScope()` / `Release()` | 不做（延长请求 scope 会破坏"请求结束即回收"） |
 | `RunTLS` | 不做（`tls.NewListener` + `Serve` 或反代） |
-| 请求级数据对 kernel 插件可见 | 不做（需给 kernel 加 scope 局部绑定，属上游改动） |
+| 请求级数据对 kernel 插件**通用**可见 | 不做——上游 v0.2.1 已给出 `kernel.Local()`（这条"属上游改动"的阻塞已解除），但把整个请求 KV 袋挂进 scope 是每请求 +325 ns / +12 allocs **每绑定**（实测），且语义上把"通用容器"当成"语义性绑定"。只做 `WithCollector()` 这一处显式、边界清楚的用例 |
 | 内置 agent / LLM 相关的观测与装配接线 | 不做——pulse-web **只依赖 kernel 与 observability**，与 pulse 其余组件（llm / loop / host / toolset…）无耦合；需要时由调用方在自己的装配代码里显式接入 |
 
 ## 仓库结构（初版）
@@ -438,7 +460,7 @@ pulse-web/
 
 - [ ] 垂直切片可跑：`app.Run()` 起服务，路由 / 中间件 / JSON / 优雅关闭全通
 - [ ] **`WithRoot()` 可接入外部已有的 kernel 树**：双方 `Provide` 的服务彼此可见（同一 IoC 容器）
-- [ ] **默认路径零 `Provide`**（benchmark 不随插件数线性涨）；仅 `WithCollector()` 后出现 O(插件树)
+- [ ] **默认路径零全局 `Provide`**（benchmark 不随插件数线性涨）；`WithCollector()` 后是作用域局部绑定，实测同样与插件树规模无关
 - [ ] **`c` 上的业务打点与 AccessLog 进同一个 Sink**：同一 `TraceID` / `HostID`；Source 分别为 `"http"`（AccessLog）与 `"bridge"`（Collector）
 - [ ] 观测贯穿：单请求 TraceID 在 router → handler → Sink 一致；后台任务共享同一 TraceID
 - [ ] 标准库兼容：挂载 stdlib 中间件无侵入；`Wrap` 双向适配

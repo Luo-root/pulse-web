@@ -10,7 +10,8 @@
 //	go test -bench . -benchmem ./bench/
 //
 // 结论随设计文档维护：docs/design/web-framework-design.md「实测数据」一节。
-// 回归要求：请求路径开销不劣化（默认路径零 Provide，不随插件树规模线性增长）。
+// 回归要求：请求路径开销不劣化（默认路径零全局 Provide；`WithCollector()`
+// 用的是作用域局部绑定，自 v0.2.1 起同样不随插件树规模线性增长）。
 //
 // 子目录 muxprobe 是 stdlib ServeMux 的能力探针（一次性工具，结论已写进设计文档）。
 package bench

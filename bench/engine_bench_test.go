@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/Luo-root/pulse/kernel"
 	web "github.com/Luo-root/pulse-web"
+	"github.com/Luo-root/pulse/kernel"
 )
 
 // nopWriter 避免 httptest.ResponseRecorder 的分配干扰测量。
@@ -32,7 +32,8 @@ func (w *nopWriter) WriteHeader(int)             {}
 //     之后每轮走不同路径）；
 //   - 结论优先看 **allocs/op 是否恒定**（噪声下比 ns 稳）。
 //
-// 对照组：BenchmarkRequestCycle_Collector_PluginTree*（每请求 Provide = O(插件树)）。
+// 对照组：BenchmarkRequestCycle_Collector_PluginTree*（v0.2.1 之前每请求
+// AttachCollector = O(插件树)；上游 #169 之后应与插件树规模解耦，留作对照）。
 // 采样建议：-count=3 起，观察离散度。
 func BenchmarkEngineRequestPath(b *testing.B) {
 	for _, n := range []int{0, 10, 50} {
