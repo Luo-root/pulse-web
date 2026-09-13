@@ -1,7 +1,9 @@
 package web
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"html/template"
 	"path/filepath"
 	"sync"
@@ -14,7 +16,7 @@ type H = map[string]any
 type TemplateConfig struct {
 	Root      string // 模板根目录
 	Pattern   string // glob 模式，默认 "*.html"
-	DevReload bool   // true = 每次请求重新解析（开发用；不要用于生产）
+	DevReload bool   // true = 每请求重新解析（每请求 ParseGlob + 写锁）；仅供开发
 }
 
 // WithTemplates 启用 HTML 模板。生产模式启动时解析一次并缓存；
@@ -70,8 +72,10 @@ func (ts *templateSet) get() (*template.Template, error) {
 
 // HTML 渲染命名模板并写出。
 //
-// 注意：模板执行错误发生在响应头写出之后，此时无法再改状态码——
-// 需要严格保证时请先渲染到 buffer 再写出。
+// **先渲染到内存、成功后才写响应头**：模板名写错、或执行期报错（数据缺字段、
+// 方法返回错误等）都能在写头之前返回 error，交由统一错误映射成 5xx —— 否则
+// `WriteHeader` 先生效，「已写响应不被覆盖」规则会把错误吞成一个 200 空页。
+// 代价是模板输出不再流式（模板渲染本身即内存操作）；需要流式请直接写 Writer。
 func (c *Ctx) HTML(code int, name string, data any) error {
 	ts := c.engine.templates
 	if ts == nil {
@@ -81,7 +85,12 @@ func (c *Ctx) HTML(code int, name string, data any) error {
 	if err != nil {
 		return err
 	}
+	var buf bytes.Buffer
+	if err := t.ExecuteTemplate(&buf, name, data); err != nil {
+		return fmt.Errorf("web: render template %q: %w", name, err)
+	}
 	c.w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	c.w.WriteHeader(code)
-	return t.ExecuteTemplate(c.w, name, data)
+	_, err = c.w.Write(buf.Bytes())
+	return err
 }

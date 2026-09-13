@@ -93,10 +93,12 @@ func WithSink(sink observability.Sink) Option {
 	return func(cfg *config) { cfg.sink = sink }
 }
 
-// WithTrustedTraceHeader 控制是否采纳入站链路头（W3C traceparent / B3），默认 true。
+// WithTrustedTraceHeader 控制是否采纳入站链路头（W3C traceparent / B3）。
 //
-// 关闭后总是自生成 TraceID：好处是客户端无法伪造 trace-id 污染日志，
-// 代价是网关后部署时链路在此断裂——按部署形态二选一。
+//	true （默认）: 采纳入站 trace-id，网关之后的链路在本进程接得上
+//	false        : 忽略入站头、总是自生成，客户端无法伪造 trace-id 污染日志
+//
+// 取舍按部署形态二选一：置于可信网关之后用 true，直接暴露公网用 false。
 func WithTrustedTraceHeader(trust bool) Option {
 	return func(cfg *config) { cfg.trustTraceHeader = trust }
 }

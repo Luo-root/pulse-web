@@ -242,9 +242,9 @@ app.GET("/", func(c *web.Ctx) error {
 ```
 
 - **生产模式**：启动时解析一次并缓存（并发安全）
-- **`DevReload: true`**：每次请求重新 `ParseGlob`——开发时改模板不必重启；**不要用于生产**
+- **`DevReload: true`**：每请求重新 `ParseGlob`（每请求磁盘扫描 + 写锁）；仅供开发
 - `web.H` = `map[string]any` 的类型别名（模板数据便利写法，也可传任意 struct）
-- **未配置模板时调用 `c.HTML` 返回明确错误**（不静默 500）
+- **`c.HTML` 的三条错误路径一律返回明确 error**（不静默 500）：未配置模板 / 模板名不存在 / 执行期报错。实现上**先渲染到内存缓冲、成功后才写响应头**——`WriteHeader` 一旦先生效，「已写响应不被覆盖」规则会把错误吞成 200 空页。代价是模板输出不流式（需要流式请直接写 Writer）
 - 模板自动补 `Content-Type: text/html; charset=utf-8`
 
 ### 静态文件与中间件
