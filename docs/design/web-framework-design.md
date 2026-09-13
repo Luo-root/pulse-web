@@ -420,9 +420,9 @@ v1 选项面：`New()` / `Minimal()` / `WithSink` / `WithoutAccessLog` / `WithRo
 
 **所以：kernel 插件在请求路径上没有「自取」通道。** 这不是缺陷——局部绑定兄弟不可见是上游 `#170` 的有意修复（避免并发串台），`EmitLocal` 只派发本层是它的定义；但两者叠加的结果此前无人文档化，读者要自己画作用域树才能推出来。
 
-已上报上游 [pulse#189](https://github.com/Luo-root/pulse/issues/189)，上游**核销为不改代码**，并把表述收正为「没有**交付通道**」——机制一直都在，缺的是插件在请求路径上如何拿到那份请求身份。**插件要参与，走宿主交付，交付物二选一**：上表那两条——请求上下文 `*Ctx` 或其值袋子 `Detached`（`c.Observe` / `Detached.Observe` 直写 Sink、与请求共享 TraceID，零 scope 开销），或请求 scope（`WithCollector()` + `kernel.Get(CollectorKey)`，每请求 +385 ns / +12 allocs）。两条都不要求插件自己 lookup，也不用碰 `EmitLocal` 的传播范围。
+已上报上游 [pulse#189](https://github.com/Luo-root/pulse/issues/189)，上游**核销为不改代码**，并把表述收正为「没有**交付通道**」——机制一直都在，缺的是插件在请求路径上如何拿到那份请求身份。**插件要参与，走宿主交付，交付物二选一**：上表那两条——**请求上下文**（同步调用给 `*Ctx`、跨 goroutine 给值袋子 `Detached`；两者都是 `Observe` 直写 Sink、与请求共享 TraceID，零 scope 开销。`Ctx` 不可跨 goroutine，见运行时契约），或**请求 scope**（`WithCollector()` + `kernel.Get(CollectorKey)`，每请求 +385 ns / +12 allocs）。两条都不要求插件自己 lookup，也不用碰 `EmitLocal` 的传播范围。
 
-上游 #189 的探针实测了同形结论：插件只吃一份 per-request cfg（`flow.NewRecordObserver(cfg)` 形态）即可参与，且与宿主在请求 scope 上的直写落在**同一个 TraceID** 下。
+上游 #189 的探针实测了同形结论：插件只吃一份 per-request cfg（`kernel/flow/observer_record.go:34` 的 `NewRecordObserver(cfg)` 形态）即可参与，且与宿主在请求 scope 上的直写落在**同一个 TraceID** 下。
 
 **不存在自定义的 Observe 协议**——`c.Observe` / `Detached.Observe` 都是 `Collector.write` 的薄包装。
 

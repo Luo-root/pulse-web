@@ -154,7 +154,7 @@ func Minimal() Option {
 //		return nil
 //	}
 //
-// **必须由宿主把请求 scope 显式传进去**。它不服务 kernel 插件：
+// **必须由宿主把请求 scope 显式传进去**。这条选项本身不服务 kernel 插件（插件自取不到）：
 //
 //	请求 scope 自身       ✅      请求 scope 的后代    ✅
 //	宿主 root             ❌      插件私有 scope       ❌（与请求 scope 是兄弟）
@@ -167,9 +167,11 @@ func Minimal() Option {
 // 比它慢 77 倍、是请求路径禁用的。上游 pulse#189 已核销：不改代码，表述收正为
 // 「没有交付通道」。
 //
-// 插件要参与请求级观测，走**宿主交付**：宿主把请求上下文（`*Ctx` / `Detached`，
-// 用 `Observe` 直写、零 scope 开销）或请求 scope（本选项，成本见下）交给它。
-// 两条路都不需要插件自己 lookup。
+// 插件要参与请求级观测，走**宿主交付**，交付物按调用形态选：
+//
+//	同步调用        `*Ctx`（`c.Observe` 直写 Sink，零 scope 开销）
+//	跨 goroutine    `Detached`（`c.Detach()` 拷贝的值袋子，见 detach.go；`Ctx` 不可跨 goroutine）
+//	要 scope 查找   本选项（宿主交付请求 scope，接收方 `kernel.Get(CollectorKey)`，成本见下）
 //
 // 成本（实测，表 B 口径）：约 **+385 ns / +12 allocs 每请求**（端到端；kernel 层
 // `AttachCollector` 相对基线 +270 ns / +12 allocs），且与插件树规模解耦
