@@ -31,6 +31,31 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # 只判失败、不自动修：自动修要 CI 有写权限并产生「CI 提交」，与「改动必须人审」冲突。
+      # 取文件集用 `git ls-files '*.go'` 而非 `gofmt -l .`：后者会连未跟踪目录一起扫。
+      # gofmt 走显式路径 `$(go env GOROOT)/bin/gofmt`：PATH 上可能是旧版，解析不了泛型方法一类
+      # 的新语法（表现为全量报错）；显式路径让「与 go.mod 指定的工具链一致」这条自证。
+      #
+      # `2>&1` 必须配 `|| true`：Actions 的 run 是 `bash -e`，gofmt 解析失败时退出 2，少了
+      # `|| true` 会让**赋值语句本身**失败、脚本在赋值行中止——门禁确实红了，但捕获到的错误
+      # 文本随中止一起丢弃，日志一片空白（本想「让失败可见」，实际「让失败无声」）。
+      #
+      # 本地复现方法与三条假阳性判据（CRLF / 未跟踪目录 / 旧版 gofmt）见 README「开发」节。
+      - name: gofmt
+        run: |
+          files="$(git ls-files '*.go')"
+          if [ -z "$files" ]; then
+            # 空展开会让 gofmt 去读 stdin 挂住
+            echo "没有跟踪的 .go 文件，跳过"
+            exit 0
+          fi
+          out="$("$(go env GOROOT)/bin/gofmt" -l $files 2>&1)" || true
+          if [ -n "$out" ]; then
+            echo "gofmt 报告问题（未格式化的文件，或解析错误）："
+            echo "$out"
+            exit 1
+          fi
+
       - name: Test (race)
         run: go test -race ./...
 
