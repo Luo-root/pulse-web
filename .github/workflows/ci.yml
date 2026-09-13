@@ -59,5 +59,12 @@ jobs:
       - name: Test (race)
         run: go test -race ./...
 
+      # 分配预算门禁（bench/budget_test.go）：只卡跨运行稳定的分配计数与 B/op，不卡 ns
+      # （ns 跨轮会漂 2–4×，做阈值等于把机器状态引进 CI）。
+      # 必须**不带** -race：race 检测器会把 B/op 抬高（实测默认路径 6314 → 6342），
+      # 所以那个文件用 `//go:build !race` 排除在 race 构建外，由本步骤执行。
+      - name: Alloc budget
+        run: go test -run TestRequestPathAllocBudget ./bench/
+
       - name: Bench compile check
         run: go test -run '^$' -bench '^$' ./bench/
