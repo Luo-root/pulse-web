@@ -30,6 +30,10 @@ const (
 	ModeObs Mode = "obs"
 )
 
+// LogWriter 是 obs 档 Logger 的出口。默认空设备（保留格式化成本、排除磁盘 I/O）；
+// 探针可以换成计数 writer 来数「每请求几行」。真实部署里它是 stdout。
+var LogWriter io.Writer = io.Discard
+
 // New 按档位构造压测用 handler。
 func New(mode Mode) http.Handler {
 	// 关掉 debug 模式的启动横幅与告警：它们会往 stdout 写字，干扰压测输出。
@@ -42,7 +46,7 @@ func New(mode Mode) http.Handler {
 	case ModeObs:
 		// 必须在 gin.Default() **之前**改：Logger 是在创建时抓 DefaultWriter 的，
 		// 建完再改只影响之后创建的中间件。
-		gin.DefaultWriter = io.Discard
+		gin.DefaultWriter = LogWriter
 		engine = gin.Default()
 	default:
 		panic("ginapp: 未知档位 " + string(mode))

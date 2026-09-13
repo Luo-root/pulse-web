@@ -38,6 +38,8 @@ const (
 
 	modeBare     = "bare"
 	modeObs      = "obs"
+	modeObsLine  = "obs-line"
+	modeObsAsync = "obs-async"
 	modeObsNoLog = "obs-nolog"
 )
 
@@ -139,7 +141,13 @@ func main() {
 		{modeObs, []string{fwPulse, fwGin}},
 	}
 	if *probe {
-		pairs = append(pairs, pair{modeObsNoLog, []string{fwPulse}})
+		// 只跑 pulse-web 一侧的诊断档：它们回答「钱花在哪」（换出口值多少、
+		// 异步值多少、关掉访问日志值多少），不回答「谁快」。
+		pairs = append(pairs,
+			pair{modeObsLine, []string{fwPulse}},
+			pair{modeObsAsync, []string{fwPulse}},
+			pair{modeObsNoLog, []string{fwPulse}},
+		)
 	}
 
 	fmt.Printf("机器: %s/%s · NumCPU=%d · GOMAXPROCS=%d · %s\n",
@@ -351,7 +359,8 @@ func render(pairs []pair, concs []int, cells map[key]*cell) string {
 		}
 	}
 
-	// 拆解：诊断档存在时，把 pulse-web 的观测开销分成「Trace 那截」与「访问日志那截」。
+	// 拆解：诊断档存在时，把 pulse-web 侧的观测开销摆成一条线——从关掉访问日志
+	// 到默认出口，再到换出口 / 异步出口，每格跟上相对同并发 bare 的变化。
 	var decomposition bool
 	for _, pr := range pairs {
 		if pr.mode == modeObsNoLog {
@@ -359,18 +368,29 @@ func render(pairs []pair, concs []int, cells map[key]*cell) string {
 		}
 	}
 	if decomposition {
-		b.WriteString("\n### 拆解：pulse-web 的观测开销花在哪（诊断档，非对拍）\n\n")
-		b.WriteString("| 并发 | bare | obs-nolog（+Trace/记录） | obs（+访问日志/出口） | Trace 那截 | 访问日志那截 |\n")
+		b.WriteString("\n### 拆解：pulse-web 的观测开销（诊断档，非对拍）\n\n")
+		b.WriteString("括号里是相对同并发 `bare` 的变化。**`obs` 是对拍档**，用的是框架默认出口形态\n")
+		b.WriteString("（SlogSink → slog 文本 handler）；其余三列是换出口 / 换异步 / 关日志的诊断。\n\n")
+		b.WriteString("| 并发 | bare | 关访问日志 | **默认出口 SlogSink** | 换 LineSink | AsyncSink(LineSink) |\n")
 		b.WriteString("|---|---|---|---|---|---|\n")
 		for _, c := range concs {
 			bare := cells[key{fwPulse, modeBare, c}].witness().RPS
-			noLog := cells[key{fwPulse, modeObsNoLog, c}].witness().RPS
-			full := cells[key{fwPulse, modeObs, c}].witness().RPS
-			fmt.Fprintf(&b, "| %d | %.0f | %.0f | %.0f | %+.0f | %+.0f |\n",
-				c, bare, noLog, full, noLog-bare, full-noLog)
+			fmt.Fprintf(&b, "| %d | %.0f | %s | %s | %s | %s |\n", c, bare,
+				withDelta(cells[key{fwPulse, modeObsNoLog, c}].witness().RPS, bare),
+				withDelta(cells[key{fwPulse, modeObs, c}].witness().RPS, bare),
+				withDelta(cells[key{fwPulse, modeObsLine, c}].witness().RPS, bare),
+				withDelta(cells[key{fwPulse, modeObsAsync, c}].witness().RPS, bare))
 		}
 	}
 	return b.String()
+}
+
+// withDelta 把「绝对值 + 相对基线变化」摆进一格，省得读者自己去减。
+func withDelta(v, base float64) string {
+	if base <= 0 {
+		return fmt.Sprintf("%.0f", v)
+	}
+	return fmt.Sprintf("%.0f (%+.0f%%)", v, (v-base)/base*100)
 }
 
 func fatal(err error) {

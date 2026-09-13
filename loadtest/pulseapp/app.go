@@ -1,19 +1,23 @@
 // Package pulseapp 是压测里的 pulse-web 服务端。
 //
-// 它与 ginapp 是**刻意写成的对拍**：同样的路由、同样的响应体、同样的两档
-// 中间件面，连函数顺序都对齐。看其中一个时请并排看另一个——两个文件之间的
-// diff 就是「同一件事两边怎么写」的答案。
+// 它与 ginapp 是**刻意写成的对拍**：同样的路由、同样的响应体、同样的分节顺序，
+// 连函数顺序都对齐。看其中一个时请并排看另一个——两个文件之间的 diff 就是
+// 「同一件事两边怎么写」的答案。
 package pulseapp
 
 import (
 	"io"
+	"log/slog"
 	"net/http"
 
 	web "github.com/Luo-root/pulse-web"
 	"github.com/Luo-root/pulse/observability"
 )
 
-// Mode 是对拍档位。
+// Mode 是档位。
+//
+// **只有 `bare` 与 `obs` 是对拍档**，其余是 pulse-web 侧的诊断档：它们回答
+// 「钱花在哪」，不回答「谁快」。
 type Mode string
 
 const (
@@ -24,20 +28,32 @@ const (
 	// 「有没有兜底」——兜底是一次 defer，成本在噪声里。
 	ModeBare Mode = "bare"
 
-	// ModeObs 打开框架**自带**的观测装配（Bootstrap + Trace + 访问日志），
-	// 对拍 gin.Default()（Logger + Recovery）。
+	// ModeObs 对拍 gin.Default()（Logger + Recovery）：默认装配
+	// （Bootstrap + Trace + 访问日志）+ **默认出口形态**（SlogSink → slog 文本 handler）。
 	//
-	// 出口指向空设备：保留每请求的**格式化成本**，排除磁盘 I/O——否则这一档
-	// 比的是磁盘带宽，不是框架开销。
+	// 出口目的地是空设备而不是 stderr：保留每请求的**格式化成本**，排除磁盘 I/O。
+	// 真实部署里它是 stderr（然后落到采集器），那时磁盘/采集成本两边都要付。
 	ModeObs Mode = "obs"
 
-	// ModeObsNoLog 是**诊断档，不是对拍档**：观测装配只留 Trace，关掉访问日志。
-	//
-	// 用来把观测档那截开销拆成「Trace + 记录框架」与「访问日志 + 出口」两段。
-	// gin 侧没有对应档（它的 bare 就是「不开日志」），所以这一档只有 pulse-web
-	// 一侧——它回答的是「钱花在哪」，不是「谁快」。
+	// ModeObsLine 诊断：把出口换成 observability.NewLineSink（行式缓冲出口）。
+	// **它不是默认出口**——上一版对比误把它当默认形态用了，这一档用来量出
+	// 「换出口」本身值多少。
+	ModeObsLine Mode = "obs-line"
+
+	// ModeObsAsync 诊断：上游推荐的异步组合 AsyncSink(LineSink)——请求路径只做
+	// Attrs 深拷 + 入队，格式化与写出挪到后台协程。
+	ModeObsAsync Mode = "obs-async"
+
+	// ModeObsNoLog 诊断：默认装配但关掉访问日志（`WithoutAccessLog()`），
+	// 用来把观测开销拆成「Trace + 记录框架」与「访问日志 + 出口」两段。
 	ModeObsNoLog Mode = "obs-nolog"
 )
+
+// discardSlog 是「默认出口形态 + 空目的地」：SlogSink 不指定 Logger 时走
+// slog.Default()（→ stderr），这里给一个写空设备的文本 handler。
+func discardSlog() observability.Sink {
+	return observability.SlogSink{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+}
 
 // New 按档位构造压测用 handler。
 func New(mode Mode) http.Handler {
@@ -46,15 +62,24 @@ func New(mode Mode) http.Handler {
 	case ModeBare:
 		app = web.New(web.Minimal())
 	case ModeObs:
+		app = web.New(web.WithSink(discardSlog()))
+	case ModeObsLine:
 		app = web.New(web.WithSink(observability.NewLineSink(io.Discard)))
+	case ModeObsAsync:
+		app = web.New(web.WithSink(observability.NewAsyncSink(observability.NewLineSink(io.Discard))))
 	case ModeObsNoLog:
-		app = web.New(
-			web.WithSink(observability.NewLineSink(io.Discard)),
-			web.WithoutAccessLog(),
-		)
+		app = web.New(web.WithSink(discardSlog()), web.WithoutAccessLog())
 	default:
 		panic("pulseapp: 未知档位 " + string(mode))
 	}
+	registerRoutes(app)
+	return app
+}
+
+// NewWithSink 用指定出口构造「默认装配」应用：探针用（数每请求写几条、
+// 看记录长什么样、或换一个自写的出口）。
+func NewWithSink(sink observability.Sink) http.Handler {
+	app := web.New(web.WithSink(sink))
 	registerRoutes(app)
 	return app
 }

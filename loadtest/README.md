@@ -7,14 +7,15 @@
 
 ```console
 cd loadtest
-go run ./cmd/compare -probe                        # 记录进文档的那次（口径见下）
-go run ./cmd/compare                               # 不跑诊断档
-go run ./cmd/compare -quick                        # 自检用缩水口径，数字不要进文档
-go test -bench . -benchmem ./bench/                # 成本分解（不是胜负承诺）
+go run ./cmd/compare -probe -passes 4 -d 8s -warmup 2s   # 记录进文档的那次
+go run ./cmd/compare                                     # 只跑对拍档
+go run ./cmd/compare -quick                              # 自检用缩水口径，数字不要进文档
+go test -bench . -benchmem ./bench/                      # 成本分解（不是胜负承诺）
+go test -run TestRecordsPerRequest -v ./bench/           # 每请求写几条（条数口径的钉子）
 ```
 
 `compare` 会自己 build 被测服务、顺序起停、预热后计时，最后打印可直接粘进
-设计文档的 markdown 表。常用开关：`-c 64,256`、`-d 15s`、`-warmup 3s`、
+设计文档的 markdown 表。常用开关：`-c 64,256`、`-d 8s`、`-warmup 2s`、
 `-passes 4`、`-path /users/42`、`-probe`、`-out result.md`。
 
 只想对着一个已经在跑的服务打：
@@ -24,32 +25,62 @@ go run ./cmd/server -fw gin -mode obs -addr 127.0.0.1:18080   # 另开一个终�
 go run ./cmd/loadgen -url http://127.0.0.1:18080/users/42 -c 64 -d 15s
 ```
 
-## 两个对拍档位
+## 档位
 
-| 档位 | gin 侧 | pulse-web 侧 | 这一档比什么 |
+| 档位 | 侧 | gin 侧 | pulse-web 侧 |
 |---|---|---|---|
-| `bare` | `gin.New()` | `web.New(web.Minimal())` | 路由 + 上下文 + 写响应 |
-| `obs` | `gin.Default()`（Logger + Recovery） | `web.New()`（Bootstrap + Trace + 访问日志） | 把各家**自带**的观测也算进去 |
+| `bare` | 对拍 | `gin.New()` | `web.New(web.Minimal())` |
+| `obs` | 对拍 | `gin.Default()`（Logger + Recovery） | `web.New()`（默认装配 + **默认出口形态**） |
+| `obs-line` | 诊断 | — | 出口换成 `NewLineSink` |
+| `obs-async` | 诊断 | — | 出口换成 `NewAsyncSink(NewLineSink(...))` |
+| `obs-nolog` | 诊断 | — | 默认装配但关掉访问日志 |
 
-还有一个 `obs-nolog` 是 **pulse-web 的诊断档，不是对拍档**（gin 侧没有对应档，
-它的 `bare` 就是「不开日志」）：只开 Trace、关掉访问日志，用来把观测那截开销
-拆成「Trace + 记录框架」与「访问日志 + 出口」两段。**它回答「钱花在哪」，
-不回答「谁快」**。
+诊断档只跑 pulse-web 一侧：它们回答「**钱花在哪**」（换出口值多少、异步值多少、
+关掉访问日志值多少），不回答「谁快」。
 
-两侧的服务端是刻意写成的对拍（`pulseapp/app.go` 与 `ginapp/app.go`），
-同样的路由、同样的响应体、同样的分节顺序——两个文件之间的 diff 就是
-「同一件事两边怎么写」。
+### sink 这件事上一版搞错过
 
-**两处已知的不对称，如实写在下面而不是抹平：**
+为了让日志不落盘，上一版直接把 pulse-web 的出口换成 `NewLineSink(io.Discard)`
+——**那不是默认出口**。默认是 `SlogSink`（不指定 Logger 时走 `slog.Default()` → stderr），
+而 `SlogSink` 与 `LineSink` 的成本并不一致（一个走 slog 文本 handler，一个是行式缓冲出口）。
 
-1. `pulse-web` 的 `Minimal()` 仍保留 Engine 的 panic 兜底，`gin.New()` 没有
-   Recovery。这一档比的是请求路径，不是兜底；兜底是一次 defer，成本在噪声里。
-   要严格对称可以把 `bare` 档的 gin 侧改成 `gin.New()+gin.Recovery()`。
-2. 观测档两边的日志出口都指向空设备（`io.Discard`）：保留每请求的**格式化
-   成本**，排除磁盘 I/O——否则这一档比的是磁盘带宽，而不是框架开销。
-3. `obs` 档两侧做的**并不是同一件事**：pulse-web 每请求生成 TraceID 并组装
-   结构化记录写 Sink，gin 只是把一行文本格式化后写出。这一档量的是「各家默认
-   开箱配置」，不是「等价功能的成本」——要给 gin 配上等价的追踪得另装第三方中间件。
+现在 `obs` 档用的是**默认出口形态**：
+
+```go
+observability.SlogSink{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+```
+
+目的地仍然是空设备（保留每请求的格式化成本、排除磁盘 I/O），但走的是默认那条路径；
+「换出口值多少」交给 `obs-line` 单独量。真实部署里它是 stderr（然后落到采集器），
+那时磁盘/采集成本两侧都要付。
+
+## 条数与内容（不是「同一条日志」）
+
+`TestRecordsPerRequest` 钉住这个口径：
+
+- **条数一样**：pulse-web 每请求 **1 条**结构化 `Record`（Engine 收尾里的 AccessLog；
+  请求路径上没有第二处写 Sink 的地方，`c.Observe` 要业务自己调）；gin 每请求 **1 行**文本。
+  pulse-web 另有**装配期 3 条**（Bootstrap），不是每请求。
+- **内容不一样**：
+
+  | 侧 | 内容 |
+  |---|---|
+  | pulse-web | `Source=http Event=http.request Status=200 TraceID=<32hex>` + `http.request.method` / `http.route` / `url.path` / `http.response.body.size` / `client.address`（有错误再加 `error.type`） |
+  | gin | `[GIN] 2026/09/13 - 22:18:08 \| 200 \| 0s \| 192.0.2.1 \| GET "/users/42"` |
+
+  差异点：pulse-web 带 TraceID（gin 没有）、带路由**模板**（`/users/{id}`，gin 只有实际路径）、
+  带错误分类；客户端地址两边都记。时间戳这边是**出口在写入时才补**的
+  （上游 `stampTime`：记录不带就补 `time.Now()`），框架侧的 Record 不携带时间。
+
+所以观测档量的是「**各家默认开箱配置**」，不是「等价功能的成本」——要给 gin 配上
+等价物（TraceID + 路由模板 + 错误分类）得另装第三方中间件。
+
+## 两处已知的不对称，如实写在下面而不是抹平
+
+1. `pulse-web` 的 `Minimal()` 仍保留 Engine 的 panic 兜底，`gin.New()` 没有 Recovery。
+   这一档比的是请求路径，不是兜底；兜底是一次 defer，成本在噪声里。
+2. 观测档两边的日志出口都指向空设备（`io.Discard`）：保留每请求的**格式化成本**，
+   排除磁盘 I/O——否则这一档比的是磁盘带宽，而不是框架开销。
 
 ## 口径细节
 

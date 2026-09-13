@@ -33,8 +33,11 @@ func benchPath(b *testing.B, h http.Handler) {
 }
 
 // BenchmarkRequestPath 是两侧同一条路由（GET /users/42 → 同一份 JSON）的
-// 逐请求成本。`pulse/obs-nolog` 是**诊断档**：只开 Trace、关掉访问日志，
-// 用来把观测那截开销拆开。
+// 逐请求成本。
+//
+// `pulse/obs` 是**默认出口形态**（SlogSink → slog 文本 handler，目的地空设备）；
+// `obs-line` / `obs-async` 是换出口的诊断档（AsyncSink 把格式化挪到后台协程，
+// 请求路径只剩 Attrs 深拷 + 入队）；`obs-nolog` 关掉访问日志，用来拆观测开销。
 func BenchmarkRequestPath(b *testing.B) {
 	cases := []struct {
 		name string
@@ -43,8 +46,10 @@ func BenchmarkRequestPath(b *testing.B) {
 		{"gin/bare", ginapp.New(ginapp.ModeBare)},
 		{"pulse/bare", pulseapp.New(pulseapp.ModeBare)},
 		{"gin/obs", ginapp.New(ginapp.ModeObs)},
-		{"pulse/obs-nolog", pulseapp.New(pulseapp.ModeObsNoLog)},
 		{"pulse/obs", pulseapp.New(pulseapp.ModeObs)},
+		{"pulse/obs-line", pulseapp.New(pulseapp.ModeObsLine)},
+		{"pulse/obs-async", pulseapp.New(pulseapp.ModeObsAsync)},
+		{"pulse/obs-nolog", pulseapp.New(pulseapp.ModeObsNoLog)},
 	}
 	for _, tc := range cases {
 		b.Run(tc.name, func(b *testing.B) { benchPath(b, tc.h) })
