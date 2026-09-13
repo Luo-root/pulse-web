@@ -1,0 +1,9 @@
+# 行尾是**仓库属性**，不依赖每个贡献者本地的 core.autocrlf。
+#
+# text=auto：由 git 判定文本 / 二进制，二进制不被改写；
+# eol=lf：无论本地怎么配置，入库与签出都统一成 LF。
+#
+# 动机：CI 的 gofmt 门禁会因为 CRLF 把每个文件判脏（gofmt 认为 CRLF 需要重排），
+# 而「谁会以 CRLF 提交」只取决于各人本地的 core.autocrlf，不是仓库能保证的事。
+# 钉住之后，「本地跑 gofmt 全量报错」就只剩「gofmt 版本」一个成因。
+* text=auto eol=lf
