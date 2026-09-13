@@ -448,7 +448,7 @@ app.POST("/jobs", func(c *web.Ctx) error {
 | `Minimal(), WithSink(s)` | 关 | 关 | 关 | **开** | `s`（仅供 `c.Observe` 与用户自装中间件） |
 | `New(WithCollector())` | 开 | 开 | 开 | 开 | 默认 Sink |
 
-**`WithSink` 只换出口，不复活 Trace / AccessLog**——要观测就别用 `Minimal()`（或自己 `app.Use(web.Trace())`）。
+**`WithSink` 只换出口，不复活 Trace / AccessLog**——要观测就别用 `Minimal()`。框架**没有**可单独挂载的 `Trace()` / `AccessLog()` 中间件（本文档早期版本写过 `app.Use(web.Trace())`，那个 API 不存在，已删）：默认装配是一体的，`Minimal()` 下要自己写中间件 + `c.Observe()` 打点。
 
 `WithCollector()` 每请求把 `observability.Collector` 装进请求作用域（上游 v0.2.1 起是 `kernel.Local()` 作用域局部绑定；实测 **+385 ns / +12 allocs 每请求**，**与插件树规模无关**——口径见表 B）。
 
@@ -500,6 +500,24 @@ v1 选项面：`New()` / `Minimal()` / `WithSink` / `WithoutAccessLog` / `WithRo
 | Attrs | `error.type` | 错误分类串；**与 `Record.Err` 并存**（`Err` 供 SlogSink 输出、`error.type` 供聚合查询，OTel 亦然） |
 
 **隐私边界**：Attrs 只有标量，无 payload 逃生舱——能记 method / status / duration / bytes，**记不了**请求体、响应体、prompt。
+
+**与 OTel HTTP 语义约定的覆盖对照**（上游 semconv：HTTP server span）。"对齐"是指**同名字段用同一套语义**，不等于把 OTel 的属性表抄全：
+
+| OTel 属性 | 等级 | pulse-web |
+|---|---|---|
+| `http.request.method` | Required | ✅ |
+| `url.path` | Required | ✅ |
+| `url.scheme` | Required | ❌ 不记（反代/终止 TLS 后框架这一层看到的 scheme 未必是真值） |
+| `http.response.status_code` | Conditional | ⚠️ 记在 **`Record.Status`**（状态码字符串），不是 attr——与 `Duration`/`Err` 同理：状态型事实走记录字段 |
+| `http.route` | Conditional | ✅（含路径模板，低基数） |
+| `error.type` | Conditional | ✅（有错才写，与 `Record.Err` 并存） |
+| `url.query` | Conditional | ❌ 不记（基数高，且常带敏感参数） |
+| `client.address` | Recommended | ✅（对端地址，不解析 `X-Forwarded-For`——信任边界交给反代） |
+| `network.protocol.version` / `server.address` / `user_agent.original` | Recommended | ❌ 不记（v1 范围外） |
+| `http.request.body.size` / `http.response.body.size` | **Opt-In** | 只记**响应**侧：框架包了 `ResponseWriter`（顺手得到字节数），**没有包 `r.Body`**——量请求体要拦 body 读取，破坏流式语义且每请求多一层 |
+| `http.request.header.*` / `http.response.header.*` / `http.request.size` / `http.response.size` | **Opt-In** | ❌ 不做（默认不记头/体：体积按请求数放大、会把 token/cookie 写进日志、破低基数聚合）。要记就在中间件里 `c.Observe()` 显式记，自己把关 |
+
+需要「请求进来那一刻」的记录（而不是收尾那一条）**没有现成开关**：框架的访问日志刻意写在收尾（要 `status` / `duration`），要入口记录就在中间件里 `c.Observe()`——框架**不提供** `Trace()` / `AccessLog()` 这类可单独挂载的中间件，默认装配是一体的（`WithSink` 只换出口，不复活被 `Minimal()` 关掉的观测）。
 
 ### TraceID 兼容
 

@@ -88,6 +88,25 @@ observability.SlogSink{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 所以观测档量的是「**各家默认开箱配置**」，不是「等价功能的成本」——要给 gin 配上
 等价物（TraceID + 路由模板 + 错误分类）得另装第三方中间件。
 
+### 开箱输出（什么都不写，两边各自吐什么）
+
+`go test -run TestOpenBoxOutput -v ./bench/` 实测（2 个请求）：
+
+| | gin（debug 开箱） | pulse-web（默认装配 + 默认 SlogSink） |
+|---|---|---|
+| 启动 | 2 条 `[GIN-debug] [WARNING]`（Logger/Recovery 已挂、debug 模式提醒）+ **每个路由一条注册行**：`[GIN-debug] GET /users/:id --> ...` | **3 条装配记录**：`event=observability.host_ready` ×2 + `event=pulse.kernel.fiber_state` |
+| 每请求 | 1 行 `[GIN] 2026/09/13 - 22:58:12 \| 200 \| 0s \| 192.0.2.1 \| GET "/users/42"` | 1 行结构化记录（字段见上表） |
+
+两点观察：
+
+1. gin 那行是 **5 个字段**（时间 / 状态 / 耗时 / 客户端 / 方法+路径），没有 trace、没有路由模板、
+   没有错误分类；pulse-web 那行带 `trace_id` / `source` / `event` / `status` / `client.address` /
+   `http.request.method` / `http.route` / `url.path` / `http.response.body.size`（有错再加 `error.type`，
+   有时长就加 `duration_ms`）。
+2. pulse-web 默认 `SlogSink` 那行里 **`time=` 出现了两次**——slog 的 handler 自己打一个，上游
+   `SlogSink` 又把 `r.Time` 当 attr 输出一个。这是**上游的小 wart**（不是本仓库引入的），
+   要修得动 `pulse@observability/sink.go`。
+
 ## 两处已知的不对称，如实写在下面而不是抹平
 
 1. `pulse-web` 的 `Minimal()` 仍保留 Engine 的 panic 兜底，`gin.New()` 没有 Recovery。
