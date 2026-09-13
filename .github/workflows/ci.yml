@@ -24,6 +24,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+          # 默认只按根 go.sum 算缓存键。对比工程是独立 module，它的依赖
+          # （gin 及其传递依赖）不在根 go.sum 里——不列出来每跑一次都要重下。
+          cache-dependency-path: |
+            go.sum
+            loadtest/go.sum
 
       - name: Build
         run: go build ./...
@@ -68,3 +73,14 @@ jobs:
 
       - name: Bench compile check
         run: go test -run '^$' -bench '^$' ./bench/
+
+      # 对比工程（loadtest/）是独立 module——根 module 的 `./...` 覆盖不到它，
+      # 少了这一步它会悄悄腐烂（依赖过期、代码编不过都没人知道）。
+      # **只编译不跑压测**：CI 上的计时是噪声，跑出来的数字只会误导。
+      # 放在最后：这一步要下载 gin 及其传递依赖，最可能因为网络抖动失败，
+      # 别让它挡在前面的正式门禁之前。
+      - name: Loadtest module compile check
+        run: |
+          cd loadtest
+          go build ./...
+          go vet ./...

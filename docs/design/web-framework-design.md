@@ -129,6 +129,51 @@ g2.GET("/users", h, mw3)
 
 **回归门禁**：本表的**分配计数与 B/op** 已固化成断言（`bench/budget_test.go`，由 CI 的 `Alloc budget` 步骤执行，不带 `-race` 跑）。**ns 不设阈值**——跨轮会漂 2–4×，拿它做门禁等于把机器状态引进 CI；ns 对比仍走人工 benchstat，口径见表 A / 表 B 各自的说明。断言失败时按提示同步刷新常量与本表。
 
+### 表 C：与 gin 的真实负载对比（同一台机器，顺序跑）
+
+验收标准第 8 条的落地，工程在 `loadtest/`（独立 module，核心模块保持零第三方依赖）。
+
+**口径先行**——这类对比最容易变成「谁的数字好看谁赢」，所以先把口径钉死（完整版见 `loadtest/README.md`）：
+
+- 两侧**独立进程**，共用同一份 `http.ListenAndServe` bootstrap，**只让 handler 是变量**（不用 `gin.Run()` / `Engine.Run()`，免得把各自的默认 server 配置引进对比）
+- 同一格内两侧**相邻**跑，奇偶轮交换先后，**6 轮**；每格取 **RPS 中位那一轮**的整套分位；两侧比值取**逐轮配对比值的中位**
+- 路径 `GET /users/42` → 两侧同一份 JSON；压测器自写（固定并发、连接全复用、计时窗口内**每个**请求都进分位，不采样）
+- 机器：i9-14900HX / 32 逻辑核 / `GOMAXPROCS=32` / Go 1.27 / Windows amd64
+
+两个档位：`bare` = `gin.New()` ↔ `web.New(web.Minimal())`；`obs` = `gin.Default()` ↔ `web.New()`（把各家**自带**的观测也算进去，两边日志出口都指向空设备）。
+
+| 档位 | 并发 | pulse-web RPS | gin RPS | pulse/gin | pulse p99 | gin p99 |
+|---|---|---|---|---|---|---|
+| bare | 64 | 55952 | 58723 | **0.97x** | 4.93ms | 4.87ms |
+| bare | 256 | 61498 | 63196 | **0.96x** | 17.61ms | 22.01ms |
+| obs | 64 | 45709 | 55258 | 0.82x | 5.60ms | 5.24ms |
+| obs | 256 | 58482 | 64005 | 0.93x | 16.45ms | 21.76ms |
+
+**裸档同级**：0.96–0.97×，差 3–4%；并发 256 时 p99 反而更低（17.61ms vs 22.01ms）。**绝对值只做量级参考**——同一格换一次会话就能从 49k 变到 70k（±20%），所以本表只认同轮配对比值：与表 A / 表 B 的「ns 跨轮漂 2–4×」是同一条纪律。
+
+**观测档的钱花在哪**（`obs-nolog` 是 pulse-web 的**诊断档**：只开 Trace、关掉访问日志。它回答「钱花在哪」，不回答「谁快」）：
+
+| 并发 | bare | obs-nolog | obs | Trace 那截 | 访问日志那截 |
+|---|---|---|---|---|---|
+| 64 | 55952 | 53473 | 45709 | −2479 | **−7764** |
+| 256 | 61498 | 61953 | 58482 | +455 | **−3470** |
+
+- **TraceID 生成 + 记录组装基本免费**（c=256 上是 +455，落在噪声里）；代价集中在**访问日志那一截**——每请求一次格式化 + 一次经 `LineSink` 的串行写（出口已是空设备，磁盘已排除）。
+- 差距明显时的排查方向就落在这里：上游有 `observability.NewAsyncSink`，异步出口能不能把这截吃回去，是下一张票的事——**本票不顺手改框架**。
+- 别把这一档读成「等价功能的成本」：gin 的 `Logger` 只格式化一行文本，pulse-web 的访问日志是**结构化记录**（TraceID / 状态码 / 错误分类 / 耗时），给 gin 配上等价物要另装第三方中间件。这一档量的是「各家默认开箱配置」。
+
+**成本分解**（`loadtest/bench`，micro-benchmark，**不是胜负承诺**；口径与表 A / 表 B 不同，数字不要跨表相减）：
+
+| 档位 | ns/op | B/op | allocs/op |
+|---|---|---|---|
+| gin/bare | ~305 | 120 | 5 |
+| pulse/bare | ~600 | 825 | 11 |
+| gin/obs | ~1140 | 346 | 15 |
+| pulse/obs-nolog | ~842 | 889 | 14 |
+| pulse/obs | ~1428 | 1329 | 17 |
+
+微基准上 pulse-web 的裸路径约是 gin 的 2×（多 6 次分配，方向在每请求 scope 派生 / `Ctx` / 响应包装这几处，未逐项拆分），**但真实负载下只差 3–4%**：请求路径不是瓶颈，网络栈与调度才是。这正是「不以 micro-benchmark 胜负作承诺」的实证——拿这张表去说谁快，会得到一个与真实负载相反的印象。
+
 ## 设计红线
 
 1. 请求路径一律 `EmitLocal`，禁用全树 `Emit`（v0.2.1 实测 23ns vs 1778ns）
@@ -490,7 +535,8 @@ pulse-web/
 ├── templates.go               # html/template 薄封装 + web.H
 ├── debug.go                   # 装配诊断端点（FiberSnapshots 的 JSON 视图）
 ├── bench/                     # 性能回归基线（go test -bench . ./bench/）
-└── .github/workflows/ci.yml   # build / vet / test -race
+├── loadtest/                  # 与 gin 的真实负载对比（**独立 module**，见「表 C」）
+└── .github/workflows/ci.yml   # build / vet / gofmt / test -race / Alloc budget / loadtest 编译检查
 ```
 
 ## 验收标准
