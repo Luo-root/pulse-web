@@ -29,3 +29,13 @@ app.Run(":8080")                         // 内置优雅关闭：drain → OnShu
 ## 文档
 
 - [框架设计（v1）](docs/design/web-framework-design.md)——定位、决策、API 面、运行时契约、观测设计、明确不做清单
+
+## 开发
+
+CI 门禁（`.github/workflows/ci.yml`）：`go build` / `go vet` / **`gofmt -l` 判空** / `go test -race` / bench 编译检查。
+
+本地复现格式化门禁时，有三条会造成**假阳性**的坑，判据不要直接看输出：
+
+- **CRLF**：Windows 工作副本在 `core.autocrlf=true` 下是 CRLF，`gofmt -l` 会把**每个**文件都判成未格式化。判据是**转成 LF 副本后零差异**。
+- **未跟踪目录**：`gofmt -l .` 会连未跟踪目录一起扫（本仓库的 `_scratch/`）。用 CI 的同一条命令 `gofmt -l $(git ls-files '*.go')` 只查被跟踪的文件。
+- gofmt 要用**工具链自带**的（`$(go env GOROOT)/bin/gofmt`）：PATH 上可能是旧版，遇到泛型方法一类的新语法会报 `method must have no type parameters`，把每个文件都判成未格式化。

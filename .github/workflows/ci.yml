@@ -31,6 +31,31 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # 格式化门禁：只判失败，不自动修（自动修要 CI 有写权限并产生「CI 提交」，与「改动必须人审」冲突）。
+      # 用工具链自带的 gofmt——setup-go 已把 $(go env GOROOT)/bin 加进 PATH；PATH 上的旧版 gofmt
+      # 遇到较新语法（如泛型方法）会解析失败。
+      #
+      # stderr 必须并进 stdout：gofmt 解析失败时**只往 stderr 报错、stdout 为空**，只捕 stdout 的写法
+      # 会把「解析不了、于是根本没检查」静默判成通过（实测：干净树上 6 条解析错误、门禁 rc=0）。
+      #
+      # 本地复现：本命令只查被 git 跟踪的 .go 文件（`gofmt -l .` 会连未跟踪目录一起扫）。
+      # Windows 工作副本在 core.autocrlf=true 下是 CRLF，直接跑会把每个文件都判成未格式化——
+      # 判据是「转成 LF 副本后零差异」，不是直接看 gofmt -l 的输出。
+      - name: gofmt
+        run: |
+          files="$(git ls-files '*.go')"
+          if [ -z "$files" ]; then
+            # 空展开会让 gofmt 去读 stdin 挂住
+            echo "没有跟踪的 .go 文件，跳过"
+            exit 0
+          fi
+          out="$(gofmt -l $files 2>&1)"
+          if [ -n "$out" ]; then
+            echo "gofmt 报告问题（未格式化的文件，或解析错误）："
+            echo "$out"
+            exit 1
+          fi
+
       - name: Test (race)
         run: go test -race ./...
 
