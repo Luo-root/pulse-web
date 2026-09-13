@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/Luo-root/pulse/kernel"
 	web "github.com/Luo-root/pulse-web"
+	"github.com/Luo-root/pulse/kernel"
 )
 
 // nopWriter 避免 httptest.ResponseRecorder 的分配干扰测量。
@@ -32,7 +32,8 @@ func (w *nopWriter) WriteHeader(int)             {}
 //     之后每轮走不同路径）；
 //   - 结论优先看 **allocs/op 是否恒定**（噪声下比 ns 稳）。
 //
-// 对照组：BenchmarkRequestCycle_Collector_PluginTree*（每请求 Provide = O(插件树)）。
+// 对照组：BenchmarkRequestCycle_Collector_PluginTree*（v0.2.1 之前每请求
+// AttachCollector = O(插件树)；上游 #169 之后应与插件树规模解耦，留作对照）。
 // 采样建议：-count=3 起，观察离散度。
 func BenchmarkEngineRequestPath(b *testing.B) {
 	for _, n := range []int{0, 10, 50} {
@@ -54,6 +55,25 @@ func BenchmarkEngineRequestPath(b *testing.B) {
 				app.ServeHTTP(w, httptest.NewRequest("GET", "/ping", nil))
 			}
 		})
+	}
+}
+
+// BenchmarkEngineRequestPath_Collector 端到端对照：开启 WithCollector() 的
+// 请求路径。
+//
+// 与 BenchmarkEngineRequestPath 同口径，**必须同轮跑取差值**——设计文档与
+// `WithCollector` 的 godoc 发布的「每请求成本」落点就在这里，不要让读者自己
+// 去拿跨轮的两个数相减。
+func BenchmarkEngineRequestPath_Collector(b *testing.B) {
+	app := web.New(web.WithSink(nopSink{}), web.WithCollector())
+	app.GET("/ping", func(c *web.Ctx) error { return c.Text(http.StatusOK, "pong") })
+	b.Cleanup(func() { app.Root().Dispose() })
+
+	w := &nopWriter{}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		app.ServeHTTP(w, httptest.NewRequest("GET", "/ping", nil))
 	}
 }
 

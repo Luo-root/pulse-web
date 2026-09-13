@@ -179,7 +179,7 @@ func TestErrorMappingHTTPErrorStripsCause(t *testing.T) {
 
 type teapotError struct{}
 
-func (teapotError) Error() string  { return "i am a teapot" }
+func (teapotError) Error() string   { return "i am a teapot" }
 func (teapotError) StatusCode() int { return http.StatusTeapot }
 
 func TestErrorMappingStatusCoder(t *testing.T) {

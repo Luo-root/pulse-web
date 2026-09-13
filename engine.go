@@ -68,6 +68,7 @@ type config struct {
 	errorHandler     ErrorHandler
 	server           ServerConfig
 	templates        *TemplateConfig
+	collector        bool
 }
 
 func defaultConfig() config {
@@ -133,6 +134,47 @@ func Minimal() Option {
 	}
 }
 
+// WithCollector 每请求把 `observability.Collector` 装进请求作用域，让宿主交付
+// 请求 scope 的**库对象**能用 `kernel.Get(scope, observability.CollectorKey)`
+// 把记录写进本次请求的 TraceID。
+//
+// # 它服务的是「库作者」，不是「应用作者」
+//
+// 应用作者（自己的 controller / service / dao）把 `c` 或 `c.Observe` 往下传就够，
+// 不需要它。需要它的是那种「想同时活在 web 请求与 CLI / worker 里、因此不能
+// import pulse-web、只收 `*kernel.Context`」的包：
+//
+//	// reconcile 包：既被 web 请求调用，也被后台 worker 调用
+//	func Run(scope *kernel.Context, batch []Order) error {
+//		// 在 web 请求里跑：有 Collector → 记录挂到本次请求的 trace_id
+//		if col, ok := kernel.Get(scope, observability.CollectorKey); ok {
+//			col.WriteAttrs("reconcile.done", "ok", nil)
+//		}
+//		// 在 CLI / worker 里跑：没有 → 静默跳过（那边有自己的日志）
+//		return nil
+//	}
+//
+// **必须由宿主把请求 scope 显式传进去**。它不服务 kernel 插件：
+//
+//	请求 scope 自身       ✅      请求 scope 的后代    ✅
+//	宿主 root             ❌      插件私有 scope       ❌（与请求 scope 是兄弟）
+//	并发请求各自的 scope   ✅（互不遮蔽，各持自己的 TraceID）
+//
+// 插件的私有 scope 是 root 的另一个子节点，与请求 scope 同级，永远读不到；用
+// `kernel.Require(CollectorKey)` 声明依赖的插件会**静默**停在 inactive（探针
+// 实测：`Get` 返回 false、`Apply` 从未调用）。插件在请求路径上其实没有观测
+// 入口——连请求 scope 的 `EmitLocal` 也收不到（只派发本层），收得到的全树
+// `Emit` 比它慢 77 倍、是请求路径禁用的。已上报上游（pulse#189）。
+//
+// 成本（实测，表 B 口径）：约 **+385 ns / +12 allocs 每请求**（端到端；kernel 层
+// `AttachCollector` 相对基线 +270 ns / +12 allocs），且与插件树规模解耦
+// （100 插件下 407 ns）。默认关。
+//
+// 无 Sink 时装配期 panic——`Minimal()` 且未 `WithSink` 就是这个组合。
+func WithCollector() Option {
+	return func(cfg *config) { cfg.collector = true }
+}
+
 func mergeServer(base, over ServerConfig) ServerConfig {
 	out := base
 	if over.ReadHeaderTimeout != 0 {
@@ -173,6 +215,7 @@ type Engine struct {
 	server           ServerConfig
 	errorHandler     ErrorHandler
 	templates        *templateSet
+	collector        bool
 
 	prefix string
 	mw     []Middleware
@@ -212,6 +255,12 @@ func New(opts ...Option) *Engine {
 		handler = defaultErrorHandler
 	}
 
+	// 装配期暴露错误：WithCollector 每请求要往作用域里装 Collector，
+	// 没有出口时它是空转——而 Minimal() 且未 WithSink 正是 sink == nil 的组合。
+	if cfg.collector && sink == nil {
+		panic("web: WithCollector requires a Sink (got Minimal() without WithSink)")
+	}
+
 	e := &Engine{
 		kernel:           root,
 		mux:              http.NewServeMux(),
@@ -223,6 +272,7 @@ func New(opts ...Option) *Engine {
 		traceHeader:      cfg.traceHeader,
 		server:           cfg.server,
 		errorHandler:     handler,
+		collector:        cfg.collector,
 		life:             &lifecycle{},
 	}
 
@@ -384,6 +434,20 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if e.traceHeader != "" {
 			rw.Header().Set(e.traceHeader, c.traceID)
+		}
+	}
+
+	// 请求级 Collector：作用域局部绑定（上游 kernel.Local()），装完即随
+	// scope.Dispose 撤除——并发请求各持自己的实例，互不串台。
+	if e.collector {
+		if _, err := observability.AttachCollector(scope, observability.ObserveConfig{
+			Sink:    e.sink,
+			HostID:  e.hostID,
+			TraceID: c.traceID,
+		}); err != nil {
+			// 装配期已校验 Sink 非 nil，scope 也是刚派生出来的活作用域，
+			// 走到这里说明状态与预期不符——记一条而不是静默。
+			slog.Warn("pulse.web: attach collector failed", "err", err.Error(), "trace_id", c.traceID)
 		}
 	}
 
@@ -603,15 +667,39 @@ func (e *Engine) shutdown(srv *http.Server) error {
 	// ④ 终局：级联回收全部 kernel 资源
 	e.dispose()
 
-	// ⑤ Sink flush（若出口实现了 Flusher；独立预算，见 sinkFlushTimeout）
-	if f, ok := e.sink.(interface {
-		Flush(context.Context) error
-	}); ok {
+	// ⑤ Sink flush（独立预算，见 sinkFlushTimeout）
+	if flush, ok := sinkFlusher(e.sink); ok {
 		flushCtx, cancel := context.WithTimeout(context.Background(), sinkFlushTimeout)
 		defer cancel()
-		_ = f.Flush(flushCtx)
+		if err := flush(flushCtx); err != nil {
+			// 与 ③ 的 OnShutdown 错误同样处理：不静默吞，但也不让关闭失败。
+			slog.Warn("pulse.web: sink flush", "err", err.Error())
+		}
 	}
 	return nil
+}
+
+// sinkFlusher 归一出口的 flush 形态。
+//
+// 上游有两种出口形态：带 ctx 的（observability.AsyncSink）与不带的
+// （observability.LineSink）。只认其中一种会**静默跳过**另一种——
+// LineSink 形态下「关闭前未达阈值的最后一批」会随进程消失，而
+// `WithSink(observability.NewLineSink(...))` 正是最自然的行式输出用法：
+// 不报错、不告警，只是丢日志。
+//
+// 不带 ctx 的形态无法兑现截止时间（内部只有一次 Write），闭包忽略 ctx。
+//
+// 另注：AsyncSink.Flush 只排空**它自己的**队列，不级联 inner 的 Flush——
+// 异步化的正确组合是 `NewAsyncSink(SlogSink)`；用 AsyncSink 包另一个缓冲
+// 出口（如 LineSink）会留下未落盘的内层缓冲，框架无从代劳。
+func sinkFlusher(sink observability.Sink) (func(context.Context) error, bool) {
+	switch f := sink.(type) {
+	case interface{ Flush(context.Context) error }:
+		return f.Flush, true
+	case interface{ Flush() error }:
+		return func(context.Context) error { return f.Flush() }, true
+	}
+	return nil, false
 }
 
 func (e *Engine) dispose() {
