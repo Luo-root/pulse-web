@@ -88,7 +88,13 @@ func (c *Ctx) Service[T any](k kernel.ServiceKey[T]) (T, bool) {
 
 // MustService 读取全局服务，缺失即 panic —— 缺失属装配错误，应在启动期暴露。
 func (c *Ctx) MustService[T any](k kernel.ServiceKey[T]) T {
-	v, ok := kernel.Get(c.scope, k)
+	return mustService(c.scope, k)
+}
+
+// mustService 是 Ctx.MustService 与 Detached.MustService 的共用实现：
+// 两者只在「从哪个 scope 读」上不同，panic 文案是一条语义，不该有两份。
+func mustService[T any](scope *kernel.Context, k kernel.ServiceKey[T]) T {
+	v, ok := kernel.Get(scope, k)
 	if !ok {
 		panic("web: service not provided: " + k.Name())
 	}
@@ -98,22 +104,9 @@ func (c *Ctx) MustService[T any](k kernel.ServiceKey[T]) T {
 // ---- 观测打点 ----
 
 // Observe 直写一条业务记录到 Sink —— 不经 scope、零广播，与请求共享 TraceID。
-// 与 observability.Collector 直写面同构（等价于其在 status 为空时的行为）。
+// 实现见 writeObservation（与 Detached.Observe 共用）。
 func (c *Ctx) Observe(event string, set func(*observability.Attrs)) {
-	e := c.engine
-	if e.sink == nil {
-		return
-	}
-	rec := observability.Record{
-		HostID:  e.hostID,
-		TraceID: c.traceID,
-		Source:  observability.SourceAdapter,
-		Event:   event,
-	}
-	if set != nil {
-		set(&rec.Attrs)
-	}
-	e.sink.Write(rec)
+	writeObservation(c.engine.sink, c.engine.hostID, c.traceID, event, set)
 }
 
 // ---- 响应写出 ----

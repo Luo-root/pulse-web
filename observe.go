@@ -7,7 +7,32 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/Luo-root/pulse/observability"
 )
+
+// writeObservation 是 Ctx.Observe 与 Detached.Observe 的共用实现。
+//
+// 它直写 Sink、不经 scope —— 信封填充与 observability.Collector 的 write 同构，
+// 区别是本框架**不注册 Collector**（那会触发 O(插件树) 的服务变更广播，见
+// pulse#168），因此这里不带 Collector 的 status 参数：web 场景的状态语义走
+// Record.Status 或 Attrs。若上游补了「只构造、不 Provide」的 NewCollector，
+// 本函数可直接切换过去。
+func writeObservation(sink observability.Sink, hostID, traceID, event string, set func(*observability.Attrs)) {
+	if sink == nil {
+		return
+	}
+	rec := observability.Record{
+		HostID:  hostID,
+		TraceID: traceID,
+		Source:  observability.SourceAdapter,
+		Event:   event,
+	}
+	if set != nil {
+		set(&rec.Attrs)
+	}
+	sink.Write(rec)
+}
 
 // generateTraceID 生成 32hex 的 W3C 兼容 trace-id。
 //
