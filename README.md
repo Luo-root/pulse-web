@@ -34,8 +34,20 @@ app.Run(":8080")                         // 内置优雅关闭：drain → OnShu
 
 CI 门禁（`.github/workflows/ci.yml`）：`go build` / `go vet` / **`gofmt -l` 判空** / `go test -race` / bench 编译检查。
 
-本地复现格式化门禁时，有三条会造成**假阳性**的坑，判据不要直接看输出：
+本地复现格式化门禁时，有**三条会造成假阳性的坑**，判据不要直接看输出：
 
 - **CRLF**：Windows 工作副本在 `core.autocrlf=true` 下是 CRLF，`gofmt -l` 会把**每个**文件都判成未格式化。判据是**转成 LF 副本后零差异**。
-- **未跟踪目录**：`gofmt -l .` 会连未跟踪目录一起扫（本仓库的 `_scratch/`）。用 CI 的同一条命令 `gofmt -l $(git ls-files '*.go')` 只查被跟踪的文件。
-- gofmt 要用**工具链自带**的（`$(go env GOROOT)/bin/gofmt`）：PATH 上可能是旧版，遇到泛型方法一类的新语法会报 `method must have no type parameters`，把每个文件都判成未格式化。
+- **未跟踪目录**：`gofmt -l .` 会连未跟踪目录一起扫（例如 `_scratch/`）。只查已跟踪文件，用 `git ls-files '*.go'`。
+- **gofmt 版本**：PATH 上可能是旧版，解析不了泛型方法一类的新语法，表现同样是**全量**报错。用工具链自带的那个。
+
+与 CI 一致的命令（CI 用的就是 Linux 那条）：
+
+```bash
+# Linux（= CI）
+"$(go env GOROOT)/bin/gofmt" -l $(git ls-files '*.go')
+```
+
+```powershell
+# Windows PowerShell —— 这里 `go env GOROOT` 返回 `C:\...`，bash 起不来，所以给 PowerShell 形态
+& (Join-Path (go env GOROOT) 'bin\gofmt.exe') -l (git ls-files '*.go')
+```
