@@ -88,7 +88,13 @@ func (c *Ctx) Service[T any](k kernel.ServiceKey[T]) (T, bool) {
 
 // MustService 读取全局服务，缺失即 panic —— 缺失属装配错误，应在启动期暴露。
 func (c *Ctx) MustService[T any](k kernel.ServiceKey[T]) T {
-	v, ok := kernel.Get(c.scope, k)
+	return mustService(c.scope, k)
+}
+
+// mustService 是 Ctx.MustService 与 Detached.MustService 的共用实现：
+// 两者只在「从哪个 scope 读」上不同，panic 文案是一条语义，不该有两份。
+func mustService[T any](scope *kernel.Context, k kernel.ServiceKey[T]) T {
+	v, ok := kernel.Get(scope, k)
 	if !ok {
 		panic("web: service not provided: " + k.Name())
 	}

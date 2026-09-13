@@ -43,9 +43,5 @@ func (d Detached) Service[T any](k kernel.ServiceKey[T]) (T, bool) {
 
 // MustService 读取全局服务，缺失即 panic（属装配错误）。
 func (d Detached) MustService[T any](k kernel.ServiceKey[T]) T {
-	v, ok := kernel.Get(d.Root, k)
-	if !ok {
-		panic("web: service not provided: " + k.Name())
-	}
-	return v
+	return mustService(d.Root, k)
 }
