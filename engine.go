@@ -134,17 +134,37 @@ func Minimal() Option {
 	}
 }
 
-// WithCollector 每请求把 `observability.Collector` 装进请求作用域，供
-// **被交付请求 scope 的组件**用 `kernel.Get(scope, observability.CollectorKey)` 打点。
+// WithCollector 每请求把 `observability.Collector` 装进请求作用域，让宿主交付
+// 请求 scope 的**库对象**能用 `kernel.Get(scope, observability.CollectorKey)`
+// 把记录写进本次请求的 TraceID。
 //
-// 可见性边界（上游 v0.2.1 起改用 `kernel.Local()` 作用域局部绑定，实测）：
+// # 它服务的是「库作者」，不是「应用作者」
+//
+// 应用作者（自己的 controller / service / dao）把 `c` 或 `c.Observe` 往下传就够，
+// 不需要它。需要它的是那种「想同时活在 web 请求与 CLI / worker 里、因此不能
+// import pulse-web、只收 `*kernel.Context`」的包：
+//
+//	// reconcile 包：既被 web 请求调用，也被后台 worker 调用
+//	func Run(scope *kernel.Context, batch []Order) error {
+//		// 在 web 请求里跑：有 Collector → 记录挂到本次请求的 trace_id
+//		if col, ok := kernel.Get(scope, observability.CollectorKey); ok {
+//			col.WriteAttrs("reconcile.done", "ok", nil)
+//		}
+//		// 在 CLI / worker 里跑：没有 → 静默跳过（那边有自己的日志）
+//		return nil
+//	}
+//
+// **必须由宿主把请求 scope 显式传进去**。它不服务 kernel 插件：
 //
 //	请求 scope 自身       ✅      请求 scope 的后代    ✅
 //	宿主 root             ❌      插件私有 scope       ❌（与请求 scope 是兄弟）
 //	并发请求各自的 scope   ✅（互不遮蔽，各持自己的 TraceID）
 //
-// 因此它服务的是「拿到 `c.Kernel()` 的组件」，**不是**「自行 lookup 的插件」——
-// 插件的私有 scope 是 root 的另一个子节点，与请求 scope 同级，永远读不到。
+// 插件的私有 scope 是 root 的另一个子节点，与请求 scope 同级，永远读不到；用
+// `kernel.Require(CollectorKey)` 声明依赖的插件会**静默**停在 inactive（探针
+// 实测：`Get` 返回 false、`Apply` 从未调用）。插件在请求路径上其实没有观测
+// 入口——连请求 scope 的 `EmitLocal` 也收不到（只派发本层），收得到的全树
+// `Emit` 比它慢 77 倍、是请求路径禁用的。已上报上游（pulse#189）。
 //
 // 成本（实测，表 B 口径）：约 **+385 ns / +12 allocs 每请求**（端到端；kernel 层
 // `AttachCollector` 相对基线 +270 ns / +12 allocs），且与插件树规模解耦

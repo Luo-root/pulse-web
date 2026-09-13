@@ -390,7 +390,9 @@ app.POST("/jobs", func(c *web.Ctx) error {
 
 **`WithSink` 只换出口，不复活 Trace / AccessLog**——要观测就别用 `Minimal()`（或自己 `app.Use(web.Trace())`）。
 
-`WithCollector()` 每请求把 `observability.Collector` 装进请求作用域（上游 v0.2.1 起是 `kernel.Local()` 作用域局部绑定；实测 **+385 ns / +12 allocs 每请求**，**与插件树规模无关**——口径见表 B）。**它服务的是"被交付请求 scope 的组件"，不是"自行 lookup 的插件"**——见下方边界表。无 Sink 时装配期 panic（`Minimal()` 且未 `WithSink` 即此组合）。
+`WithCollector()` 每请求把 `observability.Collector` 装进请求作用域（上游 v0.2.1 起是 `kernel.Local()` 作用域局部绑定；实测 **+385 ns / +12 allocs 每请求**，**与插件树规模无关**——口径见表 B）。
+
+**它服务的是「库作者」，不是「应用作者」**：应用作者（自己的 controller / service / dao）把 `c` 或 `c.Observe` 往下传就够；需要它的是那种「想同时活在 web 请求与 CLI / worker 里、因此不能 import pulse-web、只收 `*kernel.Context`」的库对象——**且必须由宿主把请求 scope 显式传进去**。边界见下方两处。无 Sink 时装配期 panic（`Minimal()` 且未 `WithSink` 即此组合）。
 
 `WithoutAccessLog()` 关闭访问日志（用户已接自己的日志系统时用）——只关 AccessLog，`Trace` 与 panic 兜底不受影响。
 
@@ -401,10 +403,10 @@ v1 选项面：`New()` / `Minimal()` / `WithSink` / `WithoutAccessLog` / `WithRo
 | 场景 | 实现 |
 |---|---|
 | 请求内业务打点 | `Ctx.Observe` **直写 Sink**（`writeObservation`，信封填充与 `Collector.write` 同构）——不注册 Collector，因此零 scope 开销 |
-| 被交付请求 scope 的组件 | `WithCollector()` → `observability.AttachCollector`（作用域局部绑定，随 scope 销毁撤除） |
+| 宿主交付请求 scope 的库对象 | `WithCollector()` → `observability.AttachCollector`（作用域局部绑定，随 scope 销毁撤除）；**插件拿不到这条路**，理由见下 |
 | AccessLog / panic | 宿主**直写 `observability.Record`**——需要 `Duration` / `Err`，而 Collector 明确不带这两项（`collector.go:76` 注释：状态型事实） |
 
-**`WithCollector()` 的可见性边界**（实测，五条；这也是"为什么不给插件用"的答案）：
+**`WithCollector()` 的可见性边界**（实测，五条）：
 
 | 读方 | 读得到 |
 |---|---|
@@ -413,6 +415,10 @@ v1 选项面：`New()` / `Minimal()` / `WithSink` / `WithoutAccessLog` / `WithRo
 | 宿主 root | ❌ |
 | 插件私有 scope（与请求 scope 是**兄弟**） | ❌ |
 | 并发请求各自的 scope | ✅（互不遮蔽，各持自己的 TraceID） |
+
+**同一形状还堵死了插件的另一条路**：插件在自己 scope 上 `kernel.On` 注册的监听器**收不到**请求 scope 的 `EmitLocal`（只派发本层）；插件收得到的是全树 `Emit`，而它比 `EmitLocal` 慢 **77 倍**（1778 ns vs 23 ns，50 插件树同轮实测），是红线 1 明令禁用的。
+
+**所以：kernel 插件在请求路径上没有观测入口。** 这不是缺陷——局部绑定兄弟不可见是上游 `#170` 的有意修复（避免并发串台），`EmitLocal` 只派发本层是它的定义；但两者叠加的结果此前无人文档化，读者要自己画作用域树才能推出来。已上报上游 [pulse#189](https://github.com/Luo-root/pulse/issues/189)。宿主若要插件参与请求级观测，只能**把请求 scope 显式交付给它**（换掉插件自取的那种写法）。
 
 **不存在自定义的 Observe 协议**——`c.Observe` / `Detached.Observe` 都是 `Collector.write` 的薄包装。
 
