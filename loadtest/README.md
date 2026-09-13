@@ -107,6 +107,18 @@ observability.SlogSink{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
    `SlogSink` 又把 `r.Time` 当 attr 输出一个。这是**上游的小 wart**（不是本仓库引入的），
    要修得动 `pulse@observability/sink.go`。
 
+失败路径（`TestFailureOutput`：`/boom` 返回 500、`/panic` 直接 panic）：
+
+| | gin（Logger + Recovery） | pulse-web（默认装配） |
+|---|---|---|
+| 每请求行 | `[GIN] … \| 500 \| 585.1µs \| 192.0.2.1 \| GET "/boom"` | `status=500 error="boom: Internal Server Error" … error.type=http_5xx` |
+| panic 那行 | `[GIN] … \| 500 \| 7.62ms \| …`（Recovery 接了并回写 500） | `status=500 error="panic: kaboom" … error.type=panic` |
+| panic 的额外输出 | 往 `DefaultErrorWriter` 打一份 `[Recovery] … panic recovered:` **带栈帧** | 无——栈进 `PanicError.Stack`，而默认出口只输出 `error=` 的字符串 |
+
+> 最后一行是个值得单独讨论的点：设计文档写的是「栈只进记录」，但默认出口（`SlogSink`）
+> 只渲染 `Err.Error()`，于是**默认配置下 panic 的栈到不了任何地方**——要诊断得换自写出口
+> 或直接从 `PanicError` 取。本票只记录，不改框架行为。
+
 ## 两处已知的不对称，如实写在下面而不是抹平
 
 1. `pulse-web` 的 `Minimal()` 仍保留 Engine 的 panic 兜底，`gin.New()` 没有 Recovery。

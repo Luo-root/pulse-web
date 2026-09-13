@@ -5,8 +5,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	web "github.com/Luo-root/pulse-web"
 	"github.com/Luo-root/pulse-web/loadtest/pulseapp"
 	"github.com/Luo-root/pulse/observability"
 	"github.com/gin-gonic/gin"
@@ -57,4 +59,78 @@ func countLines(s string) int {
 		}
 	}
 	return n
+}
+
+// TestFailureOutput 量失败路径：200 之外那两种（业务 500 / panic）两边各吐什么。
+//
+// 这是「gin 是不是会打 200/500 那种日志」这个问题的正面回答——会，两边都会，
+// 差别在**同一行里还带了什么**：pulse-web 多一个 `error.type`（`http_5xx` / `panic`，
+// 低基数、可直接聚合），gin 只有状态码本身。
+func TestFailureOutput(t *testing.T) {
+	w := func() *nopWriter { return &nopWriter{h: map[string][]string{}} }
+	req := func(path string) *http.Request { return httptest.NewRequest(http.MethodGet, path, nil) }
+
+	// ---- gin：Logger + Recovery（默认组合）----
+	var ginOut bytes.Buffer
+	gin.DefaultWriter = &ginOut
+	gin.DefaultErrorWriter = &ginOut
+	gin.SetMode(gin.DebugMode) // 开箱形态
+	defer gin.SetMode(gin.ReleaseMode)
+
+	engine := gin.New()
+	engine.Use(gin.Logger(), gin.Recovery())
+	engine.GET("/boom", func(c *gin.Context) { c.JSON(http.StatusInternalServerError, gin.H{"error": "boom"}) })
+	engine.GET("/panic", func(c *gin.Context) { panic("kaboom") })
+
+	engine.ServeHTTP(w(), req("/boom"))
+	engine.ServeHTTP(w(), req("/panic"))
+
+	if got := strings.Count(ginOut.String(), "| 500 |"); got != 2 {
+		t.Errorf("gin: 输出里带 500 的行有 %d 条，期望 2（业务 500 + panic 兜底）", got)
+	}
+	stacked := strings.Count(ginOut.String(), ".go:")
+	t.Logf("gin 请求行：\n%s", filterLines(ginOut.String(), "[GIN] "))
+	t.Logf("gin panic 还会往 DefaultErrorWriter 打一份 [Recovery] 转储（含 %d 个栈帧）：%v",
+		stacked, strings.Contains(ginOut.String(), "[Recovery]"))
+
+	// ---- pulse-web：默认装配 + 默认出口形态 ----
+	var webOut bytes.Buffer
+	sink := observability.SlogSink{Logger: slog.New(slog.NewTextHandler(&webOut, nil))}
+	app := web.New(web.WithSink(sink))
+	app.GET("/boom", func(c *web.Ctx) error { return web.Internal("boom", nil) })
+	app.GET("/panic", func(c *web.Ctx) error { panic("kaboom") })
+
+	app.ServeHTTP(w(), req("/boom"))
+	app.ServeHTTP(w(), req("/panic"))
+
+	if got := strings.Count(webOut.String(), "status=500"); got != 2 {
+		t.Errorf("pulse-web: status=500 的记录有 %d 条，期望 2", got)
+	}
+	for _, want := range []string{"error.type=http_5xx", "error.type=panic"} {
+		if !strings.Contains(webOut.String(), want) {
+			t.Errorf("pulse-web: 输出里没有 %s", want)
+		}
+	}
+	t.Logf("pulse-web 请求行：\n%s", filterLines(webOut.String(), "event=http.request"))
+	t.Logf("pulse-web panic 打 [Recovery] 转储：%v——栈进的是 `PanicError.Stack`，而默认出口只输出 error 的字符串",
+		strings.Contains(webOut.String(), "[Recovery]"))
+}
+
+// filterLines 只留含 substr 的行，给日志用。
+func filterLines(s, substr string) string {
+	var out []string
+	for _, l := range strings.Split(s, "\n") {
+		if strings.Contains(l, substr) {
+			out = append(out, l)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+func firstLines(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) > n {
+		lines = lines[:n]
+	}
+	return strings.Join(lines, "\n")
 }
