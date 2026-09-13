@@ -146,8 +146,9 @@ func Minimal() Option {
 // 因此它服务的是「拿到 `c.Kernel()` 的组件」，**不是**「自行 lookup 的插件」——
 // 插件的私有 scope 是 root 的另一个子节点，与请求 scope 同级，永远读不到。
 //
-// 成本（实测，v0.2.1）：约 +227ns / +12 allocs 每请求，且与插件树规模解耦
-// （100 插件下 394ns）。默认关。
+// 成本（实测，表 B 口径）：约 **+385 ns / +12 allocs 每请求**（端到端；kernel 层
+// `AttachCollector` 相对基线 +270 ns / +12 allocs），且与插件树规模解耦
+// （100 插件下 407 ns）。默认关。
 //
 // 无 Sink 时装配期 panic——`Minimal()` 且未 `WithSink` 就是这个组合。
 func WithCollector() Option {

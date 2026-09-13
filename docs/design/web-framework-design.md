@@ -2,6 +2,8 @@
 
 > 完整设计文档（v1）。设计票与评审记录见 [Issue #1](https://github.com/Luo-root/pulse-web/issues/1)。
 > 包名 `web`，模块 `github.com/Luo-root/pulse-web`——不与 pulse 根包（`package pulse`）冲突。
+>
+> **引用口径**：本文中 `包/文件.go:NNN` 形式的行号引用针对 **pulse v0.2.2**。上游一个 patch 版本就可能让行号整体位移（v0.2.1 → v0.2.2 就让 `observability/collector.go` 位移了 11 行），所以**升依赖时必须整体复核**——用 `git grep -n '\.go:[0-9]'` 取出全部引用，逐个按符号在新版本里重新定位，不要只看 diff 触及的那几条。
 
 ## 一句话
 
@@ -56,7 +58,7 @@
 | API 风格 | echo 式：`func(*Ctx) error` + 集中错误映射 + stdlib 双向兼容 | 与 pulse「不静默吞错」同构、DI 类型安全、可测 |
 | 路由 | stdlib `ServeMux`（Go 1.22+ 模式） | 零依赖、190ns/匹配；**不抽 router 接口**（YAGNI，要换时再抽） |
 | HTTP 中间件 | 闭包组合 | **不用** kernel `Waterfall`——那是事件 around 链，不是 HTTP 洋葱 |
-| kernel 作用 | 每请求派生 scope（v0.2.1 实测 74 ns / 2 allocs）；**请求级数据不占全局仓库** | v0.2.1 `#169` 后服务变更按依赖名索引投递（不再 O(插件树)）；请求级值走 `kernel.Local()` 作用域局部绑定 |
+| kernel 作用 | 每请求派生 scope（实测 84 ns / 2 allocs，表 B）；**请求级数据不占全局仓库** | v0.2.1 `#169` 后服务变更按依赖名索引投递（不再 O(插件树)）；请求级值走 `kernel.Local()` 作用域局部绑定 |
 | 依赖方向 | `pulse-web → pulse` 单向 | pulse 永不反向引用 |
 
 ### 路由选型的边界（实测，Go 1.27）
@@ -81,14 +83,18 @@ g2.GET("/users", h, mw3)
 
 中间件在注册期闭包组合（运行期零额外开销）；冲突 panic 包装为带分组上下文的信息（`g1(/api) → g2(/v1)`）。
 
-## 实测数据（2026-09-13，i9-14900HX，`-benchtime=3000x -count=3` 取中位）
+## 实测数据（2026-09-13，i9-14900HX）
 
-同机同轮对照 pulse **v0.2.0 → v0.2.1**：
+### 表 A：v0.2.0 → v0.2.1 升级对照（**历史，两轮各跑**）
+
+口径 `-benchtime=3000x -count=3` 取中位。**这是跨轮对照**——对照层（stdlib 路由，与任何改动完全无关）自己涨了 9%，说明第二轮机器状态偏慢，所以 ns 降幅是保守估计；**跨运行稳定的硬证据是 alloc 计数**。
+
+> 本表的绝对值与表 B **不可比**（口径不同，同一个 benchmark 会差 10~20%）。它只回答「升级买到了什么」。
 
 | 场景 | v0.2.0 | v0.2.1 | Δ |
 |---|---|---|---|
-| stdlib ServeMux 路由匹配（**对照层**，未被任何改动触及） | 173.6 ns / 5 allocs | 188.8 ns / 5 allocs | +9% |
-| scope 派生 + 销毁 | 119.3 ns / 5 allocs | 74.4 ns / **2** allocs | −38%，allocs −60% |
+| stdlib ServeMux 路由匹配（**对照层**） | 173.6 ns / 5 allocs | 188.8 ns / 5 allocs | +9% |
+| scope 派生 + 销毁 | 119.3 ns / 5 allocs | 74.4 ns / **2** allocs | allocs −60% |
 | 请求级事件 `EmitLocal` | 27.5 ns / 2 allocs | 23.2 ns / **1** alloc | allocs −50% |
 | 全树事件 `Emit`（50 插件） | 2079 ns / 60 allocs | 1778 ns / **9** allocs | allocs −85% |
 | kernel 服务读取 `Get` | 11.83 ns | 13.13 ns | **+11%**（`Get` 现在先走一遍局部绑定链） |
@@ -98,14 +104,33 @@ g2.GET("/users", h, mw3)
 | Engine 请求路径 `New()` | 2008 ns / 26 allocs | 1961 ns / 22 allocs | allocs −15% |
 | Engine 请求路径 `Minimal()` | 1382 ns / 20 allocs | 1476 ns / 17 allocs | allocs −15% |
 
-**口径**：`-count=3` 取中位。对照层（stdlib 路由，**与本次改动完全无关**）自己涨了 9%，说明第二轮机器状态偏慢——所以上表的 ns 降幅是**保守估计**，跨运行稳定的硬证据是 **alloc 计数**。唯一的真实回退是 `Get` **+11%**：局部绑定的链上查找给全局读取加了一层（本层 miss 才回全局仓库）。
-
 **结论**：v0.2.1（`#169`）把服务变更从「全树广播」改成「按依赖名索引投递」，每请求 Provide 的成本**与插件树规模彻底解耦**（100 插件 4946 → 394 ns）。这正是红线 2 的原始依据——依据消失，红线按新语义重写。请求级数据改用 `kernel.Local()`（作用域局部绑定：不写全局仓库、不投递变更、随作用域销毁撤除），而不是把全局 `Provide` 当请求级容器。
+
+### 表 B：当前版本的成本分解（**同轮同口径**，`-benchtime=20000x -count=5`）
+
+**凡要相减得出 Δ 的，必须取本表内的两行。** 跨轮相减会得到倒挂的结论——本项目踩过一次：拿跨轮的「裸 `Local` 绑定」（325 ns）与「`AttachCollector`」（227 ns）相减，写出「后者更便宜」，而后者 = 前者 + 1 个 Collector 结构，逻辑上不可能。
+
+| 场景 | ns/op | allocs | B/op |
+|---|---|---|---|
+| `Derive + Dispose`（基线） | 84.3 | **2** | 192 |
+| + 裸 `kernel.Local()` 绑定 | 337.2 | 14 | 649 |
+| + `observability.AttachCollector` | 353.9 | 14 | 681 |
+| 同上 · 10 / 50 / 100 插件树 | 338 / 366 / 407 | 14 | 681 |
+| 同上 · 50 插件并行 | 565 | 14 | 681 |
+| Engine 请求路径（`New()`） | 1790 | 22 | 6314 |
+| Engine 请求路径 + `WithCollector()` | 2175 | **34** | 6803 |
+
+由表内两行推出的 Δ：
+
+- **`WithCollector()` 的每请求成本** = 2175 − 1790 = **+385 ns / +12 allocs**（端到端）
+- **kernel 层 `AttachCollector` 相对基线** = 353.9 − 84.3 = **+270 ns / +12 allocs**
+- **包含关系自检（防倒挂）**：`AttachCollector` = 裸绑定 + 1 个 Collector 结构，实测 ns 与 B/op 都严格更大（353.9 > 337.2、681 B > 649 B）。两者 allocs 同为 14——**alloc 单值区分不了这两者**（一次局部绑定写入本身就占十来个分配），判包含关系要看 B/op 与 ns。
+- **与插件树规模解耦**：10 / 50 / 100 插件 338 / 366 / 407 ns，allocs 恒为 14。
 
 ## 设计红线
 
 1. 请求路径一律 `EmitLocal`，禁用全树 `Emit`（v0.2.1 实测 23ns vs 1778ns）
-2. **请求级数据用 `kernel.Local()`，不写全局 `Provide`**——全局命名空间是**装配面**，请求级值写进去会被并发请求互相覆盖。`WithCollector()` 显式开启后才在请求路径上出现局部绑定（实测 +227ns / +12 allocs，与插件树规模无关）
+2. **请求级数据用 `kernel.Local()`，不写全局 `Provide`**——全局命名空间是**装配面**，请求级值写进去会被并发请求互相覆盖。`WithCollector()` 显式开启后才在请求路径上出现局部绑定（实测 +385 ns / +12 allocs 每请求，与插件树规模无关；口径见表 B）
 3. 请求 scope 与"响应是否送达网络"解耦：**`Dispose` 在写响应之前**
 4. `Ctx` 不可跨 goroutine；后台任务用 `Detach`（值 + 进程级 root）
 
@@ -183,7 +208,7 @@ func (c *Ctx) Flush() error              // 流式
 
 **关系澄清**：kernel **v0.2.1 起存在** scope 局部服务——`kernel.Provide(scope, key, v, kernel.Local())`：绑定存本层，**本 scope 及其后代**可读（`Get` 沿父链近因优先），父 / 兄弟不可读，随作用域销毁撤除；它**不投递服务变更、不参与 fiber 依赖解析**。所以 `c.Service(key)` ≡ `kernel.Get(c.Kernel(), key)`，会先走局部链再回全局仓库。
 
-但**请求级 KV 仍由框架自有 map 承担**，不改用 `Local()`：`Local()` 每条绑定实测 **+325 ns / +12 allocs**（COW map 重建 ×2 + binding + Effect 登记；`Derive + Local Provide + Dispose` = 399 ns / 14 allocs，裸 `Derive + Dispose` = 74 ns / 2 allocs），而 `Ctx.Set/Get` 只是已分配 map 上的一次 store——两条 KV 若走 Local 会吃掉当前请求路径（~1960 ns）的 36%。`Local()` 的定位是「少量**语义性**绑定」（如 Collector），不是通用容器。
+但**请求级 KV 仍由框架自有 map 承担**，不改用 `Local()`：`Local()` 每条绑定实测 ≈ **+250 ns / +12 allocs**（kernel 层同轮对照：`Derive + Dispose` 84 ns → 挂一条绑定 337 ns，见表 B），而 `Ctx.Set/Get` 只是已分配 map 上的一次 store。`Local()` 的定位是「少量**语义性**绑定」（如 Collector），不是通用容器。
 
 **`observability.Set` 的类型约束**：`Set[T AttrValue]` 只接受 `~string | ~int64 | ~float64 | ~bool`——`u.ID` 若是 `int` 或 UUID 类型需显式转换（`int64(u.ID)` 或 `u.ID.String()`）。
 
@@ -333,7 +358,7 @@ app.POST("/jobs", func(c *web.Ctx) error {
 
 ### 优雅关闭时序
 
-**kernel 的 `Context.Dispose()` 是级联截断，不是 drain**——递归销毁所有子 scope、静默 `forceUnload` 所有 fiber（`kernel/context.go:180-227`），**不等待在途工作**。drain 必须由 `net/http` 承担：
+**kernel 的 `Context.Dispose()` 是级联截断，不是 drain**——递归销毁所有子 scope、静默 `forceUnload` 所有 fiber（`kernel/context.go:191-253`），**不等待在途工作**。drain 必须由 `net/http` 承担：
 
 ```
 信号（SIGINT / SIGTERM）
@@ -365,7 +390,7 @@ app.POST("/jobs", func(c *web.Ctx) error {
 
 **`WithSink` 只换出口，不复活 Trace / AccessLog**——要观测就别用 `Minimal()`（或自己 `app.Use(web.Trace())`）。
 
-`WithCollector()` 每请求把 `observability.Collector` 装进请求作用域（上游 v0.2.1 起是 `kernel.Local()` 作用域局部绑定；实测 +227 ns / +12 allocs，**与插件树规模无关**）。**它服务的是"被交付请求 scope 的组件"，不是"自行 lookup 的插件"**——见下方边界表。无 Sink 时装配期 panic（`Minimal()` 且未 `WithSink` 即此组合）。
+`WithCollector()` 每请求把 `observability.Collector` 装进请求作用域（上游 v0.2.1 起是 `kernel.Local()` 作用域局部绑定；实测 **+385 ns / +12 allocs 每请求**，**与插件树规模无关**——口径见表 B）。**它服务的是"被交付请求 scope 的组件"，不是"自行 lookup 的插件"**——见下方边界表。无 Sink 时装配期 panic（`Minimal()` 且未 `WithSink` 即此组合）。
 
 `WithoutAccessLog()` 关闭访问日志（用户已接自己的日志系统时用）——只关 AccessLog，`Trace` 与 panic 兜底不受影响。
 
@@ -377,7 +402,7 @@ v1 选项面：`New()` / `Minimal()` / `WithSink` / `WithoutAccessLog` / `WithRo
 |---|---|
 | 请求内业务打点 | `Ctx.Observe` **直写 Sink**（`writeObservation`，信封填充与 `Collector.write` 同构）——不注册 Collector，因此零 scope 开销 |
 | 被交付请求 scope 的组件 | `WithCollector()` → `observability.AttachCollector`（作用域局部绑定，随 scope 销毁撤除） |
-| AccessLog / panic | 宿主**直写 `observability.Record`**——需要 `Duration` / `Err`，而 Collector 明确不带这两项（`collector.go:60` 注释：状态型事实） |
+| AccessLog / panic | 宿主**直写 `observability.Record`**——需要 `Duration` / `Err`，而 Collector 明确不带这两项（`collector.go:76` 注释：状态型事实） |
 
 **`WithCollector()` 的可见性边界**（实测，五条；这也是"为什么不给插件用"的答案）：
 
@@ -434,7 +459,7 @@ v1 只做当前视图：`app.Debug("/debug/pulse")` 输出 `kernel.FiberSnapshot
 | `Recover()` 中间件 | 不做（Engine `defer` 兜底已覆盖） |
 | `HoldScope()` / `Release()` | 不做（延长请求 scope 会破坏"请求结束即回收"） |
 | `RunTLS` | 不做（`tls.NewListener` + `Serve` 或反代） |
-| 请求级数据对 kernel 插件**通用**可见 | 不做——上游 v0.2.1 已给出 `kernel.Local()`（这条"属上游改动"的阻塞已解除），但把整个请求 KV 袋挂进 scope 是每请求 +325 ns / +12 allocs **每绑定**（实测），且语义上把"通用容器"当成"语义性绑定"。只做 `WithCollector()` 这一处显式、边界清楚的用例 |
+| 请求级数据对 kernel 插件**通用**可见 | 不做——上游 v0.2.1 已给出 `kernel.Local()`（这条"属上游改动"的阻塞已解除），但把整个请求 KV 袋挂进 scope 是每条绑定 ≈ +250 ns / +12 allocs（同轮实测，表 B），且语义上把"通用容器"当成"语义性绑定"。只做 `WithCollector()` 这一处显式、边界清楚的用例 |
 | 内置 agent / LLM 相关的观测与装配接线 | 不做——pulse-web **只依赖 kernel 与 observability**，与 pulse 其余组件（llm / loop / host / toolset…）无耦合；需要时由调用方在自己的装配代码里显式接入 |
 
 ## 仓库结构（初版）

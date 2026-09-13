@@ -7,7 +7,7 @@
 - **零第三方依赖**——只使用 stdlib 与 pulse 的两个基座包（kernel / observability）
 
 > 状态：**实现中**。设计与决策记录在 [Issue #1](https://github.com/Luo-root/pulse-web/issues/1)，完整设计见 [`docs/design/web-framework-design.md`](docs/design/web-framework-design.md)。
-> 已落地：垂直切片（Engine / 路由与分组 / Ctx / 错误模型 / 观测接线 / 优雅关闭，[#2](https://github.com/Luo-root/pulse-web/issues/2)）；周边能力（Detach / HTML 模板 / Debug 端点 / TraceID 信任开关，[#4](https://github.com/Luo-root/pulse-web/issues/4)）；pulse v0.2.1 采纳（请求级绑定语义 + 观测出口 flush 覆盖 + `WithCollector()`，[#6](https://github.com/Luo-root/pulse-web/issues/6)）。
+> 已落地：垂直切片（Engine / 路由与分组 / Ctx / 错误模型 / 观测接线 / 优雅关闭，[#2](https://github.com/Luo-root/pulse-web/issues/2)）；周边能力（Detach / HTML 模板 / Debug 端点 / TraceID 信任开关，[#4](https://github.com/Luo-root/pulse-web/issues/4)）；pulse v0.2.2 采纳（请求级绑定语义 + 观测出口 flush 覆盖 + `WithCollector()`，[#6](https://github.com/Luo-root/pulse-web/issues/6)）。
 
 ## 预览（API 草案）
 

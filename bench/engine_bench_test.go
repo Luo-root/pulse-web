@@ -58,6 +58,25 @@ func BenchmarkEngineRequestPath(b *testing.B) {
 	}
 }
 
+// BenchmarkEngineRequestPath_Collector 端到端对照：开启 WithCollector() 的
+// 请求路径。
+//
+// 与 BenchmarkEngineRequestPath 同口径，**必须同轮跑取差值**——设计文档与
+// `WithCollector` 的 godoc 发布的「每请求成本」落点就在这里，不要让读者自己
+// 去拿跨轮的两个数相减。
+func BenchmarkEngineRequestPath_Collector(b *testing.B) {
+	app := web.New(web.WithSink(nopSink{}), web.WithCollector())
+	app.GET("/ping", func(c *web.Ctx) error { return c.Text(http.StatusOK, "pong") })
+	b.Cleanup(func() { app.Root().Dispose() })
+
+	w := &nopWriter{}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		app.ServeHTTP(w, httptest.NewRequest("GET", "/ping", nil))
+	}
+}
+
 // BenchmarkEngineRequestPathMinimal 对照：Minimal 模式（无 Trace / AccessLog / Sink）。
 func BenchmarkEngineRequestPathMinimal(b *testing.B) {
 	app := web.New(web.Minimal())
