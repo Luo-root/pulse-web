@@ -131,4 +131,44 @@ func TestRecordsPerRequest(t *testing.T) {
 	}
 	t.Logf("gin: 每请求 %d 行", counter.lines()/n)
 	t.Logf("gin 内容: %s", counter.lastLine())
+
+	// 再钉一层：**真实出口**（LineSink）出去的行数也是每请求 1 行，
+	// 而且那一行同时带请求侧（method / route / path / client）与响应侧
+	// （status / body size / duration）字段——「请求和响应」是同一条记录里的两半，
+	// 不是两条记录。
+	//
+	// 注意先 flush 一次取装配期的行数（Bootstrap 会写几条 host_ready），
+	// 否则会把它们算进「每请求」里。
+	var buf bytes.Buffer
+	lineSink := observability.NewLineSink(&buf)
+	lineApp := pulseapp.NewWithSink(lineSink)
+	if err := lineSink.Flush(); err != nil {
+		t.Fatalf("LineSink flush（取装配期基线）: %v", err)
+	}
+	baseLines := strings.Count(buf.String(), "\n")
+
+	for range 3 {
+		lineApp.ServeHTTP(w, req)
+	}
+	if err := lineSink.Flush(); err != nil {
+		t.Fatalf("LineSink flush: %v", err)
+	}
+	got = strings.Count(buf.String(), "\n") - baseLines
+	if got != 3 {
+		t.Errorf("LineSink: 3 次请求写出 %d 行，期望 3", got)
+	}
+	all := strings.Split(buf.String(), "\n")
+	t.Logf("LineSink: 装配期 %d 行，每请求 %d 行；请求行长这样：\n%s", baseLines, got/3, tail(all, 2))
+}
+
+// tail 取后 n 个非空元素，只给日志用。
+func tail(lines []string, n int) string {
+	var out []string
+	for i := len(lines) - 1; i >= 0 && len(out) < n; i-- {
+		if lines[i] == "" {
+			continue
+		}
+		out = append([]string{lines[i]}, out...)
+	}
+	return strings.Join(out, "\n")
 }

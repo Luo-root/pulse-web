@@ -56,11 +56,20 @@ observability.SlogSink{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
 ## 条数与内容（不是「同一条日志」）
 
-`TestRecordsPerRequest` 钉住这个口径：
+`TestRecordsPerRequest` 钉住这个口径（连出口那层的**行数**一起钉）：
 
 - **条数一样**：pulse-web 每请求 **1 条**结构化 `Record`（Engine 收尾里的 AccessLog；
-  请求路径上没有第二处写 Sink 的地方，`c.Observe` 要业务自己调）；gin 每请求 **1 行**文本。
-  pulse-web 另有**装配期 3 条**（Bootstrap），不是每请求。
+  请求路径上没有第二处写 Sink 的地方，`c.Observe` 要业务自己调才会多写）；gin 每请求 **1 行**文本。
+  pulse-web 另有**装配期 3 条**（Bootstrap 的 `observability.host_ready`），不是每请求。
+- **「请求和响应」是同一条记录里的两半，不是两条记录**——请求侧 `http.request.method` /
+  `http.route` / `url.path` / `client.address`，响应侧 `status` / `http.response.body.size` /
+  `duration_ms`，外加 `trace_id`。LineSink 出去的实样：
+
+  ```
+  time=2026-09-13T22:48:37.9496692+08:00 host_id=pulse-web trace_id=fe7d39b7606f9b4b71630724f749e365 source=http event=http.request status=200 client.address=192.0.2.1:1234 http.request.method=GET http.response.body.size=29 http.route=/users/{id} url.path=/users/42
+  ```
+
+  （`duration_ms` 只在非零时出现；上面这条是进程内直调、耗时落在时钟精度以下所以没有。）
 - **内容不一样**：
 
   | 侧 | 内容 |
@@ -71,6 +80,10 @@ observability.SlogSink{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
   差异点：pulse-web 带 TraceID（gin 没有）、带路由**模板**（`/users/{id}`，gin 只有实际路径）、
   带错误分类；客户端地址两边都记。时间戳这边是**出口在写入时才补**的
   （上游 `stampTime`：记录不带就补 `time.Now()`），框架侧的 Record 不携带时间。
+- **什么情况下会看到「不止一行」**：① 进程启动时 Bootstrap 的装配记录（一次性，实测 3 条）；
+  ② 业务自己调 `c.Observe()`（每调一次一条）；③ **失败路径**——`ServeHTTP`/`finish` 里有
+  两处 `slog.Warn`（attach collector 失败、错误映射器自身失败），它们**直写 slog、不经 Sink**；
+  默认出口也是 slog，所以这两条会和访问日志落在同一个 stderr 流里，但走的不是同一条路径。
 
 所以观测档量的是「**各家默认开箱配置**」，不是「等价功能的成本」——要给 gin 配上
 等价物（TraceID + 路由模板 + 错误分类）得另装第三方中间件。
