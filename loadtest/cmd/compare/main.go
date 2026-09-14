@@ -40,6 +40,7 @@ const (
 	modeObs      = "obs"
 	modeObsLine  = "obs-line"
 	modeObsAsync = "obs-async"
+	modeObsFast  = "obs-fast"
 	modeObsNoLog = "obs-nolog"
 )
 
@@ -144,6 +145,7 @@ func main() {
 		// 只跑 pulse-web 一侧的诊断档：它们回答「钱花在哪」（换出口值多少、
 		// 异步值多少、关掉访问日志值多少），不回答「谁快」。
 		pairs = append(pairs,
+			pair{modeObsFast, []string{fwPulse}},
 			pair{modeObsLine, []string{fwPulse}},
 			pair{modeObsAsync, []string{fwPulse}},
 			pair{modeObsNoLog, []string{fwPulse}},
@@ -371,15 +373,16 @@ func render(pairs []pair, concs []int, cells map[key]*cell) string {
 		b.WriteString("\n### 拆解：pulse-web 的观测开销（诊断档，非对拍）\n\n")
 		b.WriteString("括号里是相对同并发 `bare` 的变化。**`obs` 是对拍档**，用的是框架默认出口形态\n")
 		b.WriteString("（SlogSink → slog 文本 handler）；其余三列是换出口 / 换异步 / 关日志的诊断。\n\n")
-		b.WriteString("| 并发 | bare | 关访问日志 | **默认出口 SlogSink** | 换 LineSink | AsyncSink(LineSink) |\n")
-		b.WriteString("|---|---|---|---|---|---|\n")
+		b.WriteString("| 并发 | bare | 关访问日志 | **默认出口 SlogSink** | 换 LineSink | AsyncSink(LineSink) | 原型 fastsink |\n")
+		b.WriteString("|---|---|---|---|---|---|---|\n")
 		for _, c := range concs {
 			bare := cells[key{fwPulse, modeBare, c}].witness().RPS
-			fmt.Fprintf(&b, "| %d | %.0f | %s | %s | %s | %s |\n", c, bare,
+			fmt.Fprintf(&b, "| %d | %.0f | %s | %s | %s | %s | %s |\n", c, bare,
 				withDelta(cells[key{fwPulse, modeObsNoLog, c}].witness().RPS, bare),
 				withDelta(cells[key{fwPulse, modeObs, c}].witness().RPS, bare),
 				withDelta(cells[key{fwPulse, modeObsLine, c}].witness().RPS, bare),
-				withDelta(cells[key{fwPulse, modeObsAsync, c}].witness().RPS, bare))
+				withDelta(cells[key{fwPulse, modeObsAsync, c}].witness().RPS, bare),
+				withDelta(cells[key{fwPulse, modeObsFast, c}].witness().RPS, bare))
 		}
 	}
 	return b.String()

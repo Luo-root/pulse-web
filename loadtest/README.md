@@ -33,6 +33,7 @@ go run ./cmd/loadgen -url http://127.0.0.1:18080/users/42 -c 64 -d 15s
 | `obs` | 对拍 | `gin.Default()`（Logger + Recovery） | `web.New()`（默认装配 + **默认出口形态**） |
 | `obs-line` | 诊断 | — | 出口换成 `NewLineSink` |
 | `obs-async` | 诊断 | — | 出口换成 `NewAsyncSink(NewLineSink(...))` |
+| `obs-fast` | 诊断 | — | 出口换成 `loadtest/fastsink`（**原型**，池化列式出口） |
 | `obs-nolog` | 诊断 | — | 默认装配但关掉访问日志 |
 
 诊断档只跑 pulse-web 一侧：它们回答「**钱花在哪**」（换出口值多少、异步值多少、
@@ -53,6 +54,31 @@ observability.SlogSink{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 目的地仍然是空设备（保留每请求的格式化成本、排除磁盘 I/O），但走的是默认那条路径；
 「换出口值多少」交给 `obs-line` 单独量。真实部署里它是 stderr（然后落到采集器），
 那时磁盘/采集成本两侧都要付。
+
+### 出口能有多便宜：`obs-fast` 与 `fastsink` 原型
+
+`obs-line` / `obs-async` 量的是上游现成出口之间的差别（同一套渲染，只挪线程）。
+**渲染本身**能便宜多少，由 `loadtest/fastsink` 这个原型回答——它的手法都是常识：
+池化 `[]byte`、不用 `fmt`（`time.AppendFormat` + `strconv.Append*`）、一次锁一次
+`Write`。同一个 `Record`、同样写 `io.Discard`：
+
+| 出口 | 单线程 渲染 | 并发 32 路 渲染 | 每请求分配 |
+|---|---|---|---|
+| `SlogSink`（默认） | ~1531ns | ~1313ns | 19 |
+| `LineSink` | ~292ns | ~325ns | 1 |
+| `AsyncSink(LineSink)` | ~515ns | — | 1 |
+| `fastsink`（原型） | **~122ns** | **~153ns** | **0** |
+
+端到端（`BenchmarkFastSinkVSDefault`，同一条请求路径只换出口）：
+`2763ns / 35 allocs` → `1181ns / 16 allocs`；gin 的 `Logger` 同口径约 `1140ns / 15 allocs`。
+
+两点说明：
+
+1. **它放在对比工程里，不是框架代码**。框架要不要自带这样一个出口（以及默认出口
+   要不要换、版式谁来定）是产品决定，挂在 **#20**（方案 A 上游改 `SlogSink` /
+   B 框架自带 / C 只给示例），本票只出数字。
+2. **它不是等价替换**：装配期记录（`observability.host_ready` 等）没有 status / route，
+   走同一套列式版式会出现空列——真做要按 `event` 分版式。原型不处理这件事。
 
 ## 条数与内容（不是「同一条日志」）
 
@@ -151,5 +177,5 @@ observability.SlogSink{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 所以对比工程自带 `go.mod`（`replace github.com/Luo-root/pulse-web => ../`，
 对比的永远是当前工作副本而不是已发布的版本），gin 只出现在这里。
 
-CI 只**编译**这个 module（防腐烂），**不跑压测**：CI 上的计时是噪声，
-跑出来的数字只会误导。
+CI 跑这个 module 的 `go build` / `go vet` / `go test`（防腐烂：根 module 的 `./...`
+盖不到它），但**不跑压测/基准**：CI 上的计时是噪声，跑出来的数字只会误导。

@@ -11,6 +11,7 @@ import (
 	"net/http"
 
 	web "github.com/Luo-root/pulse-web"
+	"github.com/Luo-root/pulse-web/loadtest/fastsink"
 	"github.com/Luo-root/pulse/observability"
 )
 
@@ -44,6 +45,12 @@ const (
 	// Attrs 深拷 + 入队，格式化与写出挪到后台协程。
 	ModeObsAsync Mode = "obs-async"
 
+	// ModeObsFast 诊断：换成 `loadtest/fastsink` 的**原型出口**（池化缓冲 +
+	// 不用 fmt + 列式版式）。用来量「同一批字段，把渲染做便宜能便宜多少」。
+	//
+	// 注意它是**原型，不是框架代码**——框架要不要自带这样一个出口另说（见 #20）。
+	ModeObsFast Mode = "obs-fast"
+
 	// ModeObsNoLog 诊断：默认装配但关掉访问日志（`WithoutAccessLog()`），
 	// 用来把观测开销拆成「Trace + 记录框架」与「访问日志 + 出口」两段。
 	ModeObsNoLog Mode = "obs-nolog"
@@ -67,6 +74,8 @@ func New(mode Mode) http.Handler {
 		app = web.New(web.WithSink(observability.NewLineSink(io.Discard)))
 	case ModeObsAsync:
 		app = web.New(web.WithSink(observability.NewAsyncSink(observability.NewLineSink(io.Discard))))
+	case ModeObsFast:
+		app = web.New(web.WithSink(fastsink.New(io.Discard)))
 	case ModeObsNoLog:
 		app = web.New(web.WithSink(discardSlog()), web.WithoutAccessLog())
 	default:
