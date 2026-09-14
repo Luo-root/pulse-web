@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -47,7 +48,7 @@ func renderLine(t *testing.T, rec observability.Record) string {
 // 断言（而不是被一个 Contains 悄悄放过）。
 func TestConsoleSinkHTTPLine(t *testing.T) {
 	got := renderLine(t, httpRecord("200", 585100*time.Nanosecond))
-	want := "2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET    /users/42" +
+	want := "2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /users/42" +
 		" | route=/users/{id} | size=29 | host=pulse-web | trace=8f2e1a3b4c5d6e7f8a9b0c1d2e3f4a5b\n"
 	if got != want {
 		t.Fatalf("版式不符：\n got=%q\nwant=%q", got, want)
@@ -72,7 +73,7 @@ func TestConsoleSinkHTTPLineFallbacks(t *testing.T) {
 		observability.Set(&rec.Attrs, attrHTTPMethod, "GET")
 		observability.Set(&rec.Attrs, attrURLPath, "/nope")
 		got := renderLine(t, rec)
-		if !strings.Contains(got, "| GET    /nope |") {
+		if !strings.Contains(got, "| GET     /nope |") {
 			t.Fatalf("路径列应给具体路径且不留空列：%q", got)
 		}
 		if strings.Contains(got, "route=") {
@@ -183,6 +184,38 @@ func TestConsoleSinkKeepsUnknownAttrs(t *testing.T) {
 	}
 }
 
+// TestConsoleSinkColumnKeyWithWrongType 钉住一条不变式：列键存成非预期类型时，
+// 该属性必须落进兜底组，不能在「固定列」与「兜底」之间被两头跳过。
+//
+// 判定得用「这一列**真的渲染了值**」（consumed），不能用「这个名字属于某一列」——
+// 后者在类型不符时仍为真，于是固定列没渲染它、兜底组又把它当已渲染跳过，
+// 整条属性静默消失。
+func TestConsoleSinkColumnKeyWithWrongType(t *testing.T) {
+	rec := httpRecord("200", time.Microsecond)
+	observability.Set(&rec.Attrs, attrHTTPBodySize, "29") // 期望 int64，这里存成 string
+
+	got := renderLine(t, rec)
+	if !strings.Contains(got, attrHTTPBodySize+"=29") {
+		t.Fatalf("类型不符的列键被静默丢弃了：%q", got)
+	}
+	if strings.Contains(got, consoleSep+"size=") {
+		t.Fatalf("类型不符时不该渲染成固定列：%q", got)
+	}
+}
+
+// TestConsoleSinkMethodColumnAligned：7 字符方法（OPTIONS / CONNECT）不能把路径列
+// 顶偏一格——列式版式的价值就在对齐。
+func TestConsoleSinkMethodColumnAligned(t *testing.T) {
+	pathStart := func(method string) int {
+		rec := httpRecord("200", time.Microsecond)
+		observability.Set(&rec.Attrs, attrHTTPMethod, method)
+		return strings.Index(renderLine(t, rec), "/users/42")
+	}
+	if got, want := pathStart("OPTIONS"), pathStart("GET"); got != want {
+		t.Fatalf("方法列未对齐：OPTIONS 的路径起点在第 %d 字节，GET 在第 %d 字节", got, want)
+	}
+}
+
 // TestConsoleSinkColor：颜色只在要求时出现（缺省非终端不上色，否则日志里会混
 // 转义序列），并且只染状态列。
 func TestConsoleSinkColor(t *testing.T) {
@@ -235,6 +268,28 @@ func TestConsoleSinkConcurrentWrites(t *testing.T) {
 		if !strings.HasPrefix(ln, "2026/09/14 - 08:30:00 | 200 |") {
 			t.Fatalf("第 %d 行不完整：%q", i+1, ln)
 		}
+	}
+}
+
+// TestConsoleSinkZeroAlloc 守住「渲染一条 0 分配」这条红线：它在写实现时被踩过
+// 一次（兜底组的闭包捕获渲染缓冲，把缓冲顶到堆上，每条 4 次分配），而 0.19µs 的
+// 渲染成本里分配是大头。这条用例就是那次事故的回归钉子。
+func TestConsoleSinkZeroAlloc(t *testing.T) {
+	rec := httpRecord("200", 585*time.Microsecond)
+	s := NewConsoleSink(io.Discard, WithColor(false))
+	s.Write(rec) // 预热：先把池里的缓冲建起来
+
+	if n := testing.AllocsPerRun(1000, func() { s.Write(rec) }); n != 0 {
+		t.Fatalf("渲染一条应 0 分配，实测 %v allocs/op", n)
+	}
+
+	event := observability.Record{
+		Time: consoleTestTime, HostID: "svc", Event: "pulse.kernel.fiber_state",
+		FiberName: "db", From: "A", To: "B",
+	}
+	s.Write(event)
+	if n := testing.AllocsPerRun(1000, func() { s.Write(event) }); n != 0 {
+		t.Fatalf("事件行应 0 分配，实测 %v allocs/op", n)
 	}
 }
 
@@ -311,7 +366,7 @@ func TestConsoleSinkEndToEnd(t *testing.T) {
 	var ok200, err500 bool
 	for _, ln := range lines {
 		switch {
-		case strings.Contains(ln, "| 200 |") && strings.Contains(ln, "GET    /users/42"):
+		case strings.Contains(ln, "| 200 |") && strings.Contains(ln, "GET     /users/42"):
 			ok200 = true
 			if !strings.Contains(ln, "| route=/users/{id} |") {
 				t.Fatalf("匹配到路由时应带 route= 尾段：%q", ln)
@@ -319,7 +374,7 @@ func TestConsoleSinkEndToEnd(t *testing.T) {
 			if !strings.Contains(ln, "host=svc") {
 				t.Fatalf("配置了 HostID 应出现在行里：%q", ln)
 			}
-		case strings.Contains(ln, "| 500 |") && strings.Contains(ln, "GET    /boom"):
+		case strings.Contains(ln, "| 500 |") && strings.Contains(ln, "GET     /boom"):
 			err500 = true
 			if !strings.Contains(ln, "internal boom") {
 				t.Fatalf("500 行应带错误分类 + 文本：%q", ln)

@@ -31,7 +31,7 @@ const (
 	colStatus           = 3
 	colDuration         = 9
 	colClient           = 15
-	colMethod           = 6 // 方法列宽 6 + 后面一个空格 = 7；`OPTIONS` 正好 7 字符
+	colMethod           = 7 // 方法列宽；再追加一个空格 ⇒ 含分隔共 8 宽，7 字符方法（OPTIONS）也对齐
 	consoleBufSize      = 256
 	consoleMaxPooledBuf = 4 << 10
 )
@@ -59,9 +59,9 @@ const (
 //
 // # 版式
 //
-// http 请求（一行，列宽固定）：
+// http 请求（一行，列宽固定；下面是 `TestConsoleSinkHTTPLine` 钉住的那一行）：
 //
-//		2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234 | GET /users/42 | size=29 route=/users/{id} | trace=8f2e…
+//		2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /users/42 | route=/users/{id} | size=29 | host=pulse-web | trace=8f2e1a3b4c5d6e7f8a9b0c1d2e3f4a5b
 //
 //	  - 时间列是**完成时刻**（与 gin 的 Logger 一致：请求结束后才写这一行）；
 //	  - 状态列按区间上色（2xx 绿 / 3xx 青 / 4xx 黄 / 5xx 红），仅在终端生效；
@@ -69,6 +69,8 @@ const (
 //	    `duration_ms=0` 看不出快慢；
 //	  - 路径列给**具体路径**（`/users/42`，与 gin/chi 的直觉一致），路由模板在
 //	    两者不同时另起 `route=` 附在后面（模板是聚合维度，路径是复现维度）；
+//	  - 尾段的 `route=` / `size=` / `host=` / 错误 / `trace=` 是**各自独立的
+//	    ` | ` 字段**：有才出现、缺就少一段（`host=` 只在配置了 `WithHostID` 时出现）；
 //	  - 非 http 记录（装配期 `observability.host_ready` / `fiber_state`、业务
 //	    `Ctx.Observe`）退回 `时间 | event | k=v …`：它们没有 status / route，
 //	    硬套列式只会渲染出一堆空列；
@@ -173,9 +175,10 @@ func (s *ConsoleSink) appendHTTPLine(b []byte, r observability.Record) []byte {
 	b = append(b, status...)
 	b = s.unpaint(b, painted)
 
-	// 耗时列（右对齐，带单位）。scratch 留 8 字节余量：最长单位文本是 `999.99ms`。
+	// 耗时列（右对齐，带单位）。先渲染进栈上小缓冲，再按列宽补前导空格。
+	// 16 字节按 `appendDuration` 最长一档定：秒档 `9223372036.85s` = 14 字节。
 	b = append(b, consoleSep...)
-	var scratch [colDuration + 8]byte
+	var scratch [16]byte
 	dur := appendDuration(scratch[:0], r.Duration)
 	b = appendPadding(b, colDuration-utf8.RuneCount(dur))
 	b = append(b, dur...)
@@ -248,33 +251,80 @@ func (s *ConsoleSink) appendHTTPLine(b []byte, r observability.Record) []byte {
 
 	// 固定列盖不住的属性**不丢**：未知键按插入序附成一组 ` | k=v k=v`
 	// （中间件 / 业务往访问记录里加的字段走这里）。
-	// 固定列盖不住的属性**不丢**：未知键按插入序附成一组 ` | k=v k=v`
-	// （中间件 / 业务往访问记录里加的字段走这里）。
 	//
-	// 先比条数再进循环是有意的：这几个键就是列式版的全部固定列，条数相等即无
-	// 未知键——常见路径因此完全不进闭包（闭包捕获缓冲会把缓冲顶到堆上，
-	// 实测每写一次多 4 次分配）。
+	// 传给兜底路径的是「**真的渲染成了列**的键」（consumed），不是按名字猜：
+	// 列键类型不符时列并没有渲染它，它就必须落进这一组——否则固定列与兜底组
+	// 都跳过它，整条属性静默消失。
+	//
+	// 先比条数再进闭包是有意的：条数相等即无未知键，常见路径完全不进闭包
+	// （闭包捕获缓冲会把缓冲顶到堆上，实测每写一次多 4 次分配）。
+	consumed := [numColumns]bool{}
+	consumed[colIdxMethod] = okMethod
+	consumed[colIdxRoute] = okRoute
+	consumed[colIdxPath] = okPath
+	consumed[colIdxClient] = okClient
+	consumed[colIdxErrType] = okErrType
+	consumed[colIdxSize] = okSize
 	known := 0
-	for _, ok := range [...]bool{okMethod, okRoute, okPath, okClient, okErrType, okSize} {
+	for _, ok := range consumed {
 		if ok {
 			known++
 		}
 	}
 	if r.Attrs.Len() > known {
-		b = appendExtraAttrs(b, r.Attrs)
+		b = appendExtraAttrs(b, r.Attrs, consumed)
 	}
 	return append(b, '\n')
 }
 
-// appendExtraAttrs 渲染固定列盖不住的属性：一组 ` | k=v k=v`。
+// 固定列的下标。用命名下标而不是裸序号，是为了让「哪一列取到了值」与
+// httpColumnKeys 的对应关系写死在编译期看得见的地方。
+const (
+	colIdxMethod = iota
+	colIdxRoute
+	colIdxPath
+	colIdxClient
+	colIdxErrType
+	colIdxSize
+	numColumns
+)
+
+// httpColumnKeys 是列式版式的固定列键，下标见 colIdx* 常量。
 //
-// 它单独一个函数（而不是写进调用方的闭包）：闭包捕获调用方的缓冲会让那个缓冲
-// 逃逸到堆上，把「0 分配」的常见路径变成每写 4 次分配。这一路只在不常见的
-// 记录上走（有额外属性的访问记录），值域是 Attrs 的标量集。
-func appendExtraAttrs(b []byte, attrs observability.Attrs) []byte {
+// 这是「固定列有哪些」的**唯一**一份表：写入侧用它判类型并取下标，兜底侧用它
+// 判「这个键是否已经由某一列渲染掉」。同一集合在一个函数里用两种方式表达
+// （布尔列表计数 vs 键名 switch）会让判定不等价的那一格两头都不落。
+var httpColumnKeys = [numColumns]string{
+	colIdxMethod:  attrHTTPMethod,
+	colIdxRoute:   attrHTTPRoute,
+	colIdxPath:    attrURLPath,
+	colIdxClient:  attrClientAddr,
+	colIdxErrType: attrErrorType,
+	colIdxSize:    attrHTTPBodySize,
+}
+
+// httpColumnIndex 返回键对应的固定列下标。
+func httpColumnIndex(key string) (int, bool) {
+	for i, k := range httpColumnKeys {
+		if k == key {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// appendExtraAttrs 渲染固定列没吃掉的属性：一组 ` | k=v k=v`。
+//
+// consumed 是「该列真的渲染了值」的标记；`httpColumnIndex` 给的是「这个键属于
+// 某一列」。两者都有才跳过——只看后者会让类型不符的列键在固定列与兜底组里
+// 都被跳过（属性消失）。
+//
+// 单独一个函数（而不是写进调用方的闭包）是有意的：闭包捕获调用方的缓冲会让那个
+// 缓冲逃逸到堆上，把「0 分配」的常见路径变成每写 4 次分配。
+func appendExtraAttrs(b []byte, attrs observability.Attrs, consumed [numColumns]bool) []byte {
 	first := true
 	attrs.Range(func(k string, v any) {
-		if isHTTPColumnKey(k) {
+		if i, ok := httpColumnIndex(k); ok && consumed[i] {
 			return
 		}
 		if first {
@@ -286,15 +336,6 @@ func appendExtraAttrs(b []byte, attrs observability.Attrs) []byte {
 		b = appendField(b, k, v)
 	})
 	return b
-}
-
-// isHTTPColumnKey 判断属性键是否已由固定列呈现（列式版式读的就是这几个）。
-func isHTTPColumnKey(key string) bool {
-	switch key {
-	case attrHTTPMethod, attrHTTPRoute, attrURLPath, attrHTTPBodySize, attrClientAddr, attrErrorType:
-		return true
-	}
-	return false
 }
 
 // appendEventLine 渲染非 http 记录：`时间 | event | k=v …`。

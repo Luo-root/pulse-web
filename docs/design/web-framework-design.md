@@ -405,8 +405,11 @@ v1 选项面：`New()` / `Minimal()` / `WithSink` / `WithoutAccessLog` / `WithRo
 `New()` 的默认出口是 `web.ConsoleSink`（写 stdout），一行列式、列宽固定：
 
 ```
-2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234 | GET /users/42 | size=29 route=/users/{id} | trace=8f2e…
+2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /users/42 | route=/users/{id} | size=29 | host=pulse-web | trace=8f2e1a3b4c5d6e7f8a9b0c1d2e3f4a5b
 ```
+
+（尾段的 `route=` / `size=` / `host=` / 错误 / `trace=` 是各自独立的 ` | ` 字段，有才出现；
+逐字版本由 `console_sink_test.go` 的 `TestConsoleSinkHTTPLine` 钉住——改版式时以那条断言为准。）
 
 **为什么换掉 `SlogSink`**（决策与实测见 [#20](https://github.com/Luo-root/pulse-web/issues/20)）：`SlogSink` 是**给机器读**的结构化出口——固定前缀每行一样、字段按字母序、亚毫秒耗时取整成 `duration_ms=0`，做默认出口既贵又难扫。`Record` 里的字段一个不少，缺的只是渲染层。
 
