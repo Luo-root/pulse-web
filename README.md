@@ -3,7 +3,7 @@
 基于 [pulse](https://github.com/Luo-root/pulse) 的 **kernel** 与 **observability** 构建的通用 Go web 服务框架。
 
 - **装配内核**——kernel 的 IoC、可逆生命周期、请求作用域、事件总线
-- **一等观测**——每请求 TraceID、结构化记录、装配诊断，默认装配
+- **一等观测**——每请求 TraceID、结构化记录、装配诊断，默认装配；默认出口是**给人读**的列式单行（`ConsoleSink`，渲染 0 分配）
 - **零第三方依赖**——只使用 stdlib 与 pulse 的两个基座包（kernel / observability）
 
 > 状态：**实现中**。设计与决策记录在 [Issue #1](https://github.com/Luo-root/pulse-web/issues/1)，完整设计见 [`docs/design/web-framework-design.md`](docs/design/web-framework-design.md)。
@@ -25,6 +25,18 @@ app.GET("/users/{id}", func(c *web.Ctx) error {
 
 app.Run(":8080")                         // 内置优雅关闭：drain → OnShutdown → root.Dispose → Sink flush
 ```
+
+默认出口写 stdout，一行一条（列宽固定；颜色只在终端生效）：
+
+```
+2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /users/42 | route=/users/{id} | size=29 | host=pulse-web | trace=8f2e1a3b4c5d6e7f8a9b0c1d2e3f4a5b
+2026/09/14 - 08:30:00 | 500 |    7.62ms | 192.0.2.1:1234  | GET     /boom       | http_5xx "boom: Internal Server Error" | trace=3a71…
+2026/09/14 - 08:30:00 | pulse.kernel.fiber_state host=svc fiber=db state=Starting→Running
+```
+
+尾段的 `route=` / `size=` / `host=` / 错误 / `trace=` 是各自独立的 ` | ` 字段，有才出现。
+
+要机器可读 / 接既有日志管道：`web.New(web.WithSink(observability.SlogSink{...}))`（或 `NewAsyncSink`、`NewLineSink`）——**只换出口，装配不变**。
 
 ## 文档
 

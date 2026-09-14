@@ -40,7 +40,12 @@ const (
 	budgetCollectorBytes  = 6803
 	budgetMinimalAllocs   = 17
 	budgetMinimalBytes    = 5858
-	budgetSlackBytes      = 8
+	// 默认出口（ConsoleSink）那一档：分配计数与 nopSink 档相同——出口渲染是
+	// 零分配的（池化缓冲 + 不用 fmt）。B/op 多 11 字节来自 `sync.Pool` 每 P
+	// 一个缓冲（256 B）在 20000 次请求上的摊销，不是每请求成本。
+	budgetConsoleSinkAllocs = 22
+	budgetConsoleSinkBytes  = 6326
+	budgetSlackBytes        = 8
 )
 
 // TestRequestPathAllocBudget 把表 B 的分配计数固化成断言。
@@ -63,6 +68,10 @@ func TestRequestPathAllocBudget(t *testing.T) {
 			budgetDefaultAllocs, 0},
 		{"collector", enginePathAppCollector, budgetCollectorAllocs, budgetCollectorBytes},
 		{"minimal", enginePathAppMinimal, budgetMinimalAllocs, budgetMinimalBytes},
+		// 默认出口那一档：上面的用例都用 nopSink（把「框架请求路径」与「出口
+		// 成本」分开量），这一档把默认装配实际用的 ConsoleSink 接回来——出口
+		// 是 0 分配，所以它与 nopSink 档的分配计数应当相同，差在这里就是回归。
+		{"default+console-sink", enginePathAppConsoleSink, budgetConsoleSinkAllocs, budgetConsoleSinkBytes},
 	}
 
 	for _, c := range cases {
