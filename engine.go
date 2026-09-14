@@ -88,10 +88,26 @@ func WithRoot(root *kernel.Context) Option {
 	return func(cfg *config) { cfg.root = root }
 }
 
-// WithSink 指定观测出口（默认 SlogSink → stderr）。
+// WithSink 指定观测出口（默认 `ConsoleSink` → stdout，给人读的列式单行）。
 // 它只换出口，不开启任何被 Minimal 关掉的观测。
+//
+// 要机器可读 / 接既有日志管道：`WithSink(observability.SlogSink{Logger: …})`；
+// 要行式缓冲：`observability.NewLineSink(w)`；要异步：
+// `observability.NewAsyncSink(inner)`。
 func WithSink(sink observability.Sink) Option {
 	return func(cfg *config) { cfg.sink = sink }
+}
+
+// newDefaultSink 造默认装配的出口：**给人读**的控制台列式出口，写 stdout。
+//
+// 选它的依据（Issue #20 的实测）：默认出口是开箱体验，而旧默认
+// `observability.SlogSink`（→ stderr）是**给机器读**的结构化日志——固定前缀
+// 每行一样、字段按字母序、亚毫秒耗时取整成 `duration_ms=0`，代价是每请求
+// 19 次分配、真实负载下观测档掉 35%（c=64）/ 12%（c=256）吞吐。
+// `ConsoleSink` 把同一批字段渲染成列式单行，0 allocs，掉到 14% / 4%。
+// 要切回结构化出口用 WithSink —— 只换出口，装配不变。
+func newDefaultSink() observability.Sink {
+	return NewConsoleSink(os.Stdout)
 }
 
 // WithTrustedTraceHeader 控制是否采纳入站链路头（W3C traceparent / B3）。
@@ -249,7 +265,7 @@ func New(opts ...Option) *Engine {
 
 	sink := cfg.sink
 	if sink == nil && !cfg.minimal {
-		sink = observability.SlogSink{}
+		sink = newDefaultSink()
 	}
 
 	root := cfg.root
@@ -531,13 +547,13 @@ func (e *Engine) writeAccessLog(c *Ctx, rw *responseWriter) {
 		Duration: time.Since(c.started),
 		Err:      c.err,
 	}
-	observability.Set(&rec.Attrs, "http.request.method", c.r.Method)
-	observability.Set(&rec.Attrs, "http.route", routePattern(c.r))
-	observability.Set(&rec.Attrs, "url.path", c.r.URL.Path)
-	observability.Set(&rec.Attrs, "http.response.body.size", int64(rw.bytes))
-	observability.Set(&rec.Attrs, "client.address", c.r.RemoteAddr)
+	observability.Set(&rec.Attrs, attrHTTPMethod, c.r.Method)
+	observability.Set(&rec.Attrs, attrHTTPRoute, routePattern(c.r))
+	observability.Set(&rec.Attrs, attrURLPath, c.r.URL.Path)
+	observability.Set(&rec.Attrs, attrHTTPBodySize, int64(rw.bytes))
+	observability.Set(&rec.Attrs, attrClientAddr, c.r.RemoteAddr)
 	if c.err != nil {
-		observability.Set(&rec.Attrs, "error.type", errCategory(c.err))
+		observability.Set(&rec.Attrs, attrErrorType, errCategory(c.err))
 	}
 	e.sink.Write(rec)
 }

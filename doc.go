@@ -3,7 +3,8 @@
 // 定位 = 装配能力 + 一等观测：
 //
 //   - 装配内核：kernel 的 IoC、可逆生命周期、请求作用域、事件总线
-//   - 一等观测：每请求 32hex TraceID、结构化记录（observability.Record）、装配诊断
+//   - 一等观测：每请求 32hex TraceID、结构化记录（observability.Record）、装配诊断；
+//     默认出口 `ConsoleSink` 把记录渲染成**给人读**的列式单行（零分配）
 //   - 零第三方依赖：只用 stdlib 与 pulse 的 kernel / observability
 //
 // # 快速开始

@@ -385,7 +385,7 @@ app.POST("/jobs", func(c *web.Ctx) error {
 
 | 配置 | Bootstrap | Trace | AccessLog | panic→500 | Sink |
 |---|---|---|---|---|---|
-| `New()` | 开 | 开 | 开 | 开（不可关） | `SlogSink{slog.Default()}` |
+| `New()` | 开 | 开 | 开 | 开（不可关） | `ConsoleSink` → stdout（给人读，见下） |
 | `Minimal()` | 关 | 关 | 关 | **开** | 无 |
 | `Minimal(), WithSink(s)` | 关 | 关 | 关 | **开** | `s`（仅供 `c.Observe` 与用户自装中间件） |
 | `New(WithCollector())` | 开 | 开 | 开 | 开 | 默认 Sink |
@@ -399,6 +399,32 @@ app.POST("/jobs", func(c *web.Ctx) error {
 `WithoutAccessLog()` 关闭访问日志（用户已接自己的日志系统时用）——只关 AccessLog，`Trace` 与 panic 兜底不受影响。
 
 v1 选项面：`New()` / `Minimal()` / `WithSink` / `WithoutAccessLog` / `WithRoot` / `WithHostID` / `WithServer` / `WithErrorHandler` / `WithTemplates` / `WithTrustedTraceHeader` / `WithCollector` / `OnShutdown`。注意 **`AsyncSink` 不在选项面**——它是**出口实现**，用 `WithSink(observability.NewAsyncSink(...))` 接入，框架不另造缓冲层。
+
+### 默认出口：给人读的控制台列式（`ConsoleSink`）
+
+`New()` 的默认出口是 `web.ConsoleSink`（写 stdout），一行列式、列宽固定：
+
+```
+2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234 | GET /users/42 | size=29 route=/users/{id} | trace=8f2e…
+```
+
+**为什么换掉 `SlogSink`**（决策与实测见 [#20](https://github.com/Luo-root/pulse-web/issues/20)）：`SlogSink` 是**给机器读**的结构化出口——固定前缀每行一样、字段按字母序、亚毫秒耗时取整成 `duration_ms=0`，做默认出口既贵又难扫。`Record` 里的字段一个不少，缺的只是渲染层。
+
+| | 渲染一条（io.Discard） | 请求路径（同会话配对） |
+|---|---|---|
+| `ConsoleSink`（默认） | ~190 ns / **0 allocs** | ~2080 ns / **22 allocs** / 6325 B/op |
+| `SlogSink`（旧默认） | 1531 ns / 19 allocs | （观测档，见 #18 的真实负载对比） |
+| `LineSink` | ~262 ns / 1 alloc | — |
+
+请求路径那一列对照的是 `nopSink` 档（~1880 ns / 22 allocs / 6314 B/op，`bench/budget_test.go` 的 `default+console-sink` 一档是它的门禁）：**分配计数相同**，多出的 ~190 ns 就是渲染。配对只在同一会话内有效，别拿它和表 B 的绝对值相减（跨会话 ns 会漂）。
+
+**行为口径**：
+
+- **按 event 分版式**：`http.request` 走列式；装配期记录（`observability.host_ready` / `pulse.kernel.fiber_state`）与业务打点走 `时间 | event | k=v …`——它们没有 status / route，硬套列式只会渲染出一堆空列。
+- **固定列盖不住的属性不丢**：未知键按插入序附在行尾（`| llm.model=… k=v`）。
+- **颜色**只在目的地是终端时出现（状态列按区间），重定向到文件 / 管道自动关；`NewConsoleSink(w, WithColor(true))` 可强制。
+- **不缓冲**：写完即落 `io.Writer`——终端要即时，缓冲会把安静应用的日志扣在内存里。要吞吐 / 异步 / 机器可读就 `WithSink(…)` 换出口（`AsyncSink` / `SlogSink` / `NewLineSink`），**`WithSink` 只换出口，装配不变**。
+- **写错误不抛**（`Sink` 接口没有错误通道）：要错误可见的场合用 `LineSink`（有 `Err()`）。
 
 ### 打点入口（复用上游，不新造协议）
 
@@ -439,7 +465,7 @@ v1 选项面：`New()` / `Minimal()` / `WithSink` / `WithoutAccessLog` / `WithRo
 | `Record.Status` | — | 状态码字符串 |
 | `Record.Duration` | — | 总耗时 |
 | Attrs | `http.request.method` / `http.route` / `url.path` / `http.response.body.size` / `client.address` | |
-| Attrs | `error.type` | 错误分类串；**与 `Record.Err` 并存**（`Err` 供 SlogSink 输出、`error.type` 供聚合查询，OTel 亦然） |
+| Attrs | `error.type` | 错误分类串；**与 `Record.Err` 并存**（`Err` 供出口输出错误文本、`error.type` 供聚合查询，OTel 亦然） |
 
 **隐私边界**：Attrs 只有标量，无 payload 逃生舱——能记 method / status / duration / bytes，**记不了**请求体、响应体、prompt。
 
