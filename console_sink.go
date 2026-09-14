@@ -31,7 +31,7 @@ const (
 	colStatus           = 3
 	colDuration         = 9
 	colClient           = 15
-	colMethod           = 6 // + 后面的一个空格 = 7 列（`OPTIONS` 是 7 字符，正好顶满）
+	colMethod           = 6 // 方法列宽 6 + 后面一个空格 = 7；`OPTIONS` 正好 7 字符
 	consoleBufSize      = 256
 	consoleMaxPooledBuf = 4 << 10
 )
@@ -76,8 +76,9 @@ const (
 //
 // # 成本
 //
-// 渲染一条 122 ns / **0 allocs**（默认 `SlogSink` 同口径 1531 ns / 19 allocs；
-// 并发 32 路 153 ns / 0 allocs）。手法都是常识：池化缓冲、不用 fmt
+// 渲染一条 **~190 ns / 0 allocs**（`-benchtime=20000x`；同一套 bench 里
+// `SlogSink` 是 1531 ns / 19 allocs、`LineSink` 是 ~262 ns / 1 alloc），
+// 并发 32 路 ~167 ns / 0 allocs。手法都是常识：池化缓冲、不用 fmt
 // （时间走 `time.AppendFormat`、数字走 `strconv.Append*`）、一次锁一次 `Write`。
 //
 // 错误行会调用 `Err.Error()`（错误对象怎么拼字符串不归出口管），可能带一次分配；
@@ -172,7 +173,7 @@ func (s *ConsoleSink) appendHTTPLine(b []byte, r observability.Record) []byte {
 	b = append(b, status...)
 	b = s.unpaint(b, painted)
 
-	// 耗时列（右对齐，带单位）
+	// 耗时列（右对齐，带单位）。scratch 留 8 字节余量：最长单位文本是 `999.99ms`。
 	b = append(b, consoleSep...)
 	var scratch [colDuration + 8]byte
 	dur := appendDuration(scratch[:0], r.Duration)
@@ -205,7 +206,10 @@ func (s *ConsoleSink) appendHTTPLine(b []byte, r observability.Record) []byte {
 	b = append(b, shown...)
 
 	// 尾段：模板 / 响应体大小 / host / 错误 / trace
-	if route != "" && route != path {
+	//
+	// 只在**路径与模板都非空且不同**时才补 `route=`：路径为空时列里已经展示模板
+	// （见上），再补一次就是同一信息打两遍。
+	if route != "" && path != "" && route != path {
 		b = append(b, consoleSep...)
 		b = append(b, "route="...)
 		b = append(b, route...)

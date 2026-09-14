@@ -100,6 +100,24 @@ func TestConsoleSinkHTTPLineFallbacks(t *testing.T) {
 			t.Errorf("方法/路径缺值应各补 -，实得 %q", fields[4])
 		}
 	})
+
+	t.Run("静态路由（模板=路径）不重复打 route=", func(t *testing.T) {
+		rec := httpRecord("200", time.Microsecond)
+		observability.Set(&rec.Attrs, attrHTTPRoute, "/users/42") // 与 url.path 相同
+		got := renderLine(t, rec)
+		if strings.Contains(got, "route=") {
+			t.Fatalf("模板与路径相同时不该出现 route=：%q", got)
+		}
+	})
+
+	t.Run("只有模板没有路径时不重复", func(t *testing.T) {
+		rec := httpRecord("200", time.Microsecond)
+		observability.Set(&rec.Attrs, attrURLPath, "")
+		got := renderLine(t, rec)
+		if n := strings.Count(got, "/users/{id}"); n != 1 {
+			t.Fatalf("模板只该出现一次（列里），实得 %d 次：%q", n, got)
+		}
+	})
 }
 
 // TestConsoleSinkErrorLine 错误行：错误分类 + 带空格的错误文本要加引号
