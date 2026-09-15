@@ -293,6 +293,79 @@ func TestConsoleSinkZeroAlloc(t *testing.T) {
 	}
 }
 
+// failingWriter 每次写都失败，并记录被调用了几次。
+type failingWriter struct {
+	err   error
+	calls int
+}
+
+func (w *failingWriter) Write(p []byte) (int, error) {
+	w.calls++
+	return 0, w.err
+}
+
+// TestConsoleSinkErrReportsFirstFailure：写失败不 panic，`Err()` 给出**首次**错误，
+// 不被后续失败或后续成功覆盖——语义与上游 `observability.LineSink.Err()` 一致。
+func TestConsoleSinkErrReportsFirstFailure(t *testing.T) {
+	rec := httpRecord("200", time.Microsecond)
+
+	var buf bytes.Buffer
+	ok := NewConsoleSink(&buf, WithColor(false))
+	if err := ok.Err(); err != nil {
+		t.Fatalf("没有写失败时 Err() 应为 nil，实得 %v", err)
+	}
+	ok.Write(rec)
+	if err := ok.Err(); err != nil {
+		t.Fatalf("写成功后 Err() 仍应为 nil，实得 %v", err)
+	}
+
+	first := errors.New("write: broken pipe")
+	fw := &failingWriter{err: first}
+	s := NewConsoleSink(fw, WithColor(false))
+	s.Write(rec)
+	if !errors.Is(s.Err(), first) {
+		t.Fatalf("Err() 应报出首次写失败 %v，实得 %v", first, s.Err())
+	}
+
+	fw.err = errors.New("write: no space left on device")
+	s.Write(rec)
+	if !errors.Is(s.Err(), first) {
+		t.Fatalf("首次错误被后来的失败覆盖：%v", s.Err())
+	}
+	if fw.calls != 2 {
+		t.Fatalf("写失败后应继续尝试写（不静默退出），实得 %d 次调用", fw.calls)
+	}
+}
+
+// TestConsoleSinkErrConcurrent：`Err()` 与并发写共用一把锁——-race 下必须干净。
+func TestConsoleSinkErrConcurrent(t *testing.T) {
+	fw := &failingWriter{err: errors.New("write: broken pipe")}
+	s := NewConsoleSink(fw, WithColor(false))
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 32; j++ {
+				s.Write(httpRecord("200", time.Microsecond))
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for j := 0; j < 256; j++ {
+			_ = s.Err()
+		}
+	}()
+	wg.Wait()
+
+	if s.Err() == nil {
+		t.Fatal("整程都在写失败，Err() 不该是 nil")
+	}
+}
+
 func TestConsoleSinkNilWriterPanics(t *testing.T) {
 	defer func() {
 		if recover() == nil {

@@ -93,12 +93,15 @@ const (
 // 要机器可读就 `WithSink(observability.SlogSink{…})` / `NewLineSink`。
 // `WithSink` 只换出口，不改变装配。
 //
-// 写错误被忽略（`Sink` 接口没有错误通道，与 gin / chi 的控制台输出一致）；
-// 需要错误可见的场合用 `observability.LineSink`（有 `Err()`）。
+// 写错误**不抛**（`Sink` 接口没有错误通道，与 gin / chi 的控制台输出一致），但
+// 也不会被吞掉：`Err()` 返回**首次**写失败——"日志早就不写了却没人知道"是落地场景里
+// 最痛的失败形态（stdout 管道被关掉、journald socket 满、磁盘满都是这一类）。
+// 失败之后仍然继续尝试写，不静默退出、不改缓冲策略。
 type ConsoleSink struct {
 	mu    sync.Mutex
 	w     io.Writer
 	color bool
+	werr  error // 首次写失败，受 mu 保护
 	pool  sync.Pool
 }
 
@@ -143,7 +146,9 @@ func (s *ConsoleSink) Write(r observability.Record) {
 	}
 
 	s.mu.Lock()
-	_, _ = s.w.Write(b)
+	if _, err := s.w.Write(b); err != nil && s.werr == nil {
+		s.werr = err // 只记第一次：后续成功不覆盖，后续失败也不覆盖
+	}
 	s.mu.Unlock()
 
 	if cap(b) > consoleMaxPooledBuf {
@@ -151,6 +156,20 @@ func (s *ConsoleSink) Write(r observability.Record) {
 	}
 	*bp = b
 	s.pool.Put(bp)
+}
+
+// Err 返回**首次**写失败（没有写失败时返回 nil）。语义与上游
+// `observability.LineSink.Err()` 一致：只报第一次，后续成功不会把它清掉。
+//
+// 它是这个出口唯一的失败可见通道——`Sink` 接口不返回错误，所以写失败（stdout
+// 管道被关、journald socket 满、磁盘满）只能从这里读。用法是**定期检查**，
+// 例如在健康检查或关停钩子里读一次：
+//
+//	if err := sink.Err(); err != nil { /* 告警：访问日志已经写不进去了 */ }
+func (s *ConsoleSink) Err() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.werr
 }
 
 // appendHTTPLine 渲染 http 请求记录（固定列 + 尾段）。
