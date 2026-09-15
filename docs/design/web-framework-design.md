@@ -505,7 +505,26 @@ v1 选项面：`New()` / `Minimal()` / `WithSink` / `WithoutAccessLog` / `WithRo
 - **固定列盖不住的属性不丢**：未知键按插入序附在行尾（`| llm.model=… k=v`）。
 - **颜色**只在目的地是终端时出现（状态列按区间），重定向到文件 / 管道自动关；`NewConsoleSink(w, WithColor(true))` 可强制。
 - **不缓冲**：写完即落 `io.Writer`——终端要即时，缓冲会把安静应用的日志扣在内存里。要吞吐 / 异步 / 机器可读就 `WithSink(…)` 换出口（`AsyncSink` / `SlogSink` / `NewLineSink`），**`WithSink` 只换出口，装配不变**。
-- **写错误不抛**（`Sink` 接口没有错误通道）：要错误可见的场合用 `LineSink`（有 `Err()`）。
+- **写错误不抛，但可见**：`Sink` 接口没有错误通道，所以 `ConsoleSink.Err()` 报出**首次**写失败（与上游 `LineSink.Err()` 同语义）——stdout 管道被关掉、journald socket 满、磁盘满都从这里读；失败后继续尝试写，不静默退出。
+
+### 日志落地与持久化（框架不负责那一半）
+
+**默认档只写 stdout，它本身不是持久化**：进程把行写进 fd 1，落盘 / 轮转 / 保留归平台。
+这条划分是有意的（12-factor 第 11 条）：应用不管文件系统，平台管，两者用 stdout 解耦。
+
+| 路径 | 做法 | 轮转 / 保留归谁 |
+|---|---|---|
+| 容器 / k8s | 默认出口即可 | 运行时：docker `log-opts max-size/max-file`、kubelet `containerLogMaxSize/containerLogMaxFiles`——**默认值往往很小或无限增长，要显式设** |
+| systemd（单机） | 默认出口即可（stdout 默认进 journald） | `journald.conf` 的 `SystemMaxUse` / `MaxRetentionSec`；查用 `journalctl -u <svc>` |
+| 直接落文件 | `os.OpenFile(…, O_APPEND\|O_CREATE\|O_WRONLY, 0o644)` + `WithSink(NewConsoleSink(f))`；要同时给人看和送采集器用上游 `observability.MultiSink{…}` | **宿主自备**（框架零依赖，不内置轮转） |
+
+**丢失窗口按缓冲层级**：`ConsoleSink` 无缓冲（只丢内核 page cache 未回写的那一段）→
+`LineSink` 32 KiB（引擎在优雅关闭时会 `Flush`）→ `AsyncSink` 队列（满时按策略丢）。
+要更强保证得自己 `fsync`（每请求毫秒级代价，access log 通常不值）；要「一条不丢」的
+语义，那不是日志通道的事。
+
+**明确不做**：轮转 / 保留 / 压缩（属宿主或第三方，引 lumberjack 是独立决定）、fsync 策略、
+采样丢弃、把写错误塞进请求路径。这些要动，先开票（见 #22）。
 
 ### 打点入口（复用上游，不新造协议）
 
