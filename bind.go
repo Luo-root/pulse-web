@@ -160,7 +160,7 @@ func (c *Ctx) bindMultipart(v any) error {
 func bindError(err error, code string) error {
 	var maxErr *http.MaxBytesError
 	if errors.As(err, &maxErr) {
-		return &HTTPError{Status: http.StatusRequestEntityTooLarge, Code: "body_too_large", cause: err}
+		return TooLarge(codeBodyTooLarge, err)
 	}
 	return &HTTPError{Status: http.StatusBadRequest, Code: code, cause: err}
 }

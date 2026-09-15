@@ -511,23 +511,17 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		e.finish(c, rw)
 	}()
 
-	// 请求体上限（WithMaxBodyBytes）：声明即超限 → 快速失败，不读 body；
-	// 声明未知 / 偏小时由读取闸门兜底。MaxBytesReader 的 w 传**原始 writer**
-	// —— net/http 的「超限关连接」通知走未导出接口 requestTooLarger，
-	// 框架的 responseWriter 包装器不实现它（传包装器会静默丢这个语义）。
+	// 请求体上限（WithMaxBodyBytes）：与路由级 BodyLimit 共用 limitBody ——
+	// 声明即超限则快速失败（不读 body），否则由读取闸门兜底。传的是这里拿到的
+	// **原始 writer**（理由见 limitBody 的 godoc）。
+	//
+	// 注意传 req（WithContext 的浅拷贝）而不是 r：body 要装在 ServeMux 收到的
+	// 那个 request 上。
 	if e.maxBodyBytes > 0 {
-		if r.ContentLength > e.maxBodyBytes {
-			c.setErr(&HTTPError{
-				Status: http.StatusRequestEntityTooLarge,
-				Code:   "body_too_large",
-				// cause 用 *http.MaxBytesError 与「读取闸门 / 用户自包」两条路径
-				// 同型：自定义 ErrorHandler 只认这一个类型即可覆盖四条超限路径
-				// （默认 mapper 两条分支结果相同——413 + body_too_large）。
-				cause: &http.MaxBytesError{Limit: e.maxBodyBytes},
-			})
+		if err := limitBody(w, req, e.maxBodyBytes); err != nil {
+			c.setErr(err)
 			return
 		}
-		req.Body = http.MaxBytesReader(w, r.Body, e.maxBodyBytes)
 	}
 
 	e.mux.ServeHTTP(rw, req)

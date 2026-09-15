@@ -8,7 +8,7 @@
 - **一等观测**——每请求 TraceID、结构化记录、装配诊断，默认装配；默认出口是**给人读**的列式单行（`ConsoleSink`，渲染 0 分配）
 - **零第三方依赖**——只使用 stdlib 与 pulse 的两个基座包（kernel / observability）
 
-> 状态：**v1 功能面已实现**（12/12）——验收标准逐条附可复跑的测试证据，见设计文档的「验收标准」节。API 在 1.0 之前，仍可能随 minor 调整。
+> 状态：**v1 功能面已实现**（13/13）——验收标准逐条附可复跑的测试证据，见设计文档的「验收标准」节。API 在 1.0 之前，仍可能随 minor 调整。
 > 设计与决策记录在 [Issue #1](https://github.com/Luo-root/pulse-web/issues/1)，完整设计见 [`docs/design/web-framework-design.md`](docs/design/web-framework-design.md)；逐项实现与实测记录见各 Issue（[#2](https://github.com/Luo-root/pulse-web/issues/2) 垂直切片、[#4](https://github.com/Luo-root/pulse-web/issues/4) 周边能力、[#6](https://github.com/Luo-root/pulse-web/issues/6) / [#27](https://github.com/Luo-root/pulse-web/issues/27) 上游采纳、[#20](https://github.com/Luo-root/pulse-web/issues/20) 默认出口、[#18](https://github.com/Luo-root/pulse-web/issues/18) 真实负载对比、[#30](https://github.com/Luo-root/pulse-web/issues/30) 验收证据收口）。
 
 ## 预览（API 草案）
@@ -99,6 +99,18 @@ app.GET("/users", func(c *web.Ctx) error {
 ```go
 app := web.New(web.WithMaxBodyBytes(2 << 20)) // 2 MiB：超限读取立即失败 → 413
 ```
+
+一个值要罩住所有路由时用上面的全局闸；要分得更细，用 `web.BodyLimit` 中间件挂在**分组**或**单条路由**上：
+
+```go
+app := web.New(web.WithMaxBodyBytes(2 << 20))                    // 全局兜底 2 MiB
+app.Group("/upload", web.BodyLimit(100<<20)).POST("/avatar", h)  // 上传这块放宽
+app.POST("/api/export", h, web.BodyLimit(1<<20))                 // 导出这条收紧
+```
+
+**闸门只能收紧，不能放宽**：与全局闸叠加时**取更严的那个**——上面 `/api/export` 的 1 MiB 生效；反过来把 `BodyLimit(100<<20)` 挂在全局 2 MiB 之下，仍会被 2 MiB 掐住。边界是**恰好 n 字节通过**，n+1 起 413；`n <= 0` 表示不限。
+
+超限统一 413 + `body_too_large`，cause 是 `*http.MaxBytesError`——自定义 `ErrorHandler` 用 `errors.As` 只认这一个类型即可覆盖**全部**超限路径（全局闸的预检 / 读取两条 + `BodyLimit` 的两条）。自己写中间件包 `http.MaxBytesReader` 也拦得住，但会静默丢掉 stdlib 的「超限关连接」语义（响应少了 `Connection: close`）——`MaxBytesReader` 的 `w` 参数只在超限时用，且只有原始 writer 才实现那个未导出接口，原因见设计文档的「请求体上限」节。
 
 ## 日志落地（持久化归谁）
 

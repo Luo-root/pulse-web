@@ -15,7 +15,7 @@ import (
 	"github.com/Luo-root/pulse/observability"
 )
 
-// 流式响应的覆盖：v1 功能面第 11 条（SSE / chunked / 大文件）。
+// 流式响应的覆盖：v1 功能面第 8 条（SSE / chunked / 大文件）。
 // 入口是 `Ctx.Writer()` + `Ctx.Flush()`——此前两者都没有测试。
 
 // waitRecord 等 Engine 收尾把记录写进 Sink（响应读完与记录落盘之间有极小的时序差）。

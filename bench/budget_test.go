@@ -8,7 +8,7 @@ import (
 	web "github.com/Luo-root/pulse-web"
 )
 
-// 分配预算门禁（设计验收标准第 7 条：请求路径开销进仓库 bench、作为基线不劣化）。
+// 分配预算门禁（设计验收标准第 12 条：请求路径开销进仓库 bench、作为基线不劣化）。
 //
 // # 为什么只卡分配、不卡 ns
 //
@@ -54,7 +54,13 @@ const (
 	// 它纳入基线（review 提出，PR #35）。
 	budgetJSONAllocs = 25
 	budgetJSONBytes  = 6438
-	budgetSlackBytes = 8
+	// 路由挂了 BodyLimit 那一档：比 default 档多一次分配，就是
+	// `http.MaxBytesReader` 返回的包装器本身（每请求一个，无法复用——它绑在请求上）。
+	// 这笔账起初没进描述、门禁也覆盖不到（其余档都不挂 BodyLimit），现已单列一档
+	// 纳入基线（review 提出，PR #45）。B/op 不断言：+1 alloc 的字节数随
+	// maxBytesReader 结构大小走，卡它只会带来假红。
+	budgetBodyLimitAllocs = 23
+	budgetSlackBytes      = 8
 )
 
 // TestRequestPathAllocBudget 把表 B 的分配计数固化成断言。
@@ -83,6 +89,9 @@ func TestRequestPathAllocBudget(t *testing.T) {
 		{"default+console-sink", enginePathAppConsoleSink, budgetConsoleSinkAllocs, budgetConsoleSinkBytes},
 		// JSON 响应那一档：把「先编码到 buffer、成功才写头」这条路径也钉住。
 		{"default+json", enginePathAppJSON, budgetJSONAllocs, budgetJSONBytes},
+		// 路由级闸门那一档：挂 BodyLimit 的路由每请求多一次分配（MaxBytesReader
+		// 包装器），把这条路径也钉住。
+		{"default+body-limit", enginePathAppBodyLimit, budgetBodyLimitAllocs, 0},
 	}
 
 	for _, c := range cases {
