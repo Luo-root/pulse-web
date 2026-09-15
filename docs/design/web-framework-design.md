@@ -287,6 +287,8 @@ func (c *Ctx) Flush() error                // 流式：首刷落 200，此后逐
 
 类型约束：`Key[T]` 与 `kernel.ServiceKey[T]` 是不同类型，误用编译期报错——命名是第一道防线，类型是第二道。
 
+**`Writer()` 的能力边界**（有意的窄口）：返回的是框架包装器，**只显式实现 `http.Flusher`**（`Flush()` 落到下层 writer）；底层的 `Hijacker` / `Pusher` / `FlushError` / `SetWriteDeadline` **不透出**——内嵌 `http.ResponseWriter` 只提升 `Header` / `Write` / `WriteHeader`，其余能力必须显式实现才有。所以 `http.NewResponseController(c.Writer())` 上只有 `Flush()` 可用，`Hijack()` / `SetWriteDeadline()` / `EnableFullDuplex()` 返回 `http.ErrNotSupported`。要升级协议（WebSocket）需要原始 writer：用 `Wrap` 包一个 stdlib handler，代价是拿不到 `*Ctx`。窄口是有意的——让「流式能干什么」在类型层面一眼可见，而不是靠断言碰运气；要放开 `Hijack` 得先想清楚它与 AccessLog 体积统计的交互（另开票）。
+
 **关系澄清**：kernel **v0.2.1 起存在** scope 局部服务——`kernel.Provide(scope, key, v, kernel.Local())`：绑定存本层，**本 scope 及其后代**可读（`Get` 沿父链近因优先），父 / 兄弟不可读，随作用域销毁撤除；它**不投递服务变更、不参与 fiber 依赖解析**。所以 `c.Service(key)` ≡ `kernel.Get(c.Kernel(), key)`，会先走局部链再回全局仓库。
 
 但**请求级 KV 仍由框架自有 map 承担**，不改用 `Local()`：`Local()` 每条绑定实测 ≈ **+250 ns / +12 allocs**（kernel 层同轮对照：`Derive + Dispose` 84 ns → 挂一条绑定 337 ns，见表 B），而 `Ctx.Set/Get` 只是已分配 map 上的一次 store。`Local()` 的定位是「少量**语义性**绑定」（如 Collector），不是通用容器。
@@ -439,7 +441,7 @@ app.POST("/jobs", func(c *web.Ctx) error {
 
 ### 优雅关闭时序
 
-**kernel 的 `Context.Dispose()` 是级联截断，不是 drain**——递归销毁所有子 scope、静默 `forceUnload` 所有 fiber（`kernel/context.go:191-253`），**不等待在途工作**。drain 必须由 `net/http` 承担：
+**kernel 的 `Context.Dispose()` 是级联截断，不是 drain**——递归销毁所有子 scope、静默 `forceUnload` 所有 fiber（`kernel/context.go:191-251`），**不等待在途工作**。drain 必须由 `net/http` 承担：
 
 ```
 信号（SIGINT / SIGTERM）
@@ -676,8 +678,8 @@ pulse-web/
   证据：`TestWrapStdlibHandler`、`TestEngineUnderStdlibMiddleware`、`TestWrapPanicCaughtByEngine`。
 - [x] `ServerConfig` 契约成立：6 个默认值 + 「非零覆盖、零值保持默认」+ 配置**真的**落到 `http.Server` 上
   证据：`TestDefaultServerConfigValues`、`TestWithServerMergesNonZeroFields`、`TestServerConfigReachesHTTPServer`（1 KiB 上限下超限请求头被拒 431）。
-- [x] 流式响应可用：`c.Writer()` + `c.Flush()` 逐段推送（SSE），首刷落 200；底层不支持 `http.Flusher` 时返回明确 error
-  证据：`TestCtxFlushStreamsIncrementally`（第一段在 handler 仍挂起时已到达客户端——只有真 flush 做得到）、`TestCtxFlushWithoutFlusherReturnsError`、`TestResponseWriterKeepsFlusherCapability`。
+- [x] 流式响应可用：`c.Writer()` + `c.Flush()` 逐段推送（SSE），首刷落 200；底层不支持 `http.Flusher` 时返回明确 error；**仍是一条 AccessLog**（状态码与体积照常采集）
+  证据：`TestCtxFlushStreamsIncrementally`（第一段在 handler 仍挂起时已到达客户端——只有真 flush 做得到；同一条用例断 `Status="200"` 与 `http.response.body.size=18`）、`TestCtxFlushWithoutFlusherReturnsError`、`TestResponseWriterKeepsFlusherCapability`（能力边界：`Flusher` ✅，`FlushError` / `Hijacker` / `Pusher` / `SetWriteDeadline` ❌）。
 - [x] 性能回归：请求路径开销进入仓库 bench，作为基线不劣化
   证据：`bench/` 全套基准 + 分配预算门禁 `TestRequestPathAllocBudget`（CI 的 `Alloc budget` 步骤，不带 `-race` 执行）。
 - [x] 真实负载下与 gin 同级（不以 micro-benchmark 胜负作承诺）——**已验证一次**：裸档 0.94× / 0.97×（见「表 C」；采集工程不入库，保留在 PR #19 的分支 `bench/gin-compare`）

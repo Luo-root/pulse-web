@@ -3,22 +3,44 @@ package web
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/Luo-root/pulse/observability"
 )
 
 // 流式响应的覆盖：v1 功能面第 11 条（SSE / chunked / 大文件）。
 // 入口是 `Ctx.Writer()` + `Ctx.Flush()`——此前两者都没有测试。
 
+// waitRecord 等 Engine 收尾把记录写进 Sink（响应读完与记录落盘之间有极小的时序差）。
+func waitRecord(t *testing.T, sink *observability.MemorySink, event string) observability.Record {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if rec, ok := findRecord(sink, event); ok {
+			return rec
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("等不到 %s 记录", event)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // TestCtxFlushStreamsIncrementally 是流式的端到端证据：第一段必须在 handler
 // **仍然挂起**时就到达客户端，这只有真 flush 才做得到。
 func TestCtxFlushStreamsIncrementally(t *testing.T) {
-	e, _ := newTestEngine(t)
+	e, sink := newTestEngine(t)
+
+	var once sync.Once
 	gate := make(chan struct{})
+	release := func() { once.Do(func() { close(gate) }) }
 
 	e.GET("/sse", func(c *Ctx) error {
 		c.SetHeader("Content-Type", "text/event-stream")
@@ -29,13 +51,23 @@ func TestCtxFlushStreamsIncrementally(t *testing.T) {
 		if err := c.Flush(); err != nil {
 			return err
 		}
-		<-gate // 挂住：flush 不生效时客户端读不到第一段
+		// 挂住，好让「第一段已到达客户端」可证——flush 没生效时客户端根本读不到它。
+		// 客户端断开也要收工（真实 SSE handler 就该这么写）。
+		select {
+		case <-gate:
+		case <-c.Request().Context().Done():
+			return nil
+		}
 		_, err := w.Write([]byte("data: 2\n\n"))
 		return err
 	})
 
 	srv := httptest.NewServer(e)
 	defer srv.Close()
+	// release 必须比 srv.Close **先**执行：断言失败时 httptest.Server.Close 会等
+	// 未完成请求，不解锁就会从「干净失败」变成挂到 go test 超时——而 flush 坏掉
+	// 正是这条用例最该抓的失败。defer 是 LIFO，晚注册 = 先执行。
+	defer release()
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(srv.URL + "/sse")
@@ -57,10 +89,10 @@ func TestCtxFlushStreamsIncrementally(t *testing.T) {
 		t.Fatalf("第一段 = %q，want %q", line, "data: 1\n")
 	}
 	if blank, err := br.ReadString('\n'); err != nil || blank != "\n" {
-		t.Fatalf("第一段的空行 = %q, %v", blank, err)
+		t.Fatalf("第一段的空行 = %q，%v", blank, err)
 	}
 
-	close(gate) // 放行 handler
+	release() // 放行 handler
 
 	rest, err := io.ReadAll(br)
 	if err != nil {
@@ -68,6 +100,16 @@ func TestCtxFlushStreamsIncrementally(t *testing.T) {
 	}
 	if !strings.Contains(string(rest), "data: 2") {
 		t.Fatalf("第二段 = %q，want 含 data: 2", string(rest))
+	}
+
+	// 「仍是一条 AccessLog」：流式路径的状态码与体积照常采集——
+	// 两段各 9 字节 = 18，状态码是首刷落下的 200。
+	rec := waitRecord(t, sink, eventHTTPReq)
+	if rec.Status != "200" {
+		t.Fatalf("访问记录 Status = %q，want 200", rec.Status)
+	}
+	if got := attrsOf(rec)[attrHTTPBodySize]; got != int64(18) {
+		t.Fatalf("http.response.body.size = %v，want 18（两段各 9 字节）", got)
 	}
 }
 
@@ -108,25 +150,71 @@ func TestCtxFlushWithoutFlusherReturnsError(t *testing.T) {
 	}
 }
 
-// TestResponseWriterKeepsFlusherCapability：框架的包装器不吞掉底层能力——
-// `Ctx.Writer()` 仍是 http.Flusher（内嵌接口的方法集提升），且 flush 真的落到
-// 底层 writer。
+// TestResponseWriterKeepsFlusherCapability 钉住包装器的**能力边界**：它只显式实现
+// `http.Flusher`；`FlushError` / `Hijacker` / `Pusher` / `SetWriteDeadline` 都不透出。
+//
+// 边界要钉全，是因为「包装器＝底层能力都在」是错的，而类型断言静默失败很难查：
+// 内嵌 `http.ResponseWriter` 只提升 `Header` / `Write` / `WriteHeader`，Flusher 来自
+// `responseWriter` 自己实现的 `Flush()`。要升级协议（WebSocket）得走 `Wrap` 拿原始 writer。
+//
+// 用真实服务器：`httptest.ResponseRecorder` 本来就不支持 Hijacker，
+// 测不出「包装器把底层有的能力过滤掉了」这件事。
 func TestResponseWriterKeepsFlusherCapability(t *testing.T) {
 	e, _ := newTestEngine(t)
-	e.GET("/f", func(c *Ctx) error {
-		f, ok := c.Writer().(http.Flusher)
-		if !ok {
-			return Internal("no_flusher", nil)
-		}
-		f.Flush() // 首次 flush 之前没有任何写入：应落 200
+
+	type caps struct {
+		flusher    bool
+		flushError bool
+		hijacker   bool
+		pusher     bool
+		rcFlush    error
+		rcDeadline error
+	}
+	got := make(chan caps, 1)
+
+	e.GET("/caps", func(c *Ctx) error {
+		w := c.Writer()
+		var cs caps
+		_, cs.flusher = w.(http.Flusher)
+		_, cs.flushError = w.(interface{ FlushError() error })
+		_, cs.hijacker = w.(http.Hijacker)
+		_, cs.pusher = w.(http.Pusher)
+		rc := http.NewResponseController(w)
+		cs.rcFlush = rc.Flush()
+		cs.rcDeadline = rc.SetWriteDeadline(time.Now().Add(time.Second))
+		got <- cs
 		return nil
 	})
 
-	rec := doReq(e, "GET", "/f", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d，want 200", rec.Code)
+	srv := httptest.NewServer(e)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/caps")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !rec.Flushed {
-		t.Fatal("flush 没有到达底层 writer")
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d，want 200", resp.StatusCode)
+	}
+
+	cs := <-got
+	if !cs.flusher {
+		t.Fatal("http.Flusher 必须可用——这是流式的前提")
+	}
+	if cs.flushError {
+		t.Fatal("FlushError 不该透出：ResponseController.Flush() 只能退回 Flusher.Flush()，flush 失败拿不到 error")
+	}
+	if cs.hijacker {
+		t.Fatal("Hijacker 不该透出：升级协议请走 Wrap 拿原始 writer")
+	}
+	if cs.pusher {
+		t.Fatal("Pusher 不该透出")
+	}
+	if cs.rcFlush != nil {
+		t.Fatalf("ResponseController.Flush() = %v，want nil", cs.rcFlush)
+	}
+	if !errors.Is(cs.rcDeadline, http.ErrNotSupported) {
+		t.Fatalf("ResponseController.SetWriteDeadline() = %v，want http.ErrNotSupported", cs.rcDeadline)
 	}
 }

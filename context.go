@@ -124,9 +124,15 @@ func (c *Ctx) SetHeader(key, value string) { c.w.Header().Set(key, value) }
 //		if err := c.Flush(); err != nil { return err }  // 首刷落 200，此后逐段推送
 //	}
 //
-// 返回的是框架的包装器：状态码与响应体积照常被 AccessLog 采集；包装器保留底层
-// 能力（内嵌接口的方法集提升），`http.Flusher` / `http.ResponseController` 一类的
-// 用法不受影响。
+// 返回的是框架的包装器：状态码与响应体积照常被 AccessLog 采集（写多少字节就记多少）。
+//
+// **能力面是有意的窄口**：包装器显式实现 `http.Flusher`（`Flush()` 落到下层 writer），
+// 底层的 `http.Hijacker` / `http.Pusher` / `interface{ FlushError() error }` /
+// `interface{ SetWriteDeadline(time.Time) error }` **一律不透出**——内嵌 `http.ResponseWriter`
+// 只提升 `Header` / `Write` / `WriteHeader`，其余能力要靠显式实现才有。于是
+// `http.NewResponseController(c.Writer())` 上 `Flush()` 可用，而 `Hijack()` /
+// `SetWriteDeadline()` / `EnableFullDuplex()` 返回 `http.ErrNotSupported`。
+// 要升级协议（WebSocket）需要原始 writer：用 `Wrap` 包一个 stdlib handler（代价是拿不到 `*Ctx`）。
 func (c *Ctx) Writer() http.ResponseWriter { return c.w }
 
 // Status 只**设置**状态码，不立即写出；由 JSON/Text 或引擎收尾时落定。

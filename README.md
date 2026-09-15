@@ -63,8 +63,8 @@ app.GET("/events", func(c *web.Ctx) error {
 })
 ```
 
-写出器是框架的包装器：状态码与响应体积照常进 AccessLog；`http.Flusher` / `http.ResponseController` 一类用法不受影响
-（`Flush` 的首刷会落 200，所以流式接口不要在流里再改状态码）。
+写出器是框架的包装器：状态码与响应体积照常进 AccessLog（写多少字节就记多少）。能力面是**有意的窄口**——只保证 `http.Flusher`（`http.NewResponseController(w).Flush()` 也可用）；`Hijacker` / `Pusher` / `FlushError` / `SetWriteDeadline` **不透出**，要升级协议拿原始 writer 请用 `web.Wrap` 包 stdlib handler。
+（`Flush` 的首刷会落 200，所以流式接口不要在流里再改状态码。）
 
 ## 日志落地（持久化归谁）
 
