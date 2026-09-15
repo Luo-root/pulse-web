@@ -129,7 +129,7 @@ g2.GET("/users", h, mw3)
 - **包含关系自检（防倒挂）**：`AttachCollector` = 裸绑定 + 1 个 Collector 结构，实测 ns 与 B/op 都严格更大（353.9 > 337.2、681 B > 649 B）。两者 allocs 同为 14——**alloc 单值区分不了这两者**（一次局部绑定写入本身就占十来个分配），判包含关系要看 B/op 与 ns。
 - **与插件树规模解耦**：10 / 50 / 100 插件 338 / 366 / 407 ns，allocs 恒为 14。
 - **`c.JSON` 先编码到 buffer 的代价**（两棵树同一探针，`-benchtime=20000x -count=3`）：main 23 → 本版 **25 allocs/op**、B/op 6341 → 6438，即 **+2 allocs / +97 B 每响应**——换来「编码失败不再发 200 空体」（#33）。这笔账起初没进描述、门禁也覆盖不到（其余档 handler 都是 `c.Text`，压根不经过 `c.JSON`），现已单列 JSON 档纳入基线。
-- **挂了 `BodyLimit` 的路由 +1 alloc**：default 档 22 → body-limit 档 **23 allocs/op**，多出来的就是 `http.MaxBytesReader` 返回的包装器本身（绑在请求上，无法复用）。这笔账同样起初没进描述、门禁也覆盖不到（其余档都不挂 `BodyLimit`），现已单列一档纳入基线（review 提出，PR #45）。**该行只列分配口径**：ns 未与本表同轮测得，按本表「凡要相减必须取本表内两行」的规矩留空——同轮对照（`-benchtime=20000x -count=3`）是 default 1823 ns vs body-limit 1828 ns，即 **+5 ns**、噪声量级；要 ns 就同轮跑 `BenchmarkEngineRequestPath` 与 `BenchmarkEngineRequestPath_BodyLimit` 再相减。
+- **挂了 `BodyLimit` 的路由 +1 alloc**：default 档 22 → body-limit 档 **23 allocs/op**，多出来的就是 `http.MaxBytesReader` 返回的包装器本身（绑在请求上，无法复用）。这笔账同样起初没进描述、门禁也覆盖不到（其余档都不挂 `BodyLimit`），现已单列一档纳入基线（review 提出，PR #45）。**该行只列分配口径**：ns 未与本表同轮测得，按本表「凡要相减必须取本表内两行」的规矩留空。这台机器的噪声恰好是最好的说明——同轮 `-benchtime=20000x -count=5` 取中位数：default **1988 ns** vs body-limit **1844 ns**，即「多一次分配」的那版反而报出**快 144 ns**，纯噪声（上一轮同样两档是 1823 vs 1828，方向相反）。**分配是确定性判据，ns 不是**；要 ns 就在安静机器上同轮跑 `BenchmarkEngineRequestPath` 与 `BenchmarkEngineRequestPath_BodyLimit` 再相减。
 
 **回归门禁**：本表的**分配计数与 B/op** 已固化成断言（`bench/budget_test.go`，由 CI 的 `Alloc budget` 步骤执行，不带 `-race` 跑）。**ns 不设阈值**——跨轮会漂 2–4×，拿它做门禁等于把机器状态引进 CI；ns 对比仍走人工 benchstat，口径见表 A / 表 B 各自的说明。断言失败时按提示同步刷新常量与本表。
 
