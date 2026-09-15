@@ -48,10 +48,27 @@ func renderLine(t *testing.T, rec observability.Record) string {
 // 断言（而不是被一个 Contains 悄悄放过）。
 func TestConsoleSinkHTTPLine(t *testing.T) {
 	got := renderLine(t, httpRecord("200", 585100*time.Nanosecond))
-	want := "2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /users/42" +
+	want := "PULSE | 2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /users/42" +
 		" | route=/users/{id} | size=29 | host=pulse-web | trace=8f2e1a3b4c5d6e7f8a9b0c1d2e3f4a5b\n"
 	if got != want {
 		t.Fatalf("版式不符：\n got=%q\nwant=%q", got, want)
+	}
+}
+
+// TestConsoleSinkPaddingUsesDisplayWidth 钉住列补齐按**显示宽度**算，不是 rune 数。
+//
+// 全角字符占 2 列：`客户端-甲:1234` 是 10 rune / 14 显示列，正确补齐后该列占满
+// 15 显示列（补 1 个空格）。按 rune 数补会补 5 个空格、把后续列整体推右 4 格——
+// 旧实现就是那样（`utf8.RuneCount`），迁移时换成了上游 `DisplayWidth`。
+func TestConsoleSinkPaddingUsesDisplayWidth(t *testing.T) {
+	rec := httpRecord("200", 585100*time.Nanosecond)
+	observability.Set(&rec.Attrs, attrClientAddr, "客户端-甲:1234")
+
+	got := renderLine(t, rec)
+	want := "PULSE | 2026/09/14 - 08:30:00 | 200 |   585.1µs | 客户端-甲:1234  | GET     /users/42" +
+		" | route=/users/{id} | size=29 | host=pulse-web | trace=8f2e1a3b4c5d6e7f8a9b0c1d2e3f4a5b\n"
+	if got != want {
+		t.Fatalf("客户端列应按显示宽度占满 %d 列（全角算 2 列）：\n got=%q\nwant=%q", colClient, got, want)
 	}
 }
 
@@ -84,21 +101,22 @@ func TestConsoleSinkHTTPLineFallbacks(t *testing.T) {
 	t.Run("方法/客户端缺值补 -", func(t *testing.T) {
 		rec := httpRecord("200", 0)
 		rec.Attrs = observability.Attrs{}
+		// fields[0] 是行首标识 PULSE，[1] 才是时间列。
 		fields := consoleFields(renderLine(t, rec))
-		if len(fields) < 5 {
+		if len(fields) < 6 {
 			t.Fatalf("列数不足：%q", fields)
 		}
-		if fields[1] != "200" {
-			t.Errorf("状态列 = %q，want 200", fields[1])
+		if fields[2] != "200" {
+			t.Errorf("状态列 = %q，want 200", fields[2])
 		}
-		if !strings.HasSuffix(fields[2], "0ns") {
-			t.Errorf("耗时列应带单位：%q", fields[2])
+		if !strings.HasSuffix(fields[3], "0ns") {
+			t.Errorf("耗时列应带单位：%q", fields[3])
 		}
-		if fields[3] != "-" {
-			t.Errorf("客户端缺值应为 -，实得 %q", fields[3])
+		if fields[4] != "-" {
+			t.Errorf("客户端缺值应为 -，实得 %q", fields[4])
 		}
-		if got := strings.Fields(fields[4]); len(got) != 2 || got[0] != "-" || got[1] != "-" {
-			t.Errorf("方法/路径缺值应各补 -，实得 %q", fields[4])
+		if got := strings.Fields(fields[5]); len(got) != 2 || got[0] != "-" || got[1] != "-" {
+			t.Errorf("方法/路径缺值应各补 -，实得 %q", fields[5])
 		}
 	})
 
@@ -150,7 +168,7 @@ func TestConsoleSinkEventLine(t *testing.T) {
 		To:        "Running",
 	}
 	got := renderLine(t, rec)
-	want := "2026/09/14 - 08:30:00 | pulse.kernel.fiber_state host=svc fiber=db state=Starting→Running\n"
+	want := "PULSE | 2026/09/14 - 08:30:00 | pulse.kernel.fiber_state host=svc fiber=db state=Starting→Running\n"
 	if got != want {
 		t.Fatalf("事件行版式不符：\n got=%q\nwant=%q", got, want)
 	}
@@ -241,6 +259,60 @@ func TestConsoleSinkColor(t *testing.T) {
 	}
 }
 
+// failingWriter 每次写都失败（stdout 管道被关掉 / journald socket 满 / 磁盘满），
+// 并记录被调用次数——用来验证「失败之后仍然继续尝试写」。
+type failingWriter struct {
+	err   error
+	calls int
+}
+
+func (w *failingWriter) Write(p []byte) (int, error) {
+	w.calls++
+	return 0, w.err
+}
+
+// TestConsoleSinkErrSurfacesWriteFailure 是写失败那条路的行为回归。
+//
+// 设计文档写着「写错误不抛，但可查」，而 `Err()` / `Flush()` 现在是**内嵌上游出口
+// 白送**的——只有「方法是从上游嵌进来的」这层推理撑着，没有任何用例跑过写失败。
+// 这里把三件事钉住：首错为准（后续错误不覆盖）、失败后继续尝试写、`Flush()` 把首错
+// 交出来（关闭时序第 ⑤ 步读的就是它，见 `sinkFlusher` 与 `TestShutdownFlushesBufferingSink`）。
+func TestConsoleSinkErrSurfacesWriteFailure(t *testing.T) {
+	w := &failingWriter{err: errors.New("broken pipe")}
+	s := NewConsoleSink(w, WithColor(false))
+
+	if err := s.Err(); err != nil {
+		t.Fatalf("还没写过就 Err()：%v", err)
+	}
+
+	s.Write(httpRecord("200", time.Microsecond))
+	if s.Err() == nil {
+		t.Fatal("写失败之后 Err() 必须非 nil——「日志早就不写了却没人知道」正是要避免的形态")
+	}
+	if got := s.Err().Error(); !strings.Contains(got, "broken pipe") {
+		t.Fatalf("Err() 应原样返回写错误，实得 %q", got)
+	}
+
+	// 失败之后仍然继续尝试写：不静默退出、不改缓冲策略。
+	before := w.calls
+	s.Write(httpRecord("500", time.Microsecond))
+	if w.calls == before {
+		t.Fatal("写失败后不再尝试写：出口静默退化了")
+	}
+
+	// 首错为准：后续换成别的错误也不覆盖它。
+	w.err = errors.New("second failure")
+	s.Write(httpRecord("200", time.Microsecond))
+	if got := s.Err().Error(); !strings.Contains(got, "broken pipe") {
+		t.Fatalf("Err() 应保持首次错误，实得 %q", got)
+	}
+
+	// Flush 把首错交出来（关闭时序第 ⑤ 步据此记 slog.Warn）。
+	if err := s.Flush(); err == nil || !strings.Contains(err.Error(), "broken pipe") {
+		t.Fatalf("Flush() 应返回首错，实得 %v", err)
+	}
+}
+
 // TestConsoleSinkConcurrentWrites：并发写不串台（-race 下同时验数据竞争），
 // 且每个并发调用都不需要自己拿锁。
 func TestConsoleSinkConcurrentWrites(t *testing.T) {
@@ -265,7 +337,7 @@ func TestConsoleSinkConcurrentWrites(t *testing.T) {
 		t.Fatalf("行数不符：got %d want %d（写串台或被吞）", len(lines), writers*perWriter)
 	}
 	for i, ln := range lines {
-		if !strings.HasPrefix(ln, "2026/09/14 - 08:30:00 | 200 |") {
+		if !strings.HasPrefix(ln, "PULSE | 2026/09/14 - 08:30:00 | 200 |") {
 			t.Fatalf("第 %d 行不完整：%q", i+1, ln)
 		}
 	}
@@ -291,17 +363,17 @@ func TestConsoleSinkZeroAlloc(t *testing.T) {
 	if n := testing.AllocsPerRun(1000, func() { s.Write(event) }); n != 0 {
 		t.Fatalf("事件行应 0 分配，实测 %v allocs/op", n)
 	}
-}
 
-// failingWriter 每次写都失败，并记录被调用了几次。
-type failingWriter struct {
-	err   error
-	calls int
-}
-
-func (w *failingWriter) Write(p []byte) (int, error) {
-	w.calls++
-	return 0, w.err
+	// 固定列之外还有属性（中间件 / 业务往访问记录里加的字段）——这一格以前没有
+	// 用例覆盖：旧实现在这条路上走 `Attrs.Range` 兜底，实测每条 6 次分配；
+	// 换成上游 `AppendAttrsExcept`（无闭包）之后是 0。
+	withExtras := httpRecord("200", 585*time.Microsecond)
+	observability.Set(&withExtras.Attrs, "llm.model", "MiniMax-M3")
+	observability.Set(&withExtras.Attrs, "llm.temp", 0.75)
+	s.Write(withExtras)
+	if n := testing.AllocsPerRun(1000, func() { s.Write(withExtras) }); n != 0 {
+		t.Fatalf("含未知属性的行应 0 分配，实测 %v allocs/op", n)
+	}
 }
 
 // TestConsoleSinkErrReportsFirstFailure：写失败不 panic，`Err()` 给出**首次**错误，
@@ -375,20 +447,34 @@ func TestConsoleSinkNilWriterPanics(t *testing.T) {
 	NewConsoleSink(nil)
 }
 
-// TestAppendDurationUnits：单位与精度（亚毫秒不取整成 0——旧默认出口的毛病）。
-func TestAppendDurationUnits(t *testing.T) {
+// TestConsoleSinkDurationColumn：耗时列的单位与精度（亚毫秒不取整成 0——旧默认
+// 出口的毛病），口径来自上游 `observability.AppendDuration`。
+//
+// 这条同时钉住**迁移到 LineSink 的五处变化里的一处**：耗时从「浮点四舍五入」
+// 改成上游口径的「整数截断」。旧实现走 `strconv.AppendFloat('f')`，585199ns 会
+// 渲染成 `585.2µs`、7629999ns 成 `7.63ms`；上游口径是 `585.1µs` / `7.62ms`。
+// 另两处是行首标识（`PULSE`）与列补齐按显示宽度，理由写在 Issue #27：口径必须是
+// 各出口共用的一致性资产，本地不再留第二份实现。
+// 谁把它改回四舍五入（或改小数位），先红在这条上。
+func TestConsoleSinkDurationColumn(t *testing.T) {
+	durCol := func(d time.Duration) string {
+		// fields[0] 是行首标识、[1] 是时间列，耗时列在 [3]。
+		return consoleFields(renderLine(t, httpRecord("200", d)))[3]
+	}
 	cases := []struct {
 		d    time.Duration
 		want string
 	}{
 		{820 * time.Nanosecond, "820ns"},
 		{585100 * time.Nanosecond, "585.1µs"},
+		{585199 * time.Nanosecond, "585.1µs"}, // 截断，不是 585.2
 		{7623 * time.Microsecond, "7.62ms"},
+		{7629999 * time.Nanosecond, "7.62ms"}, // 截断，不是 7.63
 		{1234 * time.Millisecond, "1.23s"},
 	}
 	for _, c := range cases {
-		if got := string(appendDuration(nil, c.d)); got != c.want {
-			t.Errorf("appendDuration(%v) = %q，want %q", c.d, got, c.want)
+		if got := durCol(c.d); got != c.want {
+			t.Errorf("耗时列(%v) = %q，want %q", c.d, got, c.want)
 		}
 	}
 }
@@ -401,8 +487,8 @@ func TestDefaultSinkIsConsoleSink(t *testing.T) {
 	if !ok {
 		t.Fatalf("默认出口应为 *ConsoleSink，实际 %T", sink)
 	}
-	if cs.w == nil {
-		t.Fatal("默认出口必须绑定一个 writer")
+	if cs.LineSink == nil {
+		t.Fatal("默认出口必须是一层挂在 LineSink 上的薄壳")
 	}
 }
 

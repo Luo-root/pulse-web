@@ -40,11 +40,13 @@ const (
 	budgetCollectorBytes  = 6803
 	budgetMinimalAllocs   = 17
 	budgetMinimalBytes    = 5858
-	// 默认出口（ConsoleSink）那一档：分配计数与 nopSink 档相同——出口渲染是
-	// 零分配的（池化缓冲 + 不用 fmt）。B/op 多 11 字节来自 `sync.Pool` 每 P
-	// 一个缓冲（256 B）在 20000 次请求上的摊销，不是每请求成本。
+	// 默认出口（ConsoleSink）那一档：分配计数与 B/op 都与 nopSink 档**逐项相同**。
+	// 出口渲染零分配（渲染器只往 LineSink 自持的缓冲切片里 append，换行与写出都在
+	// 上游完成）；`WithImmediate` 下不挂池化缓冲，所以连摊销也没有了。
+	// v0.2.4 之前这里比 nopSink 档多 12 字节（6326），那是旧的 `sync.Pool` 每 P
+	// 一个缓冲（256 B）在 20000 次请求上的摊销——改成内嵌 LineSink 后归零。
 	budgetConsoleSinkAllocs = 22
-	budgetConsoleSinkBytes  = 6326
+	budgetConsoleSinkBytes  = 6314
 	budgetSlackBytes        = 8
 )
 

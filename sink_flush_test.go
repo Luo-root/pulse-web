@@ -69,6 +69,12 @@ func TestSinkFlusherCoversBothShapes(t *testing.T) {
 	if _, ok := sinkFlusher(observability.NewLineSink(&buf)); !ok {
 		t.Fatal("observability.LineSink 必须被识别")
 	}
+	// 默认出口也是这一形态（内嵌 LineSink）——它是 New() 实际装配的那一个，
+	// 漏了它，「关闭前最后一批随进程消失」会落回默认路径。
+	var consoleBuf bytes.Buffer
+	if _, ok := sinkFlusher(NewConsoleSink(&consoleBuf, WithColor(false))); !ok {
+		t.Fatal("默认出口 ConsoleSink 必须被识别")
+	}
 	async := observability.NewAsyncSink(noFlushSink{})
 	defer func() { _ = async.Close(context.Background()) }()
 	if _, ok := sinkFlusher(async); !ok {
