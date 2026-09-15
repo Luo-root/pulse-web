@@ -57,7 +57,9 @@ func (e *Engine) resolveTraceID(r *http.Request) string {
 }
 
 // traceIDFromHeader 读取 W3C traceparent / B3 的 trace-id。
-// 格式不符（长度、字符集）一律视为不存在 —— 不信任畸形输入。
+// traceparent 的 trace-id 必须是 32 位 hex（W3C 规定）；B3 接受 32hex 与
+// 16hex（Zipkin 64-bit，左垫 0 归一）。格式不符（长度、字符集）一律视为
+// 不存在 —— 不信任畸形输入。
 func traceIDFromHeader(r *http.Request) string {
 	if tp := strings.TrimSpace(r.Header.Get("Traceparent")); tp != "" {
 		// version-traceid-parentid-flags
@@ -66,16 +68,31 @@ func traceIDFromHeader(r *http.Request) string {
 			return strings.ToLower(parts[1])
 		}
 	}
-	if b3 := strings.TrimSpace(r.Header.Get("X-B3-TraceId")); isHex32(b3) {
-		return strings.ToLower(b3)
+	if b3 := strings.TrimSpace(r.Header.Get("X-B3-TraceId")); b3 != "" {
+		return normalizeB3(b3)
 	}
 	return ""
 }
 
-func isHex32(s string) bool {
-	if len(s) != 32 {
-		return false
+// normalizeB3 归一 B3 trace-id：32hex（128-bit）原样小写；16hex（Zipkin
+// 64-bit）左垫 16 个 0 归一为 32hex；其余返回空串（视为不存在）。
+func normalizeB3(s string) string {
+	switch len(s) {
+	case 32:
+		if isHex(s) {
+			return strings.ToLower(s)
+		}
+	case 16:
+		if isHex(s) {
+			return "0000000000000000" + strings.ToLower(s)
+		}
 	}
+	return ""
+}
+
+func isHex32(s string) bool { return len(s) == 32 && isHex(s) }
+
+func isHex(s string) bool {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {

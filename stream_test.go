@@ -131,6 +131,69 @@ func (w *plainWriter) Write(b []byte) (int, error) { return w.buf.Write(b) }
 
 // TestCtxFlushWithoutFlusherReturnsError：底层不支持 Flush 时给出明确 error，
 // 而不是静默当作成功。
+// TestFlushFirstWriteUsesStatus 验证首刷落 Status() 设置的状态码：此前 Flush
+// 硬编码 200，`c.Status(201); c.Flush()` 会写出 200，与 Status 的公开语义打架（#33）。
+func TestFlushFirstWriteUsesStatus(t *testing.T) {
+	e, _ := newTestEngine(t)
+	e.GET("/s", func(c *Ctx) error {
+		c.Status(http.StatusCreated)
+		return c.Flush()
+	})
+	srv := httptest.NewServer(e)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d，want 201", resp.StatusCode)
+	}
+}
+
+// TestFlushFirstWriteDefaultsTo200：未设 Status 时首刷仍是 200。
+func TestFlushFirstWriteDefaultsTo200(t *testing.T) {
+	e, _ := newTestEngine(t)
+	e.GET("/s", func(c *Ctx) error { return c.Flush() })
+	srv := httptest.NewServer(e)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d，want 200", resp.StatusCode)
+	}
+}
+
+// TestStatusAfterFlushIgnored：首刷之后响应头已发出——再调 Status 不会改变
+// 已落定的状态码（HTTP 固有语义，文档写明）。
+func TestStatusAfterFlushIgnored(t *testing.T) {
+	e, _ := newTestEngine(t)
+	e.GET("/s", func(c *Ctx) error {
+		c.Status(http.StatusCreated)
+		if err := c.Flush(); err != nil {
+			return err
+		}
+		c.Status(http.StatusInternalServerError)
+		return nil
+	})
+	srv := httptest.NewServer(e)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d，want 201（首刷已落定）", resp.StatusCode)
+	}
+}
+
 func TestCtxFlushWithoutFlusherReturnsError(t *testing.T) {
 	e, _ := newTestEngine(t)
 	var flushErr error

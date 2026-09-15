@@ -545,7 +545,7 @@ func (e *Engine) finish(c *Ctx, rw *responseWriter) {
 	}
 
 	if !rw.wrote {
-		code := c.status
+		code := rw.statusHint
 		if code == 0 {
 			code = http.StatusOK
 		}

@@ -284,7 +284,7 @@ func (c *Ctx) Text(code int, s string) error
 func (c *Ctx) Status(code int) *Ctx       // 只设置，不立即写头
 func (c *Ctx) SetHeader(k, v string)
 func (c *Ctx) Writer() http.ResponseWriter // 流式：直接写字节（包装器，状态码与体积照常采集）
-func (c *Ctx) Flush() error                // 流式：首刷落 200，此后逐段推送；底层不支持 Flusher 时返回明确 error
+func (c *Ctx) Flush() error                // 流式：首刷落 Status() 设置（缺省 200），此后逐段推送；底层不支持 Flusher 时返回明确 error
 ```
 
 类型约束：`Key[T]` 与 `kernel.ServiceKey[T]` 是不同类型，误用编译期报错——命名是第一道防线，类型是第二道。
@@ -400,7 +400,7 @@ app.GET("/", func(c *web.Ctx) error {
 | `c.Kernel()` / `c.Service` | ❌ | 请求 scope 已 Dispose：`Get` 返回 false、`Effect` 返回 `ErrDisposed`（**返回的是死 scope，不是 nil**，避免 nil panic） |
 
 - `err` 参数是**原始 error（只读）**；`ErrorHandler` 返回值 = **映射器自身失败**（响应未写则兜底 500；已写则只进内部日志）
-- **panic 兜底在 Engine 的 `defer`**（不是中间件）——所以 `Minimal()` 下 panic 依然有 500 响应与记录
+- **panic 兜底在 Engine 的 `defer`**（不是中间件）——所以 `Minimal()` 下 panic 依然有 500 响应（**记录**则取决于装配：Minimal 无 Sink、无 AccessLog，Sink 里不会有这一条）
 
 ### Ctx 生命周期与后台任务
 
@@ -479,7 +479,7 @@ app.POST("/jobs", func(c *web.Ctx) error {
 
 **它服务的是「库作者」，不是「应用作者」**：应用作者（自己的 controller / service / dao）把 `c` 或 `c.Observe` 往下传就够；需要它的是那种「想同时活在 web 请求与 CLI / worker 里、因此不能 import pulse-web、只收 `*kernel.Context`」的库对象——**且必须由宿主把请求 scope 显式传进去**。边界见下方两处。无 Sink 时装配期 panic（`Minimal()` 且未 `WithSink` 即此组合）。
 
-`WithoutAccessLog()` 关闭访问日志（用户已接自己的日志系统时用）——只关 AccessLog，`Trace` 与 panic 兜底不受影响。
+`WithoutAccessLog()` 关闭访问日志（用户已接自己的日志系统时用）——只关 AccessLog，`Trace` 与 panic 兜底（500 响应）不受影响。**关闭后 panic 不再写观测记录**：AccessLog 是访问级记录的唯一人工出口；`PanicError.Stack` 只经 `Record.Err` 抵达 Sink，默认出口不打印栈——需要时由宿主自定义 Sink 用 `errors.As` 从 `Record.Err` 取 `*PanicError`。
 
 v1 选项面：`New()` / `Minimal()` / `WithSink` / `WithoutAccessLog` / `WithRoot` / `WithHostID` / `WithServer` / `WithErrorHandler` / `WithTemplates` / `WithMaxBodyBytes` / `WithTrustedTraceHeader` / `WithCollector` / `OnShutdown`。注意 **`AsyncSink` 不在选项面**——它是**出口实现**，用 `WithSink(observability.NewAsyncSink(...))` 接入，框架不另造缓冲层。
 
@@ -610,7 +610,7 @@ PULSE | 2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /us
 
 ### TraceID 兼容
 
-**入站**：优先读 W3C `traceparent` 的 32hex trace-id；其次 B3 `X-B3-TraceId`；都没有则**框架自带生成器产出 32hex**（不用 `observability.NewTraceID()` 的异构格式——`traceid.go:19` 明确"返回值无契约语义、宿主可自带格式"）。
+**入站**：优先读 W3C `traceparent` 的 32hex trace-id；其次 B3 `X-B3-TraceId`（**32hex 原样、16hex（Zipkin 64-bit）左垫 0 归一为 32hex**）；都没有则**框架自带生成器产出 32hex**（不用 `observability.NewTraceID()` 的异构格式——`traceid.go:19` 明确"返回值无契约语义、宿主可自带格式"）。
 
 **出站**：只回 `X-Trace-Id`。**不写 `traceparent`、不编造假 span-id**——pulse 模型是平铺记录、没有 span，写一个假的 span-id 会让下游 APM 误认为存在真实 span 父子关系。
 
@@ -676,15 +676,17 @@ pulse-web/
 - [x] **`c` 上的业务打点与 AccessLog 进同一个 Sink**：同一 `TraceID` / `HostID`；Source 分别为 `"http"`（AccessLog）与 `"bridge"`（`c.Observe` **直写**——该字面值是上游 `observability.SourceAdapter`，此路径不注册 Collector）
   证据：`TestAccessLogRecordFields` 与 `observe_test.go` 里的业务打点断言（同一 Sink、同一 TraceID、Source 为 `SourceAdapter`）。
 - [x] 观测贯穿：单请求 TraceID 在 router → handler → Sink 一致；后台任务共享同一 TraceID
-  证据：`TestTraceIDGeneratedAndSharedAcrossRecord`、`TestDetachSharesTraceAndRootAccess`；入站头采纳另见 `TestTraceparentAdopted` / `TestB3TraceIDAdopted`。
+  证据：`TestTraceIDGeneratedAndSharedAcrossRecord`、`TestDetachSharesTraceAndRootAccess`；入站头采纳另见 `TestTraceparentAdopted` / `TestB3TraceIDAdopted` / `TestB3TraceID16HexNormalized`（16hex 左垫归一）/ `TestMalformedTraceHeadersIgnored`。
 - [x] 标准库兼容：挂载 stdlib 中间件无侵入；`Wrap` 双向适配
   证据：`TestWrapStdlibHandler`、`TestEngineUnderStdlibMiddleware`、`TestWrapPanicCaughtByEngine`。
 - [x] `ServerConfig` 契约成立：6 个默认值 + 「非零覆盖、零值保持默认」+ 配置**真的**落到 `http.Server` 上
   证据：`TestDefaultServerConfigValues`、`TestWithServerMergesNonZeroFields`、`TestServerConfigReachesHTTPServer`（1 KiB 上限下超限请求头被拒 431）。
-- [x] 流式响应可用：`c.Writer()` + `c.Flush()` 逐段推送（SSE），首刷落 200；底层不支持 `http.Flusher` 时返回明确 error；**仍是一条 AccessLog**（状态码与体积照常采集）
-  证据：`TestCtxFlushStreamsIncrementally`（第一段在 handler 仍挂起时已到达客户端——只有真 flush 做得到；同一条用例断 `Status="200"` 与 `http.response.body.size=18`）、`TestCtxFlushWithoutFlusherReturnsError`、`TestResponseWriterKeepsFlusherCapability`（能力边界：`Flusher` ✅，`FlushError` / `Hijacker` / `Pusher` / `SetWriteDeadline` ❌）。
+- [x] 流式响应可用：`c.Writer()` + `c.Flush()` 逐段推送（SSE），首刷落 `Status()` 设置（缺省 200）；底层不支持 `http.Flusher` 时返回明确 error；**仍是一条 AccessLog**（状态码与体积照常采集）
+  证据：`TestCtxFlushStreamsIncrementally`（第一段在 handler 仍挂起时已到达客户端——只有真 flush 做得到；同一条用例断 `Status="200"` 与 `http.response.body.size=18`）、`TestFlushFirstWriteUsesStatus` / `TestFlushFirstWriteDefaultsTo200` / `TestStatusAfterFlushIgnored`（首刷吃 `Status`，首刷后不可改）、`TestCtxFlushWithoutFlusherReturnsError`、`TestResponseWriterKeepsFlusherCapability`（能力边界：`Flusher` ✅，`FlushError` / `Hijacker` / `Pusher` / `SetWriteDeadline` ❌）。
 - [x] 请求体绑定完整：`Ctx.Bind` 按 Content-Type 分派（JSON / XML / form-urlencoded / multipart；无 body 落 query），`BindQuery` 显式 query；`WithMaxBodyBytes` 上限对**全部**读取路径生效（超限 → 413 + `body_too_large`）
-  证据：`bind_test.go` 16 条——分派（`TestBindJSON` / `TestBindXML` / `TestBindForm` / `TestBindFormQueryIsNotMerged` / `TestBindMultipart` / `TestBindQuery` / `TestBindUnsupportedMediaType` / `TestBindNoContentTypeFallsBackToForm` / `TestBindContentTypeWithParameters`）、映射（`TestBindMoreScalarKinds`）、上限（`TestBindMaxBodyBytes` 读取闸门 + Content-Length 预检两路径、`TestBindUserWrappedMaxBytesReader` 用户自包、`TestBindDefaultNoLimit` 默认不限）、健壮性（`TestBindMalformedInputs` / `TestBindTargetErrors` / `TestBindQueryTargetError`）。
+  证据：`bind_test.go` 19 条——分派（`TestBindJSON` / `TestBindXML` / `TestBindForm` / `TestBindFormQueryIsNotMerged` / `TestBindMultipart` / `TestBindQuery` / `TestBindUnsupportedMediaType` / `TestBindNoContentTypeFallsBackToForm` / `TestBindContentTypeWithParameters` / `TestBindJSONSlice`）、映射（`TestBindMoreScalarKinds`）、上限（`TestBindMaxBodyBytes` 读取闸门 + Content-Length 预检两路径、`TestBindURLEncodedOverLimit` 10 MiB 解析闸有 / 无 CT、`TestBindUserWrappedMaxBytesReader` 用户自包、`TestBindDefaultNoLimit` 默认不限）、健壮性（`TestBindMalformedInputs` / `TestBindJSONTrailingData` / `TestBindTargetErrors` / `TestBindQueryTargetError`）。
+- [x] 写出 / 错误语义收口：`c.JSON` 先编码成功才写头（失败 → 500 统一错误体，不再 200 空体）；`c.Flush` 与包装器 `Flush` 同一实现、首刷吃 `Status()`；`panic(web.NotFound(...))` 一律 500（要 4xx 请 return）
+  证据：`TestJSONEncodeFailureMappedTo500` / `TestJSONBytesStable`（尾换行保留）/ `TestPanicHTTPErrorMapsTo500`；Flush 三条见上一条。
 - [x] 性能回归：请求路径开销进入仓库 bench，作为基线不劣化
   证据：`bench/` 全套基准 + 分配预算门禁 `TestRequestPathAllocBudget`（CI 的 `Alloc budget` 步骤，不带 `-race` 执行）。
 - [x] 真实负载下与 gin 同级（不以 micro-benchmark 胜负作承诺）——**已验证一次**：裸档 0.94× / 0.97×（见「表 C」；采集工程不入库，保留在 PR #19 的分支 `bench/gin-compare`）

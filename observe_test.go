@@ -69,6 +69,23 @@ func TestB3TraceIDAdopted(t *testing.T) {
 	}
 }
 
+func TestB3TraceID16HexNormalized(t *testing.T) {
+	// Zipkin 的 B3 也允许 16hex（64-bit）；左垫 0 归一为 32hex 后采纳——
+	// 网关后链路不会因为上游用 16hex 而断裂（#33）。
+	e, _ := newTestEngine(t)
+	e.GET("/t", func(c *Ctx) error { return c.Text(http.StatusOK, c.TraceID()) })
+
+	const b3 = "0af7651916cd43dd"
+	const want = "00000000000000000af7651916cd43dd"
+	rec := doReq(e, "GET", "/t", nil, "X-B3-TraceId", b3)
+	if got := rec.Header().Get("X-Trace-Id"); got != want {
+		t.Fatalf("X-Trace-Id = %q, want %q", got, want)
+	}
+	if got := rec.Body.String(); got != want {
+		t.Fatalf("handler TraceID = %q, want %q", got, want)
+	}
+}
+
 func TestMalformedTraceHeadersIgnored(t *testing.T) {
 	e, _ := newTestEngine(t)
 	e.GET("/t", func(c *Ctx) error { return c.Text(http.StatusOK, c.TraceID()) })
