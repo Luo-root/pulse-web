@@ -51,6 +51,11 @@ type PanicError struct {
 // Error 实现 error。
 func (e *PanicError) Error() string { return fmt.Sprintf("panic: %v", e.Value) }
 
+// codeBodyTooLarge 是请求体超限的统一业务码：**四条超限路径共用**——引擎级
+// WithMaxBodyBytes 的预检 / 读取两条、BodyLimit 中间件的两条，外加 Ctx.Bind 在
+// 解析路径上撞到的读错误。后续新增超限路径也用这个常量，不要再写字面量。
+const codeBodyTooLarge = "body_too_large"
+
 // 内置构造器。cause 可传 nil；它只进观测记录。
 func BadRequest(code string, cause error) *HTTPError {
 	return &HTTPError{Status: http.StatusBadRequest, Code: code, cause: cause}
@@ -66,6 +71,9 @@ func NotFound(code string, cause error) *HTTPError {
 }
 func Conflict(code string, cause error) *HTTPError {
 	return &HTTPError{Status: http.StatusConflict, Code: code, cause: cause}
+}
+func TooLarge(code string, cause error) *HTTPError {
+	return &HTTPError{Status: http.StatusRequestEntityTooLarge, Code: code, cause: cause}
 }
 func Internal(code string, cause error) *HTTPError {
 	return &HTTPError{Status: http.StatusInternalServerError, Code: code, cause: cause}
@@ -104,13 +112,12 @@ func defaultErrorHandler(c *Ctx, err error) error {
 	case errors.As(err, &perr):
 		// panic 一律 500 + 通用文案（栈只进观测记录）。
 		// 注意：panic(web.NotFound(...)) 不会返回 404 —— 要 4xx 请 return。
-	case errors.As(err, &maxErr):
-		// 请求体超限（http.MaxBytesReader）：无论超限发生在 Bind 还是用户
-		// 直读 body 的路径上，读错误都是 *http.MaxBytesError，统一归 413。
-		status = http.StatusRequestEntityTooLarge
-		code = "body_too_large"
-		message = http.StatusText(status)
 	case errors.As(err, &herr):
+		// **必须排在 maxErr 之前**：errors.As 会沿 HTTPError.Unwrap() 下钻到
+		// cause，所以 cause 恰好是 *http.MaxBytesError 时（TooLarge 的典型用法）
+		// maxErr 分支会先命中，把调用方传的 code 静默改写成 body_too_large。
+		// 顺序反过来也立得住「显式 HTTPError 优先于其 cause 的分类」这条口径：
+		// TooLarge("quota_exceeded", &MaxBytesError{…}) → quota_exceeded。
 		status = herr.Status
 		code = herr.Code
 		if code == "" {
@@ -120,6 +127,14 @@ func defaultErrorHandler(c *Ctx, err error) error {
 		if message == "" {
 			message = http.StatusText(herr.Status)
 		}
+	case errors.As(err, &maxErr):
+		// 请求体超限（http.MaxBytesReader）：无论超限发生在 Bind 还是用户
+		// 直读 body 的路径上，读错误都是 *http.MaxBytesError，统一归 413。
+		// 走到这里的是**没有 HTTPError 包装**的裸读错误——有意包了 HTTPError
+		// 的已在上一分支按调用方的口径处理。
+		status = http.StatusRequestEntityTooLarge
+		code = codeBodyTooLarge
+		message = http.StatusText(status)
 	case errors.As(err, &sc):
 		status = sc.StatusCode()
 		code = "error"
