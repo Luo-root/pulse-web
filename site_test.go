@@ -311,8 +311,14 @@ func TestSiteInternalLinksResolve(t *testing.T) {
 					continue // 外部 URL 与相对链接另有判据（相对链接由结构比对守着）
 				}
 				checked++
-				if _, ok := resolveSiteTarget(t, page, target); !ok {
+				file, ok := resolveSiteTarget(t, page, target)
+				if !ok {
 					t.Errorf("%s 里的链接 %s 落不到任何页面", page, target)
+					continue
+				}
+				// 语言自洽只管**页面**：`public/` 下的资源（logo / favicon）只有一份，
+				// 没有 /en 版本，拿语言前缀要求它是错的。
+				if !strings.HasSuffix(file, ".md") {
 					continue
 				}
 				if root == siteEnPath && !strings.HasPrefix(target, "/en/") {
@@ -385,6 +391,9 @@ func siteLinkTargets(src string) []string {
 
 // TestSiteWordmarkMatchesBanner 钉住「首页字标与 assets/banner.svg 同规格」。
 //
+// 字标落在首页落地页的自定义样式里（`.pw-wordmark`，见 `custom.css` 的落地页一节），
+// 不再走默认主题的 hero——所以这里比对的是那份自定义规则。
+//
 // 比的是三项**规格**，不是渲染结果：字体栈、字号、字重逐字相等。
 //
 // `textLength="232"` 这条在 CSS 里没有对应属性，等价约束是**不调字距**——banner 钉定长的
@@ -393,7 +402,7 @@ func siteLinkTargets(src string) []string {
 // 所以这里断言 hero 名字没有字距调节；真要调字距，该做的是连 banner 与设计文档口径一起改，
 // 而不是让两处悄悄分叉。
 //
-// 变异探针：把 `custom.css` 里的 hero 字号改成 48px（或字体栈换成别的），
+// 变异探针：把 `custom.css` 里的字标字号改成 48px（或字体栈换成别的），
 // 或把 `assets/banner.svg` 的 font-size 改成 44，本用例必须红。
 func TestSiteWordmarkMatchesBanner(t *testing.T) {
 	banner := readBrandSVG(t, bannerPath)
@@ -424,20 +433,22 @@ func TestSiteWordmarkMatchesBanner(t *testing.T) {
 	t.Logf("字标规格与 banner 一致：%s / %s / %s", decl["font-family"], decl["font-size"], decl["font-weight"])
 }
 
-// heroNameRule 从主题 CSS 里抽出首页字标的声明块（`.VPHero .name`）。
+// wordmarkRuleRe 匹配 `.pw-wordmark` 那条规则本体。
+//
+// 必须在**行首**匹配选择器再吃 `{…}`：直接找 `.pw-wordmark` 会先命中注释里提到它的
+// 那句（落地页一节的注释里就写着 `.pw-wordmark`），于是解析出的是注释与选择器之间的
+// 文字，三个属性一个都读不到——探针第一次就是这么红的。
+var wordmarkRuleRe = regexp.MustCompile(`(?m)^\.pw-wordmark\s*\{([^}]*)\}`)
+
+// heroNameRule 从主题 CSS 里抽出首页字标的声明块（`.pw-wordmark`）。
 func heroNameRule(t *testing.T, css string) map[string]string {
 	t.Helper()
-	i := strings.Index(css, ".VPHero .name")
-	if i < 0 {
-		t.Fatalf("%s 里找不到 `.VPHero .name` 规则——首页字标的口径没落地？", siteThemePath)
-	}
-	open := strings.Index(css[i:], "{")
-	closeIdx := strings.Index(css[i:], "}")
-	if open < 0 || closeIdx < open {
-		t.Fatalf("%s 里 `.VPHero .name` 规则没有正常的 `{…}` 块", siteThemePath)
+	m := wordmarkRuleRe.FindStringSubmatch(css)
+	if m == nil {
+		t.Fatalf("%s 里找不到 `.pw-wordmark { … }` 规则——首页字标的口径没落地？", siteThemePath)
 	}
 	decl := map[string]string{}
-	for _, item := range strings.Split(css[i+open+1:i+closeIdx], ";") {
+	for _, item := range strings.Split(m[1], ";") {
 		k, v, ok := strings.Cut(item, ":")
 		if !ok {
 			continue
@@ -445,7 +456,7 @@ func heroNameRule(t *testing.T, css string) map[string]string {
 		decl[strings.TrimSpace(k)] = strings.TrimSpace(v)
 	}
 	if len(decl) == 0 {
-		t.Fatalf("%s 里 `.VPHero .name` 规则是空的", siteThemePath)
+		t.Fatalf("%s 里 `.pw-wordmark` 规则是空的", siteThemePath)
 	}
 	return decl
 }
