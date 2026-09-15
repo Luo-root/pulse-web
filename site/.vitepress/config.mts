@@ -28,16 +28,21 @@ export default defineConfig({
         nav: [
           { text: '指南', link: '/guide/getting-started' },
           { text: '观测', link: '/guide/observability' },
+          { text: '性能', link: '/performance' },
           { text: '设计文档', link: DESIGN_DOC },
         ],
         sidebar: {
-          '/guide/': [
+          '/': [
             {
               text: '指南',
               items: [
                 { text: '快速开始', link: '/guide/getting-started' },
                 { text: '观测', link: '/guide/observability' },
               ],
+            },
+            {
+              text: '数据',
+              items: [{ text: '性能', link: '/performance' }],
             },
           ],
         },
@@ -64,16 +69,21 @@ export default defineConfig({
         nav: [
           { text: 'Guide', link: '/en/guide/getting-started' },
           { text: 'Observability', link: '/en/guide/observability' },
+          { text: 'Performance', link: '/en/performance' },
           { text: 'Design doc', link: DESIGN_DOC },
         ],
         sidebar: {
-          '/en/guide/': [
+          '/en/': [
             {
               text: 'Guide',
               items: [
                 { text: 'Getting started', link: '/en/guide/getting-started' },
                 { text: 'Observability', link: '/en/guide/observability' },
               ],
+            },
+            {
+              text: 'Data',
+              items: [{ text: 'Performance', link: '/en/performance' }],
             },
           ],
         },
