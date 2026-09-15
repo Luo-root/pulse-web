@@ -1,6 +1,9 @@
 package web
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"os"
 	"path"
@@ -18,7 +21,7 @@ import (
 // 两份副本必然有漂的风险。能自动化的部分是**结构与规格**，不是措辞——比措辞的守卫
 // 会因为翻译腔天天误报。
 //
-// 受守卫的四条约定：
+// 受守卫的五条约定：
 //
 //  1. 两版**页集相同**，逐页**结构等价**（frontmatter 键、列表项数、标题数、代码块语言数、
 //     引用目标集合）。漏译一页、少写一节、示例只加一边，都会在这里响。
@@ -27,6 +30,8 @@ import (
 //  3. 首页字标与 `assets/banner.svg` **同规格**：字号 / 字重 / 字体栈三项逐字相等。
 //     这是「同一枚字标在两处各写一遍」这类漂移的自动化拦截面。
 //  4. `base` 与仓库名一致，且两语言都声明、英文版挂在 `/en/` 下（语言切换双向可达的地基）。
+//  5. **对外 API 都有落点**：源码里的每个导出符号都要在站点页面里出现过——符号直接从
+//     源码抽，不维护第二份清单（清单一定会过期）。
 //
 // 每条都给了变异探针（见各自注释）：改一处必须让对应用例红。
 
@@ -493,4 +498,167 @@ func TestSiteBaseMatchesRepoName(t *testing.T) {
 			t.Errorf("%s 里没有 %q——语言结构（根 = 中文、/en/ = English）没落全", siteConfPath, want)
 		}
 	}
+}
+
+// siteExportedAPI 解析仓库根目录的 Go 源文件（跳过 _test.go），抽出**对外符号名**：
+// 导出函数、导出类型、导出方法、导出常量与变量。方法与类型同名时按名字去重。
+func siteExportedAPI(t *testing.T) []string {
+	t.Helper()
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, 0)
+	if err != nil {
+		t.Fatalf("解析包目录: %v", err)
+	}
+	// 先收导出**类型**名：方法只在这个集合的接收者上才算对外 API——
+	// `responseWriter` 这类非导出类型上的 `WriteHeader` 不是公开面，收进来会让守卫
+	// 要求文档去提一个用户根本写不出的符号。
+	exportedTypes := map[string]bool{}
+	for _, pkg := range pkgs {
+		for _, f := range pkg.Files {
+			for _, decl := range f.Decls {
+				gd, ok := decl.(*ast.GenDecl)
+				if !ok {
+					continue
+				}
+				for _, spec := range gd.Specs {
+					if ts, ok := spec.(*ast.TypeSpec); ok && ts.Name.IsExported() {
+						exportedTypes[ts.Name.Name] = true
+					}
+				}
+			}
+		}
+	}
+
+	names := map[string]bool{}
+	for _, pkg := range pkgs {
+		for _, f := range pkg.Files {
+			for _, decl := range f.Decls {
+				switch d := decl.(type) {
+				case *ast.FuncDecl:
+					if !d.Name.IsExported() {
+						break
+					}
+					if d.Recv != nil {
+						if recv := receiverTypeName(d); !exportedTypes[recv] {
+							break // 非导出类型上的方法：不是公开面
+						}
+					}
+					names[d.Name.Name] = true
+				case *ast.GenDecl:
+					for _, spec := range d.Specs {
+						switch s := spec.(type) {
+						case *ast.TypeSpec:
+							if s.Name.IsExported() {
+								names[s.Name.Name] = true
+							}
+						case *ast.ValueSpec:
+							for _, n := range s.Names {
+								if n.IsExported() {
+									names[n.Name] = true
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	out := make([]string, 0, len(names))
+	for n := range names {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// siteMarkdown 返回 site/ 下所有页面的正文（键是相对仓库根的路径）。
+func siteMarkdown(t *testing.T) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	err := filepath.WalkDir(filepath.FromSlash(siteRootPath), func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if siteSkipDirs[d.Name()] {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(p) == ".md" {
+			out[filepath.ToSlash(p)] = readDocFile(t, filepath.ToSlash(p))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("遍历 %s: %v", siteRootPath, err)
+	}
+	return out
+}
+
+// TestSiteCoversExportedAPIs 守卫「对外提供的 API 都在站点上出现过」。
+//
+// 起因是维护者对指南的评价：只有「快速开始 + 观测」两页，API 面基本没覆盖
+// （原话「只要是对外提供的 API 都至少要提到吧」）。这条把那个要求变成机器判据：
+// 从**源码**抽导出符号（不看任何清单，避免清单自己过期），逐个要求在 `site/` 的页面里
+// 出现一次——出现方式不限（标题、正文、代码示例都算），但必须真的提到。
+//
+// 长名按词边界比对；**两个字符以内的短名**（`H`、`Get`、`Set`、`JSON` 这类）另加判据：
+// 必须出现在代码语境里（`web.H` / “ `H` “ / `H{`），否则「H」这种字母在中文正文里
+// 随便就能撞上，守卫会变成永远绿灯。
+//
+// 变异探针：删掉任一页里对某个符号的唯一一处提及（如 `WithTrustedTraceHeader`），
+// 或把源码里的一个导出符号改名而文档不改，本用例必须红。
+func TestSiteCoversExportedAPIs(t *testing.T) {
+	api := siteExportedAPI(t)
+	if len(api) < 50 {
+		t.Fatalf("只抽到 %d 个导出符号——解析逻辑不对（实测 80+），守卫不能因为没查所以通过", len(api))
+	}
+	pages := siteMarkdown(t)
+	if len(pages) < 6 {
+		t.Fatalf("只扫到 %d 个站点页面——路径不对（遍历坏了会返回 0）", len(pages))
+	}
+
+	var missing []string
+	for _, name := range api {
+		pat := `\b` + regexp.QuoteMeta(name) + `\b`
+		if len([]rune(name)) <= 2 {
+			pat = `(?:web\.|\x60)` + regexp.QuoteMeta(name) + `(?:\x60|[{(]|\b)`
+		}
+		re := regexp.MustCompile(pat)
+		found := false
+		for _, src := range pages {
+			if re.MatchString(src) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		t.Errorf("这些导出符号在 site/ 的页面里一次都没出现（%d 个）：%s",
+			len(missing), strings.Join(missing, " / "))
+	}
+	t.Logf("导出符号 %d 个，站点页面 %d 个，覆盖 %d/%d",
+		len(api), len(pages), len(api)-len(missing), len(api))
+}
+
+// receiverTypeName 取方法接收者的类型名（`*Ctx` / `Ctx` / `Detached` 都归到类型名）。
+func receiverTypeName(d *ast.FuncDecl) string {
+	if d.Recv == nil || len(d.Recv.List) == 0 {
+		return ""
+	}
+	switch t := d.Recv.List[0].Type.(type) {
+	case *ast.StarExpr:
+		if id, ok := t.X.(*ast.Ident); ok {
+			return id.Name
+		}
+	case *ast.Ident:
+		return t.Name
+	}
+	return ""
 }
