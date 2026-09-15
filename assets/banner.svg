@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 353 96" fill="none" role="img" aria-labelledby="pw-banner-title">
+  <title id="pw-banner-title">Pulse-Web</title>
+  <!--
+    README 头部的锁定：mark + 字标放在一起（与 pulse 的 banner 同一构成方式）。
+
+    mark 与 assets/logo.svg 是**同一份几何**（同坐标 / 同圆角 / 同 currentColor），
+    只是内联进这里的 <g>——assets_test.go 会逐项比对，防止两处各画一遍后漂移。
+
+    字标用与 pulse **同一套 sans 栈**（大写首字母 + 700 字重）：两库并排是同一族字面；
+    连字符用字体自带字形（bold sans 的连字符本身就是与字重匹配的短横条）。
+    font-size / 基线取 pulse banner 的同一口径（46 / y=64）。
+    文字用 textLength + lengthAdjust="spacing"（只调字距、不变形字形）钉成定长：
+    sans 的实际宽度随平台字体（Segoe UI / SF / Helvetica）略变，定长可以保证
+    viewBox 不用为最宽的那家留太多空白，也不会在窄的那家溢出被裁。
+
+    颜色：currentColor + 明暗两档中性色（#17181a / #f4f3f0，白米档）；站点那一轮用选择器覆盖。
+    viewBox 宽度 353 与纵向位置按实测墨迹边界定（左 27 / 右 27、上 22 / 下 23）。
+  -->
+  <style>
+    svg { color: #17181a }
+    @media (prefers-color-scheme: dark) { svg { color: #f4f3f0 } }
+  </style>
+  <!-- mark：与 assets/logo.svg 同一份几何，缩放到 1.3 与字标配比 -->
+  <g transform="translate(20 16.8) scale(1.3)">
+    <rect x="5.70" y="23.00" width="3.00" height="4.00" rx="1.20" fill="currentColor"/>
+    <rect x="9.90" y="21.00" width="3.00" height="6.00" rx="1.20" fill="currentColor"/>
+    <rect x="14.10" y="15.00" width="3.00" height="12.00" rx="1.20" fill="currentColor"/>
+    <rect x="18.30" y="4.00" width="3.00" height="23.00" rx="1.20" fill="currentColor"/>
+    <rect x="22.50" y="27.00" width="3.00" height="10.00" rx="1.20" fill="currentColor"/>
+    <rect x="26.70" y="27.00" width="3.00" height="17.00" rx="1.20" fill="currentColor"/>
+    <rect x="30.90" y="27.00" width="3.00" height="8.00" rx="1.20" fill="currentColor"/>
+    <rect x="35.10" y="23.00" width="3.00" height="4.00" rx="1.20" fill="currentColor"/>
+    <rect x="39.30" y="23.00" width="3.00" height="4.00" rx="1.20" fill="currentColor"/>
+  </g>
+  <text x="96" y="64"
+        font-family="-apple-system, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif"
+        font-size="46" font-weight="700" textLength="232" lengthAdjust="spacing"
+        fill="currentColor">Pulse-Web</text>
+</svg>
