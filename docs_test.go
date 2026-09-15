@@ -34,7 +34,17 @@ var (
 	// 不误伤的依据：全仓其余「第 N 条」都不是这两个形状（`assets_test.go` 是
 	// `#36 验收第 4 条`，缺「标准」；设计文档是 `12-factor 第 11 条`）。
 	numericRefRe = regexp.MustCompile(`(?:设计)?验收标准第\s*\d+\s*条|v1 功能面第\s*\d+\s*条`)
+	// linkRe 匹配 Markdown 链接/图片的目标（去掉锚点）：[文本](目标)。
+	linkRe = regexp.MustCompile(`\[[^\]]*\]\(([^)#]+?)(?:#[^)]*)?\)`)
+	// htmlLinkRe 匹配 HTML 里的引用目标：<a href="…"> / <img src="…">。
+	//
+	// 顶部 banner 与徽章行都是 HTML，Markdown 的 linkRe 看不见它们——不单收一份，
+	// 两版的徽章走样（少一个、换一个目标）就成了双语守卫的盲区。
+	htmlLinkRe = regexp.MustCompile(`(?:href|src)="([^"]+)"`)
 )
+
+// readmePaths 是双语 README：英文主版在前，中文版在后。
+var readmePaths = []string{"README.md", "README_zh.md"}
 
 // designCriterionNames 抽出「验收标准」节里的条目名，保持文档顺序。
 func designCriterionNames(t *testing.T) []string {
@@ -169,4 +179,113 @@ func TestDesignCriterionNamesAreUsedInReferences(t *testing.T) {
 		t.Fatalf("一处条目名引用都没扫到——守卫失效（路径或正则不对），不是通过；自身路径=%s", guardSelfPath())
 	}
 	t.Logf("条目名 %d 个，已校验 %d 处引用（跳过自身 %s）", len(names), refs, guardSelfPath())
+}
+
+// TestREADMEBilingualStructureMatches 守卫双语 README 的**结构等价**。
+//
+// 双语是本仓库「同一结论只在一个文件里展开」原则的**有意例外**——两份副本必然有
+// 漂的风险。能自动化的部分是结构而不是措辞，所以这里比的是：
+//
+//  1. `##` / `###` 数量一致（章节骨架相同）
+//  2. 代码围栏数量一致，且**各语言标注的数量**逐一相同（示例一一对应，不是「反正都是 8 个块」）
+//  3. 引用目标集合一致——Markdown 链接 + HTML 的 `href` / `src`，**绝对 URL 也算**
+//     （徽章行就是靠这一点比对：少一个徽章、两版徽章不同，都会被这一条抓住）；
+//     锚点与语言切换链接除外
+//  4. 两版互相链接（切换入口双向可达）
+//
+// 措辞各语言自己地道，不逐句比——那样的守卫会因为翻译腔而天天误报。
+//
+// 变异探针：删掉任一版的一节、让某一版少一个代码块、断掉语言切换链接、只给一版加一个
+// 新的链接或徽章目标，本用例必须红。
+func TestREADMEBilingualStructureMatches(t *testing.T) {
+	type shape struct {
+		path     string
+		h2, h3   int
+		fences   map[string]int
+		links    map[string]bool
+		switcher bool
+	}
+
+	shapes := make([]shape, 0, len(readmePaths))
+	for i, path := range readmePaths {
+		b, err := os.ReadFile(filepath.FromSlash(path))
+		if err != nil {
+			t.Fatalf("读 %s: %v（双语守卫要求两版都在）", path, err)
+		}
+		src := string(b)
+		s := shape{path: path, fences: map[string]int{}, links: map[string]bool{}}
+
+		inFence := false
+		for _, line := range strings.Split(src, "\n") {
+			trimmed := strings.TrimSpace(line)
+			switch {
+			case strings.HasPrefix(trimmed, "```"):
+				if !inFence {
+					lang := strings.TrimSpace(strings.TrimPrefix(trimmed, "```"))
+					s.fences[lang]++ // 只数开围栏，语言标注取开围栏那一行的
+				}
+				inFence = !inFence
+				continue
+			case strings.HasPrefix(line, "## "):
+				s.h2++
+			case strings.HasPrefix(line, "### "):
+				s.h3++
+			}
+			for _, re := range []*regexp.Regexp{linkRe, htmlLinkRe} {
+				for _, m := range re.FindAllStringSubmatch(line, -1) {
+					target := m[1]
+					// 锚点不参与比较：两种语言的标题本来就不同（#install / #安装）。
+					if strings.HasPrefix(target, "#") {
+						continue
+					}
+					// 语言切换链接指向另一版，不算「内容引用」
+					if target == readmePaths[1-i] {
+						s.switcher = true
+						continue
+					}
+					// 绝对 URL 也收：徽章行（href + shields 图片地址）就是靠它比对——
+					// 只收相对路径的话，少一个徽章、两版徽章不一样，守卫都看不见。
+					s.links[target] = true
+				}
+			}
+		}
+		shapes = append(shapes, s)
+	}
+
+	a, b := shapes[0], shapes[1]
+	if a.h2 != b.h2 {
+		t.Errorf("`##` 数量不一致：%s=%d，%s=%d", a.path, a.h2, b.path, b.h2)
+	}
+	if a.h3 != b.h3 {
+		t.Errorf("`###` 数量不一致：%s=%d，%s=%d", a.path, a.h3, b.path, b.h3)
+	}
+	for lang, n := range a.fences {
+		if b.fences[lang] != n {
+			t.Errorf("```%s 代码块数量不一致：%s=%d，%s=%d", lang, a.path, n, b.path, b.fences[lang])
+		}
+	}
+	for lang, n := range b.fences {
+		if _, ok := a.fences[lang]; !ok && n > 0 {
+			t.Errorf("```%s 只出现在 %s（%d 个），%s 里没有", lang, b.path, n, a.path)
+		}
+	}
+	for target := range a.links {
+		if !b.links[target] {
+			t.Errorf("%s 引用 %s，而 %s 没有", a.path, target, b.path)
+		}
+	}
+	for target := range b.links {
+		if !a.links[target] {
+			t.Errorf("%s 引用 %s，而 %s 没有", b.path, target, a.path)
+		}
+	}
+	if !a.switcher || !b.switcher {
+		t.Errorf("两版必须互相链接（语言切换）：%s switcher=%v，%s switcher=%v",
+			a.path, a.switcher, b.path, b.switcher)
+	}
+	if t.Failed() {
+		return
+	}
+	t.Logf("%s: %d 个 `##` / %d 个 `###` / 代码块 %v / 引用目标 %d 个；两版结构与引用目标一致",
+		a.path, a.h2, a.h3, a.fences, len(a.links))
 }

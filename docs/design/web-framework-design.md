@@ -666,6 +666,8 @@ v1 只做当前视图：`app.Debug("/debug/pulse")` 输出 `kernel.FiberSnapshot
 
 ```
 pulse-web/
+├── README.md                  # 英文主版：结论与入口（展示性内容归站点，见下）
+├── README_zh.md               # 中文版；与主版的结构等价由 docs_test.go 的守卫保证
 ├── go.mod                     # module github.com/Luo-root/pulse-web（package web）
 ├── doc.go                     # 包文档（定位 / 快速开始 / 运行时契约）
 ├── engine.go                  # Engine、选项、Root()、路由注册与分组、Static、
@@ -701,6 +703,8 @@ pulse-web/
 ```
 
 **协作规范面**（`LICENSE` 与四个规范文件、`.github` 下的模板）不是框架设计的一部分，但同样是仓库的事实源：流程规则改**这些文件**，不要只在 Issue 评论里约定——评论会沉，文件不会。四份文件的契约关系是：`CONTRIBUTING.md` 管代码怎么提，`CODE_OF_CONDUCT.md` 管人怎么相处，`SECURITY.md` 管漏洞往哪报，`AGENTS.md` 管 agent 怎么在这个仓库里干活。
+
+**文档分层**：**设计文档 = 数据与契约的事实源，站点 = 公开展示面，README = 结论与入口**。推论有三：① 性能跑分、对比表、图表这类**展示性内容不进 README**（进站点），部署运维细节（容器日志轮转、journald 配置）同理；README 只留一句结论 + 链接。② README 分中英两版（`README.md` 英文主版 / `README_zh.md` 中文版），两版的**结构等价**由守卫保证（`##`/`###` 数、各语言代码块计数、相对引用目标集合、互相链接）——措辞各语言自己地道，骨架不许各有各的。③ README **不写状态计数**（「已实现 N/N」这类）：它是内部进度的话术，且每次清单增删都要跟着改；进度的事实源是本文档的验收清单。
 
 ## 品牌标识
 

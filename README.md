@@ -2,205 +2,228 @@
   <img alt="Pulse-Web" src="assets/banner.svg" width="353">
 </div>
 
-基于 [pulse](https://github.com/Luo-root/pulse) 的 **kernel** 与 **observability** 构建的通用 Go web 服务框架。
+<div align="center">
+  <a href="https://go.dev/"><img alt="Go 1.27.0" src="https://img.shields.io/badge/Go-1.27.0-blue.svg"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-green.svg"></a>
+  <a href="https://github.com/Luo-root/pulse-web/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Luo-root/pulse-web/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="#install"><img alt="Deps: standard library + two pulse packages" src="https://img.shields.io/badge/deps-stdlib%20%2B%202%20packages-2563eb.svg"></a>
+</div>
 
-- **装配内核**——kernel 的 IoC、可逆生命周期、请求作用域、事件总线
-- **一等观测**——每请求 TraceID、结构化记录、装配诊断，默认装配；默认出口是**给人读**的列式单行（`ConsoleSink`，渲染 0 分配）
-- **零第三方依赖**——只使用 stdlib 与 pulse 的两个基座包（kernel / observability）
+<br />
 
-> 状态：**v1 功能面已实现**（13/13）——验收标准逐条附可复跑的测试证据，见设计文档的「验收标准」节。API 在 1.0 之前，仍可能随 minor 调整。
-> 设计与决策记录在 [Issue #1](https://github.com/Luo-root/pulse-web/issues/1)，完整设计见 [`docs/design/web-framework-design.md`](docs/design/web-framework-design.md)；逐项实现与实测记录见各 Issue（[#2](https://github.com/Luo-root/pulse-web/issues/2) 垂直切片、[#4](https://github.com/Luo-root/pulse-web/issues/4) 周边能力、[#6](https://github.com/Luo-root/pulse-web/issues/6) / [#27](https://github.com/Luo-root/pulse-web/issues/27) 上游采纳、[#20](https://github.com/Luo-root/pulse-web/issues/20) 默认出口、[#18](https://github.com/Luo-root/pulse-web/issues/18) 真实负载对比、[#30](https://github.com/Luo-root/pulse-web/issues/30) 验收证据收口）。
+**English** | [中文](README_zh.md)
 
-## 预览（API 草案）
+A general-purpose Go web framework built on the **kernel** and **observability** packages of [pulse](https://github.com/Luo-root/pulse).
+
+- **Assembly kernel** — IoC, reversible lifecycle, request scope and an event bus, from pulse's kernel
+- **Observability as a first-class citizen** — a per-request 32-hex TraceID, structured records and assembly diagnostics, wired in by default; the default sink renders each record as one human-readable, column-aligned line
+- **Zero third-party dependencies** — the standard library plus two upstream packages (kernel, observability)
+
+## Install
+
+```bash
+go get github.com/Luo-root/pulse-web
+```
+
+Requires **Go 1.27+** (`go.mod` pins `go 1.27.0`; the toolchain downloads itself when missing).
+
+The core module depends on nothing but the standard library and two `pulse` packages. The check is what actually gets compiled in, not what `go.mod` lists:
+
+```bash
+go list -deps . | grep -E '^[^/]+\.[^/]+/'
+# github.com/Luo-root/pulse/kernel
+# github.com/Luo-root/pulse/observability
+# github.com/Luo-root/pulse-web
+```
+
+## Quick start
 
 ```go
-app := web.New()
+package main
 
-app.GET("/users/{id}", func(c *web.Ctx) error {
-    db := c.MustService(dbKey)          // 全局服务（kernel root 仓库）
-    u, err := db.Find(c.Path("id"))     // 路径参数读 Request.PathValue，不另存
-    if err != nil {
-        return web.NotFound("user", err) // 显式 error → 状态码映射 + 观测记录
-    }
-    return c.JSON(200, u)
+import (
+	"net/http"
+
+	"github.com/Luo-root/pulse-web"
+)
+
+func main() {
+	app := web.New()
+
+	app.GET("/users/{id}", func(c *web.Ctx) error {
+		return c.JSON(http.StatusOK, web.H{"id": c.Path("id")})
+	})
+
+	app.Run(":8080")
+}
+```
+
+```bash
+go run .
+curl -s localhost:8080/users/42
+# {"id":"42"}
+```
+
+No configuration was needed for observability: stdout already carries one line per request, and the same TraceID reaches the handler, the log and any sink you attach later. The `PULSE` prefix at the start of the line is the upstream default — pulse and pulse-web share one process tree and one line format, so their output stays consistent when both are present.
+
+```text
+PULSE | 2026/09/15 - 20:27:01 | 200 |   502.0µs | 127.0.0.1:54161 | GET     /users/42 | route=/users/{id} | size=12 | host=pulse-web | trace=a9c8e7496977e0ee6e8971a2b2cfe378
+```
+
+## Usage
+
+### Routing and groups
+
+Path parameters are read with `c.Path(name)`, which is the same value `net/http` wrote into the request — the framework stores no second copy.
+
+```go
+app.GET("/users/{id}", h)                       // {id} is a stdlib ServeMux pattern
+app.POST("/users", h)
+api := app.Group("/api/v1")                     // prefix + middleware, inherited by everything below
+api.GET("/users/{id}", h)
+app.Static("/assets", "./public")               // static files go through global and group middleware too
+```
+
+### Middleware
+
+A middleware takes the request context and the rest of the chain. Execution is a plain onion: each layer's code before `next` runs on the way in, and after it on the way out.
+
+```go
+func auth(c *web.Ctx, next web.Handler) error {
+	if c.Query("token") == "" {
+		return web.Unauthorized("missing_token", nil)
+	}
+	return next(c)
+}
+
+app.Use(auth)                                   // global
+app.POST("/admin/purge", purge, BodyLimit(1<<10)) // per route
+```
+
+### Request binding and body limits
+
+`c.Bind` dispatches on `Content-Type` (JSON, XML, form-urlencoded, multipart) and falls back to the query string when the request has no body. Failures come back as mapped errors: 400 `invalid_body`, 413 `body_too_large`, 415 `unsupported_media_type`.
+
+```go
+type CreateUser struct {
+	Name  string   `json:"name" form:"name"`
+	Email string   `json:"email" form:"email"`
+	Tags  []string `form:"tags"`                 // ?tags=a&tags=b
+}
+
+app.POST("/users", func(c *web.Ctx) error {
+	var in CreateUser
+	if err := c.Bind(&in); err != nil {
+		return err
+	}
+	return c.JSON(http.StatusCreated, in)
 })
-
-app.Run(":8080")                         // 内置优雅关闭：drain → OnShutdown → root.Dispose → Sink flush
 ```
 
-默认出口写 stdout，一行一条（列宽固定；颜色只在终端生效）：
+The request body has **no size limit by default** — a limit is a business policy. Set one globally, or tighten it per group/route:
 
+```go
+app := web.New(web.WithMaxBodyBytes(2 << 20))                    // global ceiling: 2 MiB
+app.Group("/admin", web.BodyLimit(1<<20)).POST("/settings", h)   // this group tightens to 1 MiB
+app.POST("/api/export", h, web.BodyLimit(512<<10))               // this route tightens to 512 KiB
 ```
-PULSE | 2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /users/42 | route=/users/{id} | size=29 | host=pulse-web | trace=8f2e1a3b4c5d6e7f8a9b0c1d2e3f4a5b
-PULSE | 2026/09/14 - 08:30:00 | 500 |    7.62ms | 192.0.2.1:1234  | GET     /boom | http_5xx "boom: Internal Server Error" | trace=3a71…
-PULSE | 2026/09/14 - 08:30:00 | pulse.kernel.fiber_state host=svc fiber=db state=Starting→Running
+
+A route limit can only **tighten** the global one, never loosen it — the global gate runs in `ServeHTTP`, ahead of routing and middleware, so **raising the ceiling is the only way to allow a bigger body**. The boundary is exact: a body of exactly `n` bytes passes, `n+1` is rejected. Over-limit requests are always 413 + `body_too_large` with a `*http.MaxBytesError` cause, so one `errors.As` in a custom `WithErrorHandler` covers every limit path.
+
+### Responses and errors
+
+Handlers return an `error`; they do not write status codes by hand. The engine's error mapper decides the status, and the same decision goes into the access log.
+
+```go
+return c.JSON(http.StatusOK, user)              // encodes first, writes the header only on success
+return c.Text(http.StatusOK, "pong")
+return c.HTML(http.StatusOK, "user.html", web.H{"user": user})
+return web.NotFound("user", err)                // 404 + code "user", cause kept out of the response
 ```
 
-（三行都由实现产出，只有第 2 行的 `trace=` 截断显示；路径列不是定宽列，所以 `/boom` 后面只有分隔符前那一个空格。）
+Built-in constructors: `BadRequest`, `Unauthorized`, `Forbidden`, `NotFound`, `Conflict`, `TooLarge`, `Internal`. A panic in a handler becomes a 500; the panic value and stack stay in the process (they are attached to the observation record, never sent to the client).
 
-行首 `PULSE` 是上游缺省标识——pulse 与 pulse-web 同根同源，同一进程树里两个出口的行首一致。
-尾段的 `route=` / `size=` / `host=` / 错误 / `trace=` 是各自独立的 ` | ` 字段，有才出现。
+### Streaming (SSE)
 
-要机器可读 / 接既有日志管道：`web.New(web.WithSink(observability.SlogSink{...}))`（或 `NewAsyncSink`、`NewLineSink`）——**只换出口，装配不变**。
-
-> `WithRoot` 注意：接入既有 kernel 树时，`Run` / `Serve` 返回后该 root 会被级联销毁（连同挂在它上面的插件）——不要在 Run 返回后继续使用。
-
-### 流式响应（SSE）
-
-`c.Writer()` 拿响应写出器直接写字节，`c.Flush()` 逐段推给客户端：
+Write to `c.Writer()` and call `c.Flush()` to push each chunk out. The response writer is a deliberately narrow interface: it promises `http.Flusher` and nothing else.
 
 ```go
 app.GET("/events", func(c *web.Ctx) error {
-    c.SetHeader("Content-Type", "text/event-stream")
-    c.SetHeader("Cache-Control", "no-cache")
-
-    w := c.Writer()
-    for ev := range events {
-        if _, err := fmt.Fprintf(w, "data: %s\n\n", ev); err != nil {
-            return nil // 客户端断开：响应已开始，静默收尾
-        }
-        if err := c.Flush(); err != nil { // 只在底层 writer 不支持 Flusher 时发生
-            return err
-        }
-    }
-    return nil // handler 返回 ⇒ 请求 scope 回收 + 一条 AccessLog
+	c.SetHeader("Content-Type", "text/event-stream")
+	c.SetHeader("Cache-Control", "no-cache")
+	for ev := range events {
+		if _, err := fmt.Fprintf(c.Writer(), "data: %s\n\n", ev); err != nil {
+			return nil                          // client gone: response already started
+		}
+		if err := c.Flush(); err != nil {
+			return err
+		}
+	}
+	return nil
 })
 ```
 
-写出器是框架的包装器：状态码与响应体积照常进 AccessLog（写多少字节就记多少）。能力面是**有意的窄口**——只保证 `http.Flusher`（`http.NewResponseController(w).Flush()` 也可用）；`Hijacker` / `Pusher` / `FlushError` / `SetWriteDeadline` **不透出**，要升级协议拿原始 writer 请用 `web.Wrap` 包 stdlib handler。
-（首刷 = **第一次写出**：`c.Writer().Write`、`c.Flush()`、handler 返回三处里的最先一个；它落 `Status()` 设置的状态码（缺省 200）。首刷之后响应头已发出，流式接口要在首刷**之前**设好状态码。）
+Status codes and response size are recorded as usual — whatever you write is what gets counted.
 
-## 请求体绑定
-
-`c.Bind()` 按 Content-Type 分派——JSON / XML / form-urlencoded / multipart 一套覆盖，失败按语义映射错误码：
+### Static files and templates
 
 ```go
-app.POST("/users", func(c *web.Ctx) error {
-    var in CreateUser
-    if err := c.Bind(&in); err != nil {
-        return err // 400 invalid_body / 413 body_too_large / 415 unsupported_media_type
-    }
-    return c.JSON(201, in)
-})
+app.Static("/assets", "./public")
 
-app.GET("/users", func(c *web.Ctx) error {
-    var q ListQuery
-    if err := c.Bind(&q); err != nil { // 无 body 的请求自动落到 query
-        return err // 400 invalid_query
-    }
-    return c.JSON(200, filter(q))
-})
+app := web.New(web.WithTemplates(web.TemplateConfig{
+	Root:      "templates",
+	Pattern:   "*.html",                        // default
+	DevReload: false,                           // true re-parses on every request (development only)
+}))
+// handlers: c.HTML(200, "user.html", web.H{"user": user})
 ```
 
-表单字段用 `form:"..."` / `query:"..."` tag（无 tag 用字段名，大小写不敏感）；支持 string / bool / 数值全系、多值 slice（`?ids=1&ids=2` → `[]int`）与指针字段；multipart 额外支持 `*multipart.FileHeader`。
+Templates are a thin wrapper over `html/template`; there is no template engine of our own to learn.
 
-请求体默认**不设上限**（对齐 gin / echo 的默认形态——上限值是业务策略）；生产建议显式设置，或依赖前置反代（nginx 默认 `client_max_body_size 1m`）：
+## Observability
+
+Every request gets a 32-hex TraceID, one `http.request` record, and a request scope that is disposed as soon as the handler returns — before the engine maps the outcome and writes anything further.
 
 ```go
-app := web.New(web.WithMaxBodyBytes(2 << 20)) // 2 MiB：超限读取立即失败 → 413
+app := web.New(
+	web.WithSink(observability.SlogSink{Logger: slog.Default()}), // or NewLineSink / NewAsyncSink / MultiSink
+	web.WithHostID("orders-api"),
+	web.WithoutAccessLog(),                                       // trace and panic recovery stay on
+)
 ```
 
-一个值要罩住所有路由时用上面的全局闸；要分得更细，用 `web.BodyLimit` 中间件挂在**分组**或**单条路由**上：
+- `c.TraceID()` — the same id in the handler, the access log and downstream calls
+- `c.Observe("order.paid", func(a *observability.Attrs) { a.Set("order_id", id) })` — your own events land in the same sink as the framework's
+- `web.WithCollector()` — attach the kernel collector to the request scope when you need per-request fiber visibility
+- `web.WithRoot(root)` — attach an existing kernel tree; note that `Run` / `Serve` dispose it on return, so do not keep using it afterwards
+- `app.Debug("/debug/assembly")` — a JSON view of the assembly state (snapshots, fibers, plugins)
+
+Records hold scalars only (`~string | ~int64 | ~float64 | ~bool`) with no `map[string]any` escape hatch, so request bodies, headers and query strings cannot end up in your logs by construction. The default sink writes to stdout and is not a persistence layer — rotation and retention belong to your platform (containers, journald, or your own writer).
+
+## Ecosystem and compatibility
+
+`net/http` is not a competitor here, it is the substrate:
 
 ```go
-app := web.New(web.WithMaxBodyBytes(2 << 20))                    // 全局兜底 2 MiB
-app.Group("/upload", web.BodyLimit(100<<20)).POST("/avatar", h)  // 上传这块放宽
-app.POST("/api/export", h, web.BodyLimit(1<<20))                 // 导出这条收紧
+app.Handle("/legacy", web.Wrap(http.HandlerFunc(oldHandler)))    // stdlib handler in
+http.Handle("/app/", http.StripPrefix("/app", app.Handler()))    // the engine out, as an http.Handler
 ```
 
-**闸门只能收紧，不能放宽**：与全局闸叠加时**取更严的那个**——上面 `/api/export` 的 1 MiB 生效；反过来把 `BodyLimit(100<<20)` 挂在全局 2 MiB 之下，仍会被 2 MiB 掐住。边界是**恰好 n 字节通过**，n+1 起 413；`n <= 0` 表示不限。
+What it is not: a batteries-included micro-framework with a large middleware catalogue. If you want an ecosystem of community middleware and maximum familiarity for a team, gin, chi or echo are the obvious picks. Pulse-Web aims at services that would rather keep the dependency surface at "standard library plus two packages" and get first-class observability out of the box.
 
-超限统一 413 + `body_too_large`，cause 是 `*http.MaxBytesError`——自定义 `ErrorHandler` 用 `errors.As` 只认这一个类型即可覆盖**全部**超限路径（全局闸的预检 / 读取两条 + `BodyLimit` 的两条）。自己写中间件包 `http.MaxBytesReader` 也拦得住，但会静默丢掉 stdlib 的「超限关连接」语义（响应少了 `Connection: close`）——`MaxBytesReader` 的 `w` 参数只在超限时用，且只有原始 writer 才实现那个未导出接口，原因见设计文档的「请求体上限」节。
+## Documentation
 
-## 日志落地（持久化归谁）
+- [Design document](docs/design/web-framework-design.md) — positioning, decisions, API surface, runtime contracts, observability design and an explicit "what we do not do" list, including the measured cost breakdown and the load-test comparison with gin
+- [Issue #1](https://github.com/Luo-root/pulse-web/issues/1) — the design discussion where those decisions were settled
 
-**默认档只写 stdout，它本身不是持久化**：进程只把行写进 fd 1，落盘、轮转、保留都由平台负责。
-三条常见路径，各配各的：
+## Contributing
 
-**① 容器 / k8s**——什么都不用改，运行时把 stdout 收成节点上的 JSON 文件。
-**要显式设轮转**，否则默认值要么很小要么无限增长：
+Non-trivial changes start as an issue; the rules are in [CONTRIBUTING.md](CONTRIBUTING.md) (bilingual).
 
-```yaml
-# docker-compose
-logging: { driver: json-file, options: { max-size: "50m", max-file: "5" } }
-```
-```yaml
-# kubelet（节点级）
-containerLogMaxSize: 50Mi
-containerLogMaxFiles: 5
-```
+- Security problems: **do not open a public issue** — report privately per [SECURITY.md](SECURITY.md)
+- Community behaviour: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- Working on this repository with an AI coding agent: [AGENTS.md](AGENTS.md)
 
-**② systemd（单机 VPS）**——服务的 stdout/stderr **默认就进 journald**，零额外组件；
-保留策略在 `/etc/systemd/journald.conf`：
+## License
 
-```ini
-SystemMaxUse=2G
-MaxRetentionSec=2week
-```
-
-查日志：`journalctl -u <服务名> --since "10 min ago"`，`-f` 跟流。
-
-**③ 直接落文件**——自己开文件交给出口；轮转/保留自备（框架不内置，零依赖）：
-
-```go
-f, err := os.OpenFile("/var/log/myapp.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-if err != nil { log.Fatal(err) }
-app := web.New(web.WithSink(web.NewConsoleSink(f)))
-```
-
-既要人能看又要送采集器，用上游的扇出：
-
-```go
-web.WithSink(observability.MultiSink{
-    web.NewConsoleSink(os.Stdout),
-    observability.NewLineSink(f),   // 32 KiB 缓冲，进程退出时引擎会 Flush
-})
-```
-
-**丢多少由缓冲层级决定**：`ConsoleSink` 无缓冲（只丢内核 page cache 里没回写的那一段）→
-`LineSink` 32 KiB → `AsyncSink` 队列（满时按策略丢）。要更强的保证得自己 `fsync`
-（每请求毫秒级代价，access log 通常不值）；要「一条不丢」的语义，那不是日志通道的事。
-
-**写失败要看一眼**：`Sink` 接口不返回错误，所以失败（stdout 管道被关、journald socket 满、
-磁盘满）从 `ConsoleSink.Err()` 读——它返回**首次**写失败：
-
-```go
-if err := sink.Err(); err != nil { /* 告警：访问日志已经写不进去了 */ }
-```
-
-## 文档
-
-- [框架设计（v1）](docs/design/web-framework-design.md)——定位、决策、API 面、运行时契约、观测设计、明确不做清单
-
-## 开发
-
-CI 门禁（`.github/workflows/ci.yml`）：`go build` / `go vet` / **`gofmt -l` 判空** / `go test -race` / **分配预算门禁**（`go test -run TestRequestPathAllocBudget ./bench/`，必须不带 `-race`）/ bench 编译检查。
-
-本地复现格式化门禁时，有**三条会造成假阳性的坑**，判据不要直接看输出：
-
-- **CRLF**：仓库已用 `.gitattributes` 把行尾钉成 LF，**新克隆不会有这个问题**；但属性生效**之前**签出的工作副本仍是 CRLF（git 不会回头重写已签出的文件），这一条只对那种旧工作副本适用。判据是**转成 LF 副本后零差异**。
-- **未跟踪目录**：`gofmt -l .` 会连未跟踪目录一起扫（例如 `_scratch/`）。只查已跟踪文件，用 `git ls-files '*.go'`。
-- **gofmt 版本**：PATH 上可能是旧版，解析不了泛型方法一类的新语法，表现同样是**全量**报错。用工具链自带的那个。
-
-与 CI 一致的命令（CI 用的就是 Linux 那条）：
-
-```bash
-# Linux（= CI）
-"$(go env GOROOT)/bin/gofmt" -l $(git ls-files '*.go')
-```
-
-```powershell
-# Windows PowerShell —— 这里 `go env GOROOT` 返回 `C:\...`，bash 起不来，所以给 PowerShell 形态
-& (Join-Path (go env GOROOT) 'bin\gofmt.exe') -l (git ls-files '*.go')
-```
-
-## 参与
-
-- **贡献流程**——Issue 五段（做什么 / 不做什么 / 为什么 / 设计理念 / 验收标准）、PR 六段、本地六条门禁命令、review 会检查的约定：见 [CONTRIBUTING.md](CONTRIBUTING.md)。
-- **安全问题**——**不要开公开 Issue**，按 [SECURITY.md](SECURITY.md) 私密上报（含范围界定与已加固清单）。
-- **行为准则**——社区交往按 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
-- **给 AI coding agent 的仓库指南**——[AGENTS.md](AGENTS.md)。
-
-## 许可证
-
-[MIT License](LICENSE)
+[MIT](LICENSE)
