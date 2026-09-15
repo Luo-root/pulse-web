@@ -120,6 +120,7 @@ g2.GET("/users", h, mw3)
 | Engine 请求路径（`New()`） | 1790 | 22 | 6314 |
 | Engine 请求路径 + `WithCollector()` | 2175 | **34** | 6803 |
 | Engine 请求路径 + `c.JSON`（JSON 响应档） | 2137 | **25** | 6438 |
+| Engine 请求路径 + `BodyLimit` 路由（只列分配口径，见下） | — | **23** | 6362 |
 
 由表内两行推出的 Δ：
 
@@ -128,12 +129,13 @@ g2.GET("/users", h, mw3)
 - **包含关系自检（防倒挂）**：`AttachCollector` = 裸绑定 + 1 个 Collector 结构，实测 ns 与 B/op 都严格更大（353.9 > 337.2、681 B > 649 B）。两者 allocs 同为 14——**alloc 单值区分不了这两者**（一次局部绑定写入本身就占十来个分配），判包含关系要看 B/op 与 ns。
 - **与插件树规模解耦**：10 / 50 / 100 插件 338 / 366 / 407 ns，allocs 恒为 14。
 - **`c.JSON` 先编码到 buffer 的代价**（两棵树同一探针，`-benchtime=20000x -count=3`）：main 23 → 本版 **25 allocs/op**、B/op 6341 → 6438，即 **+2 allocs / +97 B 每响应**——换来「编码失败不再发 200 空体」（#33）。这笔账起初没进描述、门禁也覆盖不到（其余档 handler 都是 `c.Text`，压根不经过 `c.JSON`），现已单列 JSON 档纳入基线。
+- **挂了 `BodyLimit` 的路由 +1 alloc**：default 档 22 → body-limit 档 **23 allocs/op**，多出来的就是 `http.MaxBytesReader` 返回的包装器本身（绑在请求上，无法复用）。这笔账同样起初没进描述、门禁也覆盖不到（其余档都不挂 `BodyLimit`），现已单列一档纳入基线（review 提出，PR #45）。**该行只列分配口径**：ns 未与本表同轮测得，按本表「凡要相减必须取本表内两行」的规矩留空——同轮对照（`-benchtime=20000x -count=3`）是 default 1823 ns vs body-limit 1828 ns，即 **+5 ns**、噪声量级；要 ns 就同轮跑 `BenchmarkEngineRequestPath` 与 `BenchmarkEngineRequestPath_BodyLimit` 再相减。
 
 **回归门禁**：本表的**分配计数与 B/op** 已固化成断言（`bench/budget_test.go`，由 CI 的 `Alloc budget` 步骤执行，不带 `-race` 跑）。**ns 不设阈值**——跨轮会漂 2–4×，拿它做门禁等于把机器状态引进 CI；ns 对比仍走人工 benchstat，口径见表 A / 表 B 各自的说明。断言失败时按提示同步刷新常量与本表。
 
 ### 表 C：与 gin 的真实负载对比（2026-09-14 一次性验证，采集工程未入库）
 
-验收标准第 8 条的落地。**结论留在这里，采集工程没有进仓库**——`loadtest/`（带 gin 依赖的独立
+验收标准第 13 条的落地。**结论留在这里，采集工程没有进仓库**——`loadtest/`（带 gin 依赖的独立
 module）是为回答「与 gin 同级吗、观测的钱花在哪」做的一次性验证，工程保留在 PR #19 的分支
 `bench/gin-compare`（未合并、未删除），要复现就切过去；本页只留口径与结论。
 
@@ -347,7 +349,7 @@ app.POST("/api/export", h, web.BodyLimit(1<<20))                 // 单条路由
 
 - **闸门做成中间件，不新增注册参数**：`Group(prefix, mw...)` 与 `GET/POST(..., mw...)` 本来就吃中间件，`BodyLimit` 就是一个中间件——不动路由签名、不引入注册期状态。生态同形：echo 的 `middleware.BodyLimit` 同样是中间件。
 - **闸门只能收紧，不能放宽**：引擎级先套一层 `MaxBytesReader`，路由级再套一层，实际生效的是两者中**更小的**那个。`BodyLimit(1<<20)` 挂在 `WithMaxBodyBytes(1<<10)` 的路由里仍被 1 KiB 掐住。不做「就近覆盖 / 可 raise」——去掉内层包装意味着换掉整个 body reader，代价与风险都不成比例。这条是**显式口径**，别让调用方以为可以 raise。
-- **两条路径，同一类错误**：有 `Content-Length` 时先按声明值快速失败（**不读 body**）；声明未知（chunked）或声明偏小时由读取闸门兜底。两条路径都产出 413 + `body_too_large`，cause 都是 `*http.MaxBytesError`——与 `WithMaxBodyBytes` 的两条路径同型，自定义 `ErrorHandler` 用 `errors.As` 只认这一个类型即可覆盖全部超限路径。边界口径：body **恰好 n 字节通过**，n+1 起 413。
+- **两条路径，同一类错误**：有 `Content-Length` 时先按声明值快速失败（**不读 body**）；声明未知（chunked）或声明偏小时由读取闸门兜底。两条路径都产出 413 + `body_too_large`，cause 都是 `*http.MaxBytesError`——与 `WithMaxBodyBytes` 的两条路径同型，自定义 `ErrorHandler` 用 `errors.As` 只认这一个类型即可覆盖全部超限路径。边界口径：body **恰好 n 字节通过**，n+1 起 413。**读取闸门是惰性的**：超限只在 handler 真的去读 body 时才触发，所以「声明未知 + handler 完全不读 body」的请求会以 200 结束——这一点与引擎级那道闸、以及 echo 的 `middleware.BodyLimit` 同形（`net/http` 自己在读侧也会兜住，不会无限灌），要不要读 body 是 handler 的事。
 - **`n <= 0` 表示不限**（直通，也不包 body），与 `WithMaxBodyBytes(0)` 同口径。
 - **`MaxBytesReader` 的 `w` 必须传原始 writer**：它**只在超限时用**——stdlib 会调 `w.(requestTooLarger).requestTooLarge()` 给响应加 `Connection: close` 并在回复后关连接（防继续灌数据、防 keep-alive 把残留 body 当成下一个请求）。这个未导出接口只有 server 内部的 `*response` 实现，而 `c.Writer()` 是框架包装器——用户自己写中间件时传它就**静默丢掉**这个语义。原始 writer 只有包内实现拿得到，所以这件事该由框架做（引擎级那道闸同理）。
 - 因此补了导出构造器 `TooLarge(code, cause)`：内置构造器原先只有 400 / 401 / 403 / 404 / 409 / 500，**没有 413**，而 `HTTPError.cause` 不导出——外部想返回**带 cause 的 413** 没有正规路径。

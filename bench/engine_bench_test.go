@@ -75,6 +75,21 @@ func enginePathAppJSON(tb testing.TB) (*web.Engine, func()) {
 	return app, func() { app.Root().Dispose() }
 }
 
+// enginePathAppBodyLimit 同上，但路由挂了 web.BodyLimit —— 把「路由级闸门」这条
+// 路径纳入基线。
+//
+// 单独一档的理由：其余各档都不挂 BodyLimit，而它每请求多一次分配
+// （`http.MaxBytesReader` 返回的包装器本身）。没有这一档时，这条路径的分配变化
+// 门禁抓不到——「门禁零变化」只说明**被门禁覆盖的那些路径**没变，不代表这条路径
+// 没变（与 c.JSON 那一档同一类问题，review 提出，PR #45）。
+func enginePathAppBodyLimit(tb testing.TB) (*web.Engine, func()) {
+	tb.Helper()
+	app := web.New(web.WithSink(nopSink{}))
+	app.GET("/ping", func(c *web.Ctx) error { return c.Text(http.StatusOK, "pong") },
+		web.BodyLimit(1<<20))
+	return app, func() { app.Root().Dispose() }
+}
+
 // runRequestPath 是「一次请求」的循环体：benchmark 与分配预算门禁共用。
 //
 // 每轮在循环内重建请求：`httptest.NewRequest` 的开销同时计入 ns/op 与 allocs/op
@@ -126,6 +141,17 @@ func BenchmarkEngineRequestPath_Collector(b *testing.B) {
 // BenchmarkEngineRequestPathMinimal 对照：Minimal 模式（无 Trace / AccessLog / Sink）。
 func BenchmarkEngineRequestPathMinimal(b *testing.B) {
 	app, cleanup := enginePathAppMinimal(b)
+	b.Cleanup(cleanup)
+	runRequestPath(b, app)
+}
+
+// BenchmarkEngineRequestPath_BodyLimit 对照：路由挂了 web.BodyLimit。
+//
+// 与 BenchmarkEngineRequestPath **同轮跑取差值**（设计文档表 B 的规矩：跨轮相减会
+// 得出倒挂的结论）：差值是恒定的 +1 alloc（MaxBytesReader 包装器本身），
+// 由 bench/budget_test.go 的 `default+body-limit` 档断言。
+func BenchmarkEngineRequestPath_BodyLimit(b *testing.B) {
+	app, cleanup := enginePathAppBodyLimit(b)
 	b.Cleanup(cleanup)
 	runRequestPath(b, app)
 }

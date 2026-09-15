@@ -187,6 +187,40 @@ func TestBodyLimitNonPositiveIsPassThrough(t *testing.T) {
 	}
 }
 
+func TestTooLargeCodeSurvivesDefaultMapper(t *testing.T) {
+	// 端到端走**默认 mapper**：调用方传的 code 不能被 cause 的分类吞掉。
+	//
+	// 陷阱是 errors.As 会沿 HTTPError.Unwrap() 下钻到 cause——若 mapper 把
+	// *http.MaxBytesError 的分支排在 HTTPError 之前，TooLarge 的**典型用法**
+	// （cause 就是读 body 拿到的 MaxBytesError）会静默变成 body_too_large，
+	// 而框架自己那两个调用点传的 code 恰好逐字相同，所以只看框架路径看不出来。
+	e, _ := newTestEngine(t)
+	e.POST("/quota", func(c *Ctx) error {
+		return TooLarge("quota_exceeded", &http.MaxBytesError{Limit: 5})
+	})
+	e.POST("/nil-cause", func(c *Ctx) error {
+		return TooLarge("quota_exceeded", nil)
+	})
+	e.POST("/bare", func(c *Ctx) error {
+		return &http.MaxBytesError{Limit: 5} // 裸读错误：没有 HTTPError 包装
+	})
+
+	cases := []struct{ path, want string }{
+		{"/quota", "quota_exceeded"}, // cause = MaxBytesError：显式 HTTPError 优先
+		{"/nil-cause", "quota_exceeded"},
+		{"/bare", codeBodyTooLarge}, // 裸读错误仍归 413 + 统一码
+	}
+	for _, c := range cases {
+		rec := bodyLimitReq(e, c.path, "")
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("%s: status = %d，应为 413（body = %s）", c.path, rec.Code, rec.Body.String())
+		}
+		if got := errCode(t, rec); got != c.want {
+			t.Fatalf("%s: code = %q，应为 %q", c.path, got, c.want)
+		}
+	}
+}
+
 func TestTooLargeConstructor(t *testing.T) {
 	// 验收 8：TooLarge 构造器——413、cause 可 errors.As / errors.Is 追溯
 	cause := &http.MaxBytesError{Limit: 8}

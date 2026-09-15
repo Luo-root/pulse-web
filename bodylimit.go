@@ -36,16 +36,30 @@ func BodyLimit(n int64) Middleware {
 		if n <= 0 {
 			return next(c)
 		}
-
-		// 预检：Content-Length 声明即超限 → 快速失败，不读 body。
-		// ContentLength == -1（声明未知）不会命中这里，由下面的读取闸门兜底。
-		if c.r.ContentLength > n {
-			return TooLarge("body_too_large", &http.MaxBytesError{Limit: n})
+		// 预检 + 读取闸门，与引擎级 WithMaxBodyBytes 共用同一条实现（limitBody）。
+		// w 传**原始 writer**（c.w.ResponseWriter）而不是 c.Writer()——理由见 godoc。
+		if err := limitBody(c.w.ResponseWriter, c.r, n); err != nil {
+			return err
 		}
-
-		// 读取闸门：传**原始 writer**（c.w.ResponseWriter）而不是 c.Writer()，
-		// 以保留上面的「超限关连接」语义——包装器不实现未导出的 requestTooLarger。
-		c.r.Body = http.MaxBytesReader(c.w.ResponseWriter, c.r.Body, n)
 		return next(c)
 	}
+}
+
+// limitBody 是请求体上限的两道闸，引擎级 WithMaxBodyBytes 与路由级 BodyLimit 共用：
+// 声明即超限 → 返回 413（**不读 body**）；否则给 body 包一层 MaxBytesReader，
+// 把「声明未知（chunked）/ 声明偏小」的超限留给读取路径兜底。
+//
+// w 必须是**原始 writer**：MaxBytesReader 的 w 参数只在超限时用，stdlib 会调
+// `w.(requestTooLarger).requestTooLarge()` 给响应加 `Connection: close` 并在回复后
+// 关连接。框架的 responseWriter 包装器不实现这个未导出接口，传包装器会静默丢掉该语义。
+//
+// 两道闸共用它，是因为这条不变式必须永远一致——边界是 `> n` 而不是 `>= n`（恰好 n
+// 通过）、cause 用 *http.MaxBytesError（四条超限路径同型）、读闸门前不碰 body。
+// 拆成两份写，迟早漂开。
+func limitBody(w http.ResponseWriter, r *http.Request, n int64) error {
+	if r.ContentLength > n {
+		return TooLarge(codeBodyTooLarge, &http.MaxBytesError{Limit: n})
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, n)
+	return nil
 }

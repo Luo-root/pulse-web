@@ -8,7 +8,7 @@
 - **一等观测**——每请求 TraceID、结构化记录、装配诊断，默认装配；默认出口是**给人读**的列式单行（`ConsoleSink`，渲染 0 分配）
 - **零第三方依赖**——只使用 stdlib 与 pulse 的两个基座包（kernel / observability）
 
-> 状态：**v1 功能面已实现**（12/12）——验收标准逐条附可复跑的测试证据，见设计文档的「验收标准」节。API 在 1.0 之前，仍可能随 minor 调整。
+> 状态：**v1 功能面已实现**（13/13）——验收标准逐条附可复跑的测试证据，见设计文档的「验收标准」节。API 在 1.0 之前，仍可能随 minor 调整。
 > 设计与决策记录在 [Issue #1](https://github.com/Luo-root/pulse-web/issues/1)，完整设计见 [`docs/design/web-framework-design.md`](docs/design/web-framework-design.md)；逐项实现与实测记录见各 Issue（[#2](https://github.com/Luo-root/pulse-web/issues/2) 垂直切片、[#4](https://github.com/Luo-root/pulse-web/issues/4) 周边能力、[#6](https://github.com/Luo-root/pulse-web/issues/6) / [#27](https://github.com/Luo-root/pulse-web/issues/27) 上游采纳、[#20](https://github.com/Luo-root/pulse-web/issues/20) 默认出口、[#18](https://github.com/Luo-root/pulse-web/issues/18) 真实负载对比、[#30](https://github.com/Luo-root/pulse-web/issues/30) 验收证据收口）。
 
 ## 预览（API 草案）
