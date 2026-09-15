@@ -114,6 +114,21 @@ func (c *Ctx) Observe(event string, set func(*observability.Attrs)) {
 // SetHeader 设置响应头（必须在首次写出之前调用）。
 func (c *Ctx) SetHeader(key, value string) { c.w.Header().Set(key, value) }
 
+// Writer 返回响应写出器，供**流式**场景直接写字节（SSE / chunked / 大文件）。
+// 常规响应仍用 JSON / Text —— 它们会设好 Content-Type 与状态码。
+//
+//	c.SetHeader("Content-Type", "text/event-stream")
+//	w := c.Writer()
+//	for ev := range events {
+//		fmt.Fprintf(w, "data: %s\n\n", ev)
+//		if err := c.Flush(); err != nil { return err }  // 首刷落 200，此后逐段推送
+//	}
+//
+// 返回的是框架的包装器：状态码与响应体积照常被 AccessLog 采集；包装器保留底层
+// 能力（内嵌接口的方法集提升），`http.Flusher` / `http.ResponseController` 一类的
+// 用法不受影响。
+func (c *Ctx) Writer() http.ResponseWriter { return c.w }
+
 // Status 只**设置**状态码，不立即写出；由 JSON/Text 或引擎收尾时落定。
 func (c *Ctx) Status(code int) *Ctx {
 	c.status = code

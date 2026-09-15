@@ -3,7 +3,7 @@
 > 完整设计文档（v1）。设计票与评审记录见 [Issue #1](https://github.com/Luo-root/pulse-web/issues/1)。
 > 包名 `web`，模块 `github.com/Luo-root/pulse-web`——不与 pulse 根包（`package pulse`）冲突。
 >
-> **引用口径**：本文中 `包/文件.go:NNN` 形式的行号引用针对 **pulse v0.2.2**。上游一个 patch 版本就可能让行号整体位移（v0.2.1 → v0.2.2 就让 `observability/collector.go` 位移了 11 行），所以**升依赖时必须整体复核**——用 `git grep -n '\.go:[0-9]'` 取出全部引用，逐个按符号在新版本里重新定位，不要只看 diff 触及的那几条。
+> **引用口径**：本文中 `包/文件.go:NNN` 形式的行号引用针对 **pulse v0.2.4**（#30 已逐条复核：v0.2.2 → v0.2.4 之间，下述四处引用所在文件未变动，行号与符号位置逐条一致）。上游一个 patch 版本就可能让行号整体位移（v0.2.1 → v0.2.2 就让 `observability/collector.go` 位移了 11 行），所以**升依赖时必须整体复核**——用 `git grep -n '\.go:[0-9]'` 取出全部引用，逐个按符号在新版本里重新定位，不要只看 diff 触及的那几条。
 
 ## 一句话
 
@@ -12,7 +12,7 @@
 ## 做什么（v1）
 
 1. **Engine**——路由注册、分组、中间件（闭包组合，洋葱模型）
-2. **Ctx**——路径参数（读 `Request.PathValue`，不另存）、查询、请求级 KV、响应写出（JSON / Text / Status / Header / Flush）
+2. **Ctx**——路径参数（读 `Request.PathValue`，不另存）、查询、请求级 KV、响应写出（JSON / Text / Status / Header / Writer / Flush）
 3. **错误模型**——`HTTPError` + `StatusCoder` 接口 + 默认 mapper（脱敏）
 4. **JSON 绑定**——stdlib `encoding/json`（Go 1.27 起由 v2 实现支撑）
 5. **请求作用域**——每请求派生 kernel scope，handler 返回即 `Dispose`（在写响应之前）
@@ -21,7 +21,7 @@
 8. **生命周期**——`Run`（信号 → `Server.Shutdown` → `OnShutdown` → `root.Dispose` → Sink flush）、`Serve`、`Handler`
 9. **stdlib 互操作**——`Wrap(http.Handler) Handler`，`Handler()` 反向导出
 10. **静态文件**——`Static(prefix, dir)`，**静态资源同样经过全局与分组中间件**（与普通路由共用注册路径）
-11. **流式响应**——直接写 `ResponseWriter` + `Flush`（SSE / 大文件），一条 AccessLog
+11. **流式响应**——`c.Writer()` 直接写字节 + `c.Flush()` 逐段推送（SSE / chunked / 大文件），仍是一条 AccessLog
 12. **HTML 模板**——`c.HTML()`，薄封装 stdlib `html/template`（生产缓存 / 开发热重载）
 
 ## 不做什么（v1 明确排除）
@@ -279,9 +279,10 @@ func (c *Ctx) Detach() Detached
 // 响应
 func (c *Ctx) JSON(code int, v any) error
 func (c *Ctx) Text(code int, s string) error
-func (c *Ctx) Status(code int) *Ctx      // 只设置，不立即写头
+func (c *Ctx) Status(code int) *Ctx       // 只设置，不立即写头
 func (c *Ctx) SetHeader(k, v string)
-func (c *Ctx) Flush() error              // 流式
+func (c *Ctx) Writer() http.ResponseWriter // 流式：直接写字节（包装器，状态码与体积照常采集）
+func (c *Ctx) Flush() error                // 流式：首刷落 200，此后逐段推送；底层不支持 Flusher 时返回明确 error
 ```
 
 类型约束：`Key[T]` 与 `kernel.ServiceKey[T]` 是不同类型，误用编译期报错——命名是第一道防线，类型是第二道。
@@ -358,7 +359,7 @@ app.GET("/", func(c *web.Ctx) error {
 - **生产模式**：启动时解析一次并缓存（并发安全）
 - **`DevReload: true`**：每请求重新 `ParseGlob`（每请求磁盘扫描 + 写锁）；仅供开发
 - `web.H` = `map[string]any` 的类型别名（模板数据便利写法，也可传任意 struct）
-- **`c.HTML` 的三条错误路径一律返回明确 error**（不静默 500）：未配置模板 / 模板名不存在 / 执行期报错。实现上**先渲染到内存缓冲、成功后才写响应头**——`WriteHeader` 一旦先生效，「已写响应不被覆盖」规则会把错误吞成 200 空页。代价是模板输出不流式（需要流式请直接写 Writer）
+- **`c.HTML` 的三条错误路径一律返回明确 error**（不静默 500）：未配置模板 / 模板名不存在 / 执行期报错。实现上**先渲染到内存缓冲、成功后才写响应头**——`WriteHeader` 一旦先生效，「已写响应不被覆盖」规则会把错误吞成 200 空页。代价是模板输出不流式（需要流式请用 `c.Writer()` + `c.Flush()`）
 - 模板自动补 `Content-Type: text/html; charset=utf-8`
 
 ### 静态文件与中间件
@@ -641,25 +642,42 @@ pulse-web/
 ├── go.mod                     # module github.com/Luo-root/pulse-web（package web）
 ├── doc.go                     # 包文档（定位 / 快速开始 / 运行时契约）
 ├── engine.go                  # Engine、选项、Root()、路由注册与分组、Static、
-│                              # ServeHTTP（时序）、Engine 层收尾、Run/Serve/Handler/OnShutdown
-├── context.go                 # Ctx、请求级 KV、响应写出、responseWriter 包装器
+│                              # ServeHTTP（时序）、Engine 层收尾、
+│                              # Run / Serve（信号注册）/ serve（执行体）、Handler、OnShutdown
+├── context.go                 # Ctx、请求级 KV、响应写出（Writer / Flush / JSON / Text）、responseWriter 包装器
 ├── errors.go                  # HTTPError / StatusCoder / PanicError / 默认 mapper
 ├── observe.go                 # TraceID 生成与上游头解析（32hex）
 ├── wrap.go                    # stdlib 互操作（Wrap）
 ├── detach.go                  # Detached 值袋子（跨 goroutine 的安全值）
 ├── templates.go               # html/template 薄封装 + web.H
+├── console_sink.go            # 默认出口：给人读的列式单行（见「默认出口」——薄壳 + 版式渲染器）
 ├── debug.go                   # 装配诊断端点（FiberSnapshots 的 JSON 视图）
-├── bench/                     # 性能回归基线（go test -bench . ./bench/）
-└── .github/workflows/ci.yml   # build / vet / test -race
+├── *_test.go                  # 与源文件同包（无独立 xxx_test 包），黑盒走 Engine 入口
+├── bench/                     # 性能回归基线 + 分配预算门禁（go test ./bench/）
+│   └── muxprobe/              # 路由选型的一次性实测程序（「路由选型的边界」的数据来源）
+└── .github/workflows/ci.yml   # build / vet / gofmt 判空 / test -race / 分配预算 / bench 编译检查
 ```
 
 ## 验收标准
 
-- [ ] 垂直切片可跑：`app.Run()` 起服务，路由 / 中间件 / JSON / 优雅关闭全通
-- [ ] **`WithRoot()` 可接入外部已有的 kernel 树**：双方 `Provide` 的服务彼此可见（同一 IoC 容器）
-- [ ] **默认路径零全局 `Provide`**（benchmark 不随插件数线性涨）；`WithCollector()` 后是作用域局部绑定，实测同样与插件树规模无关
-- [ ] **`c` 上的业务打点与 AccessLog 进同一个 Sink**：同一 `TraceID` / `HostID`；Source 分别为 `"http"`（AccessLog）与 `"bridge"`（Collector）
-- [ ] 观测贯穿：单请求 TraceID 在 router → handler → Sink 一致；后台任务共享同一 TraceID
-- [ ] 标准库兼容：挂载 stdlib 中间件无侵入；`Wrap` 双向适配
-- [ ] 性能回归：请求路径开销进入仓库 bench，作为基线不劣化
+> 每条的**证据**都写成可复跑的样子：测试名可直接 `go test -run <名> ./...`；实测记录指到对应章节。
+
+- [x] 垂直切片可跑：`app.Run()` 起服务，路由 / 中间件 / JSON / 优雅关闭全通
+  证据：`TestServeSignalRunsFullShutdownChain`（注入信号 → drain 在途请求 → `OnShutdown` → `root.Dispose` → Sink flush 全链路）、`TestServeReturnsServerError`（server 出错透出）、`TestRunListenFailureDisposesEngine`（监听失败回收引擎）；路由 / 中间件 / JSON 见 `TestRouterJSONAndPathParam`、`TestGroupAndMiddlewareOrder`。
+- [x] **`WithRoot()` 可接入外部已有的 kernel 树**：双方 `Provide` 的服务彼此可见（同一 IoC 容器）
+  证据：`TestWithRootAcceptsPreinstalledTree`——外部树先装插件、web 侧 `Provide` 后 handler 读得到，Bootstrap 仍产出快照记录。
+- [x] **默认路径零全局 `Provide`**（benchmark 不随插件数线性涨）；`WithCollector()` 后是作用域局部绑定，实测同样与插件树规模无关
+  证据：分配门禁 `bench/budget_test.go` 的 `plugins=50` 档与空树同为 22 allocs/op；表 B 的 10 / 50 / 100 插件三档 allocs 恒为 14。
+- [x] **`c` 上的业务打点与 AccessLog 进同一个 Sink**：同一 `TraceID` / `HostID`；Source 分别为 `"http"`（AccessLog）与 `"bridge"`（`c.Observe` **直写**——该字面值是上游 `observability.SourceAdapter`，此路径不注册 Collector）
+  证据：`TestAccessLogRecordFields` 与 `observe_test.go` 里的业务打点断言（同一 Sink、同一 TraceID、Source 为 `SourceAdapter`）。
+- [x] 观测贯穿：单请求 TraceID 在 router → handler → Sink 一致；后台任务共享同一 TraceID
+  证据：`TestTraceIDGeneratedAndSharedAcrossRecord`、`TestDetachSharesTraceAndRootAccess`；入站头采纳另见 `TestTraceparentAdopted` / `TestB3TraceIDAdopted`。
+- [x] 标准库兼容：挂载 stdlib 中间件无侵入；`Wrap` 双向适配
+  证据：`TestWrapStdlibHandler`、`TestEngineUnderStdlibMiddleware`、`TestWrapPanicCaughtByEngine`。
+- [x] `ServerConfig` 契约成立：6 个默认值 + 「非零覆盖、零值保持默认」+ 配置**真的**落到 `http.Server` 上
+  证据：`TestDefaultServerConfigValues`、`TestWithServerMergesNonZeroFields`、`TestServerConfigReachesHTTPServer`（1 KiB 上限下超限请求头被拒 431）。
+- [x] 流式响应可用：`c.Writer()` + `c.Flush()` 逐段推送（SSE），首刷落 200；底层不支持 `http.Flusher` 时返回明确 error
+  证据：`TestCtxFlushStreamsIncrementally`（第一段在 handler 仍挂起时已到达客户端——只有真 flush 做得到）、`TestCtxFlushWithoutFlusherReturnsError`、`TestResponseWriterKeepsFlusherCapability`。
+- [x] 性能回归：请求路径开销进入仓库 bench，作为基线不劣化
+  证据：`bench/` 全套基准 + 分配预算门禁 `TestRequestPathAllocBudget`（CI 的 `Alloc budget` 步骤，不带 `-race` 执行）。
 - [x] 真实负载下与 gin 同级（不以 micro-benchmark 胜负作承诺）——**已验证一次**：裸档 0.94× / 0.97×（见「表 C」；采集工程不入库，保留在 PR #19 的分支 `bench/gin-compare`）

@@ -644,6 +644,20 @@ func (e *Engine) Run(addr string) error {
 
 // Serve 在给定 listener 上阻塞服务（同样内置信号处理与优雅关闭）。
 func (e *Engine) Serve(ln net.Listener) error {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	return e.serve(ln, sigCh)
+}
+
+// serve 是 Serve 的执行体：把 ServerConfig 装进 http.Server，跑到 server 出错
+// 或收到关闭信号为止。
+//
+// 信号源是参数、不在这里 signal.Notify ——「收到信号 → 优雅关闭」是公开入口的
+// 关键路径，而真实信号无法在测试里确定性地制造（Windows 上给自身进程投递
+// os.Interrupt 不可行）。拆成参数后，测试注入一个受控 channel 即可跑通全链路，
+// 且不引入包级可变状态。
+func (e *Engine) serve(ln net.Listener, sigCh <-chan os.Signal) error {
 	srv := &http.Server{
 		Handler:           e,
 		ReadHeaderTimeout: e.server.ReadHeaderTimeout,
@@ -660,10 +674,6 @@ func (e *Engine) Serve(ln net.Listener) error {
 		}
 		close(errCh)
 	}()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(sigCh)
 
 	select {
 	case err := <-errCh:

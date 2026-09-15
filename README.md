@@ -6,8 +6,8 @@
 - **一等观测**——每请求 TraceID、结构化记录、装配诊断，默认装配；默认出口是**给人读**的列式单行（`ConsoleSink`，渲染 0 分配）
 - **零第三方依赖**——只使用 stdlib 与 pulse 的两个基座包（kernel / observability）
 
-> 状态：**实现中**。设计与决策记录在 [Issue #1](https://github.com/Luo-root/pulse-web/issues/1)，完整设计见 [`docs/design/web-framework-design.md`](docs/design/web-framework-design.md)。
-> 已落地：垂直切片（Engine / 路由与分组 / Ctx / 错误模型 / 观测接线 / 优雅关闭，[#2](https://github.com/Luo-root/pulse-web/issues/2)）；周边能力（Detach / HTML 模板 / Debug 端点 / TraceID 信任开关，[#4](https://github.com/Luo-root/pulse-web/issues/4)）；pulse v0.2.2 采纳（请求级绑定语义 + 观测出口 flush 覆盖 + `WithCollector()`，[#6](https://github.com/Luo-root/pulse-web/issues/6)）。
+> 状态：**v1 功能面已实现**（12/12）——验收标准逐条附可复跑的测试证据，见设计文档的「验收标准」节。API 在 1.0 之前，仍可能随 minor 调整。
+> 设计与决策记录在 [Issue #1](https://github.com/Luo-root/pulse-web/issues/1)，完整设计见 [`docs/design/web-framework-design.md`](docs/design/web-framework-design.md)；逐项实现与实测记录见各 Issue（[#2](https://github.com/Luo-root/pulse-web/issues/2) 垂直切片、[#4](https://github.com/Luo-root/pulse-web/issues/4) 周边能力、[#6](https://github.com/Luo-root/pulse-web/issues/6) / [#27](https://github.com/Luo-root/pulse-web/issues/27) 上游采纳、[#20](https://github.com/Luo-root/pulse-web/issues/20) 默认出口、[#18](https://github.com/Luo-root/pulse-web/issues/18) 真实负载对比、[#30](https://github.com/Luo-root/pulse-web/issues/30) 验收证据收口）。
 
 ## 预览（API 草案）
 
@@ -40,6 +40,31 @@ PULSE | 2026/09/14 - 08:30:00 | pulse.kernel.fiber_state host=svc fiber=db state
 尾段的 `route=` / `size=` / `host=` / 错误 / `trace=` 是各自独立的 ` | ` 字段，有才出现。
 
 要机器可读 / 接既有日志管道：`web.New(web.WithSink(observability.SlogSink{...}))`（或 `NewAsyncSink`、`NewLineSink`）——**只换出口，装配不变**。
+
+### 流式响应（SSE）
+
+`c.Writer()` 拿响应写出器直接写字节，`c.Flush()` 逐段推给客户端：
+
+```go
+app.GET("/events", func(c *web.Ctx) error {
+    c.SetHeader("Content-Type", "text/event-stream")
+    c.SetHeader("Cache-Control", "no-cache")
+
+    w := c.Writer()
+    for ev := range events {
+        if _, err := fmt.Fprintf(w, "data: %s\n\n", ev); err != nil {
+            return nil // 客户端断开：响应已开始，静默收尾
+        }
+        if err := c.Flush(); err != nil { // 只在底层 writer 不支持 Flusher 时发生
+            return err
+        }
+    }
+    return nil // handler 返回 ⇒ 请求 scope 回收 + 一条 AccessLog
+})
+```
+
+写出器是框架的包装器：状态码与响应体积照常进 AccessLog；`http.Flusher` / `http.ResponseController` 一类用法不受影响
+（`Flush` 的首刷会落 200，所以流式接口不要在流里再改状态码）。
 
 ## 日志落地（持久化归谁）
 
