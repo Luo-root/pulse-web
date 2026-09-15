@@ -48,7 +48,7 @@ func renderLine(t *testing.T, rec observability.Record) string {
 // 断言（而不是被一个 Contains 悄悄放过）。
 func TestConsoleSinkHTTPLine(t *testing.T) {
 	got := renderLine(t, httpRecord("200", 585100*time.Nanosecond))
-	want := "2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /users/42" +
+	want := "PULSE | 2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /users/42" +
 		" | route=/users/{id} | size=29 | host=pulse-web | trace=8f2e1a3b4c5d6e7f8a9b0c1d2e3f4a5b\n"
 	if got != want {
 		t.Fatalf("版式不符：\n got=%q\nwant=%q", got, want)
@@ -65,7 +65,7 @@ func TestConsoleSinkPaddingUsesDisplayWidth(t *testing.T) {
 	observability.Set(&rec.Attrs, attrClientAddr, "客户端-甲:1234")
 
 	got := renderLine(t, rec)
-	want := "2026/09/14 - 08:30:00 | 200 |   585.1µs | 客户端-甲:1234  | GET     /users/42" +
+	want := "PULSE | 2026/09/14 - 08:30:00 | 200 |   585.1µs | 客户端-甲:1234  | GET     /users/42" +
 		" | route=/users/{id} | size=29 | host=pulse-web | trace=8f2e1a3b4c5d6e7f8a9b0c1d2e3f4a5b\n"
 	if got != want {
 		t.Fatalf("客户端列应按显示宽度占满 %d 列（全角算 2 列）：\n got=%q\nwant=%q", colClient, got, want)
@@ -101,21 +101,22 @@ func TestConsoleSinkHTTPLineFallbacks(t *testing.T) {
 	t.Run("方法/客户端缺值补 -", func(t *testing.T) {
 		rec := httpRecord("200", 0)
 		rec.Attrs = observability.Attrs{}
+		// fields[0] 是行首标识 PULSE，[1] 才是时间列。
 		fields := consoleFields(renderLine(t, rec))
-		if len(fields) < 5 {
+		if len(fields) < 6 {
 			t.Fatalf("列数不足：%q", fields)
 		}
-		if fields[1] != "200" {
-			t.Errorf("状态列 = %q，want 200", fields[1])
+		if fields[2] != "200" {
+			t.Errorf("状态列 = %q，want 200", fields[2])
 		}
-		if !strings.HasSuffix(fields[2], "0ns") {
-			t.Errorf("耗时列应带单位：%q", fields[2])
+		if !strings.HasSuffix(fields[3], "0ns") {
+			t.Errorf("耗时列应带单位：%q", fields[3])
 		}
-		if fields[3] != "-" {
-			t.Errorf("客户端缺值应为 -，实得 %q", fields[3])
+		if fields[4] != "-" {
+			t.Errorf("客户端缺值应为 -，实得 %q", fields[4])
 		}
-		if got := strings.Fields(fields[4]); len(got) != 2 || got[0] != "-" || got[1] != "-" {
-			t.Errorf("方法/路径缺值应各补 -，实得 %q", fields[4])
+		if got := strings.Fields(fields[5]); len(got) != 2 || got[0] != "-" || got[1] != "-" {
+			t.Errorf("方法/路径缺值应各补 -，实得 %q", fields[5])
 		}
 	})
 
@@ -167,7 +168,7 @@ func TestConsoleSinkEventLine(t *testing.T) {
 		To:        "Running",
 	}
 	got := renderLine(t, rec)
-	want := "2026/09/14 - 08:30:00 | pulse.kernel.fiber_state host=svc fiber=db state=Starting→Running\n"
+	want := "PULSE | 2026/09/14 - 08:30:00 | pulse.kernel.fiber_state host=svc fiber=db state=Starting→Running\n"
 	if got != want {
 		t.Fatalf("事件行版式不符：\n got=%q\nwant=%q", got, want)
 	}
@@ -282,7 +283,7 @@ func TestConsoleSinkConcurrentWrites(t *testing.T) {
 		t.Fatalf("行数不符：got %d want %d（写串台或被吞）", len(lines), writers*perWriter)
 	}
 	for i, ln := range lines {
-		if !strings.HasPrefix(ln, "2026/09/14 - 08:30:00 | 200 |") {
+		if !strings.HasPrefix(ln, "PULSE | 2026/09/14 - 08:30:00 | 200 |") {
 			t.Fatalf("第 %d 行不完整：%q", i+1, ln)
 		}
 	}
@@ -340,7 +341,8 @@ func TestConsoleSinkNilWriterPanics(t *testing.T) {
 // 谁把它改回四舍五入（或改小数位），先红在这条上。
 func TestConsoleSinkDurationColumn(t *testing.T) {
 	durCol := func(d time.Duration) string {
-		return consoleFields(renderLine(t, httpRecord("200", d)))[2]
+		// fields[0] 是行首标识、[1] 是时间列，耗时列在 [3]。
+		return consoleFields(renderLine(t, httpRecord("200", d)))[3]
 	}
 	cases := []struct {
 		d    time.Duration

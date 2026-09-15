@@ -75,8 +75,11 @@ const (
 //
 // http 请求（一行，列宽固定；下面是 `TestConsoleSinkHTTPLine` 钉住的那一行）：
 //
-//	2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /users/42 | route=/users/{id} | size=29 | host=pulse-web | trace=8f2e1a3b4c5d6e7f8a9b0c1d2e3f4a5b
+//	PULSE | 2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /users/42 | route=/users/{id} | size=29 | host=pulse-web | trace=8f2e1a3b4c5d6e7f8a9b0c1d2e3f4a5b
 //
+//	  - 行首标识 `PULSE` 走上游缺省值（`observability.DefaultLinePrefix`），
+//	    暗淡上色：pulse 与 pulse-web 同根同源，同一进程树里的行首一致，
+//	    `grep PULSE` 一把捞出全部行；
 //	  - 时间列是**完成时刻**（与 gin 的 Logger 一致：请求结束后才写这一行）；
 //	  - 状态列按区间上色（2xx 绿 / 3xx 青 / 4xx 黄 / 5xx 红），仅在终端生效；
 //	  - 耗时列右对齐、带单位、**不取整**（`820ns` / `585.1µs` / `7.62ms` / `1.23s`），
@@ -143,7 +146,9 @@ func NewConsoleSink(w io.Writer, opts ...ConsoleOption) *ConsoleSink {
 	}
 
 	lineOpts := []observability.LineOption{
-		observability.WithPrefix(""),  // 行首标识留给宿主；本出口的行首就是时间列
+		// 行首标识走上游缺省值（`PULSE`）：pulse 与 pulse-web 同根同源，同一进程树里
+		// 两个出口的行首一致——grep 一个词就能把全部行捞出来，也便于与结构化出口对账。
+		observability.WithPrefix(observability.DefaultLinePrefix),
 		observability.WithImmediate(), // 终端要即时，见上面「退出方式」
 		observability.WithRenderer(consoleRenderer),
 	}

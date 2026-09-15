@@ -29,11 +29,12 @@ app.Run(":8080")                         // 内置优雅关闭：drain → OnShu
 默认出口写 stdout，一行一条（列宽固定；颜色只在终端生效）：
 
 ```
-2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /users/42 | route=/users/{id} | size=29 | host=pulse-web | trace=8f2e1a3b4c5d6e7f8a9b0c1d2e3f4a5b
-2026/09/14 - 08:30:00 | 500 |    7.62ms | 192.0.2.1:1234  | GET     /boom       | http_5xx "boom: Internal Server Error" | trace=3a71…
-2026/09/14 - 08:30:00 | pulse.kernel.fiber_state host=svc fiber=db state=Starting→Running
+PULSE | 2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /users/42 | route=/users/{id} | size=29 | host=pulse-web | trace=8f2e1a3b4c5d6e7f8a9b0c1d2e3f4a5b
+PULSE | 2026/09/14 - 08:30:00 | 500 |    7.62ms | 192.0.2.1:1234  | GET     /boom       | http_5xx "boom: Internal Server Error" | trace=3a71…
+PULSE | 2026/09/14 - 08:30:00 | pulse.kernel.fiber_state host=svc fiber=db state=Starting→Running
 ```
 
+行首 `PULSE` 是上游缺省标识——pulse 与 pulse-web 同根同源，同一进程树里两个出口的行首一致。
 尾段的 `route=` / `size=` / `host=` / 错误 / `trace=` 是各自独立的 ` | ` 字段，有才出现。
 
 要机器可读 / 接既有日志管道：`web.New(web.WithSink(observability.SlogSink{...}))`（或 `NewAsyncSink`、`NewLineSink`）——**只换出口，装配不变**。
