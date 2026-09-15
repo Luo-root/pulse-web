@@ -37,7 +37,13 @@ export default defineConfig({
               text: '指南',
               items: [
                 { text: '快速开始', link: '/guide/getting-started' },
+                { text: '路由与中间件', link: '/guide/routing' },
+                { text: '请求', link: '/guide/requests' },
+                { text: '响应', link: '/guide/responses' },
+                { text: '错误模型', link: '/guide/errors' },
                 { text: '观测', link: '/guide/observability' },
+                { text: '装配与运行', link: '/guide/assembly' },
+                { text: '落地与契约', link: '/guide/ops-contracts' },
               ],
             },
             {
@@ -78,7 +84,13 @@ export default defineConfig({
               text: 'Guide',
               items: [
                 { text: 'Getting started', link: '/en/guide/getting-started' },
+                { text: 'Routing and middleware', link: '/en/guide/routing' },
+                { text: 'Requests', link: '/en/guide/requests' },
+                { text: 'Responses', link: '/en/guide/responses' },
+                { text: 'The error model', link: '/en/guide/errors' },
                 { text: 'Observability', link: '/en/guide/observability' },
+                { text: 'Assembly and running', link: '/en/guide/assembly' },
+                { text: 'Deployment and contracts', link: '/en/guide/ops-contracts' },
               ],
             },
             {
