@@ -88,7 +88,8 @@ type errorDetail struct {
 }
 
 // defaultErrorHandler 是默认映射器：HTTPError / StatusCoder 用其状态码；
-// panic 与普通 error 一律 500 + 通用文案（内部细节只进观测记录）。
+// 请求体超限（*http.MaxBytesError）归 413；panic 与其余普通 error 一律 500 +
+// 通用文案（内部细节只进观测记录）。
 func defaultErrorHandler(c *Ctx, err error) error {
 	status := http.StatusInternalServerError
 	code := "internal"
@@ -97,11 +98,18 @@ func defaultErrorHandler(c *Ctx, err error) error {
 	var perr *PanicError
 	var herr *HTTPError
 	var sc StatusCoder
+	var maxErr *http.MaxBytesError
 
 	switch {
 	case errors.As(err, &perr):
 		// panic 一律 500 + 通用文案（栈只进观测记录）。
 		// 注意：panic(web.NotFound(...)) 不会返回 404 —— 要 4xx 请 return。
+	case errors.As(err, &maxErr):
+		// 请求体超限（http.MaxBytesReader）：无论超限发生在 Bind 还是用户
+		// 直读 body 的路径上，读错误都是 *http.MaxBytesError，统一归 413。
+		status = http.StatusRequestEntityTooLarge
+		code = "body_too_large"
+		message = http.StatusText(status)
 	case errors.As(err, &herr):
 		status = herr.Status
 		code = herr.Code
