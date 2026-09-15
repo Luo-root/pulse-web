@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none" role="img" aria-labelledby="pw-logo-title">
+  <title id="pw-logo-title">pulse-web</title>
+  <!--
+    pulse-web mark：走势沿用 pulse 的 EKG 折线（平段 → 上升 → 峰值 → 深谷 → 回升 → 平段），
+    柱化后留缝：9 根柱、宽 3、间距 1.2、基线 y=27、峰 +23 / 谷 −17（落差 40）、圆角 1.2。
+    颜色走 currentColor：内联使用时跟随宿主 color（站点可用选择器覆盖）；
+    作为 <img> 独立渲染时（README / social preview）由下方 style 给明暗两档中性色。
+    16px 的简化版见同目录 favicon.svg。参数口径见 docs/design/web-framework-design.md「品牌标识」。
+  -->
+  <style>
+    svg { color: #17181a }
+    @media (prefers-color-scheme: dark) { svg { color: #f4f3f0 } }
+  </style>
+  <rect x="5.70" y="23.00" width="3.00" height="4.00" rx="1.20" fill="currentColor"/>
+  <rect x="9.90" y="21.00" width="3.00" height="6.00" rx="1.20" fill="currentColor"/>
+  <rect x="14.10" y="15.00" width="3.00" height="12.00" rx="1.20" fill="currentColor"/>
+  <rect x="18.30" y="4.00" width="3.00" height="23.00" rx="1.20" fill="currentColor"/>
+  <rect x="22.50" y="27.00" width="3.00" height="10.00" rx="1.20" fill="currentColor"/>
+  <rect x="26.70" y="27.00" width="3.00" height="17.00" rx="1.20" fill="currentColor"/>
+  <rect x="30.90" y="27.00" width="3.00" height="8.00" rx="1.20" fill="currentColor"/>
+  <rect x="35.10" y="23.00" width="3.00" height="4.00" rx="1.20" fill="currentColor"/>
+  <rect x="39.30" y="23.00" width="3.00" height="4.00" rx="1.20" fill="currentColor"/>
+</svg>

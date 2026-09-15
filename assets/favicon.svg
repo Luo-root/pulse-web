@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none" role="img" aria-labelledby="pw-favicon-title">
+  <title id="pw-favicon-title">pulse-web</title>
+  <!--
+    16px 简化版：9 根细柱在 16px 会糊成一片，所以降到 5 根、柱加粗到 6，
+    但保留峰（+23）与谷（−17）两个关键柱——缩到 favicon 尺寸仍读得出「心跳」。
+    favicon 不继承宿主 CSS，明暗两档写死在这里（浏览器按系统偏好选色）。
+  -->
+  <style>
+    svg { color: #17181a }
+    @media (prefers-color-scheme: dark) { svg { color: #f4f3f0 } }
+  </style>
+  <rect x="5.00" y="17.00" width="6.00" height="10.00" rx="2.00" fill="currentColor"/>
+  <rect x="13.00" y="4.00" width="6.00" height="23.00" rx="2.00" fill="currentColor"/>
+  <rect x="21.00" y="27.00" width="6.00" height="17.00" rx="2.00" fill="currentColor"/>
+  <rect x="29.00" y="16.00" width="6.00" height="11.00" rx="2.00" fill="currentColor"/>
+  <rect x="37.00" y="19.00" width="6.00" height="8.00" rx="2.00" fill="currentColor"/>
+</svg>

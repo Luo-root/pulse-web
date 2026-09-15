@@ -658,10 +658,36 @@ pulse-web/
 ├── console_sink.go            # 默认出口：给人读的列式单行（见「默认出口」——薄壳 + 版式渲染器）
 ├── debug.go                   # 装配诊断端点（FiberSnapshots 的 JSON 视图）
 ├── *_test.go                  # 与源文件同包（无独立 xxx_test 包），黑盒走 Engine 入口
+├── assets/
+│   ├── logo.svg               # 品牌 mark（48×48，currentColor；参数见「品牌标识」）
+│   └── favicon.svg            # 16px 简化版（5 柱）+ 明暗自适应
 ├── bench/                     # 性能回归基线 + 分配预算门禁（go test ./bench/）
 │   └── muxprobe/              # 路由选型的一次性实测程序（「路由选型的边界」的数据来源）
 └── .github/workflows/ci.yml   # build / vet / gofmt 判空 / test -race / 分配预算 / bench 编译检查
 ```
+
+## 品牌标识
+
+mark 的走势**直接沿用 pulse**（平段 → 上升 → 峰值 → 深谷 → 回升 → 平段）：两个库并排出现时读作同一族（同一条心跳），但形态不同（折线 → 柱阵），不会被认错。**为什么是柱而不是折线**——pulse 的折线是「信号」，柱阵是「信号被切成一根根样本」，与 pulse-web 的观测口径（每请求一条记录）同构。
+
+**参数口径**（48×48 画布，`assets/logo.svg`）：
+
+| 参数 | 值 |
+|---|---|
+| 基线 | y = 27（与 pulse 原折线同一位置） |
+| 柱数 / 柱宽 / 间距 | 9 / 3 / 1.2 |
+| 振幅序列（左→右，向上为正） | +4, +6, +12, +23, −10, −17, −8, +4, +4 |
+| 落差 | 40px（峰 +23 → 谷 −17） |
+| 圆角 | 1.2 |
+| 峰值黑点 | **不保留**（pulse 原 mark 有，本 mark 去掉） |
+
+**颜色**：mark 走 `currentColor`，由宿主决定——内联使用时跟随 `color`，站点可用选择器覆盖。作为 `<img>` 独立渲染时（README / social preview）没有宿主 color 可继承，所以 SVG 内嵌 `svg { color: … }` 给出明暗两档中性色（`#17181a` / `#f4f3f0`，按 `prefers-color-scheme` 切）；**强调色不在这里定**，留给站点那一轮。
+
+**字标**：`pulse-web`，等宽字体 + 负字距，连字符换成**短横条**（等比圆角条、与字重匹配、全同色）。字标是**排版规格不是资产文件**——烤进 SVG 要赌字体可得性，站点用 CSS 实现更稳。
+
+**favicon**（`assets/favicon.svg`）：16px 下 9 根细柱会糊，故降到 **5 根柱、柱宽 6**，保留峰与谷两个关键柱；颜色同 logo 写死明暗两档（favicon 不继承宿主 CSS）。
+
+**同步面**：README 顶部引用 `assets/logo.svg`；站点那一轮从 `assets/` 复制到 `site/public/`（favicon 与 social preview 同源），**不在两处各维护一份**。
 
 ## 验收标准
 
