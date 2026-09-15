@@ -688,7 +688,7 @@ mark 的走势**直接沿用 pulse**（平段 → 上升 → 峰值 → 深谷 �
 
 **颜色**：mark 走 `currentColor`，由宿主决定——内联使用时跟随 `color`，站点可用选择器覆盖。作为 `<img>` 独立渲染时（README / social preview）没有宿主 color 可继承，所以 SVG 内嵌 `svg { color: … }` 给出明暗两档中性色（`#17181a` / `#f4f3f0`，按 `prefers-color-scheme` 切）；**强调色不在这里定**，留给站点那一轮。
 
-**字标**：`pulse-web`，等宽字体 + 负字距，连字符换成**短横条**（等比圆角条、与字重匹配、全同色）。两种落地：站点那一轮用 **CSS** 实现（排版规格本身）；README 头部的**锁定**用 `assets/banner.svg`，把 mark 与字标放在一起（对齐 pulse 的呈现方式，不把 mark 单独留在标题上方）。banner 里的 mark 与 `assets/logo.svg` 是**同一份几何**（同坐标、同圆角，只是内联并缩放到 1.3——测试会逐项比对）；两段文字用 `textLength` 钉成定长，短横条画成 `<rect>` 而不是连字符字形——等宽字体各家 advance 不同（Consolas ≈ 0.55em / Menlo ≈ 0.6em），不定长的话短横条与 `web` 的位置会随字体漂移。
+**字标**：`Pulse-Web`，**与 pulse 同一套 sans 栈**（`-apple-system, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif`，700 字重）——两库并排时是同一族字面；连字符用字体自带字形（bold sans 的连字符本身就是与字重匹配的短横条）。字号 / 基线取 pulse banner 的同一口径（46 / y=64），文字用 `textLength` + `lengthAdjust="spacing"` 钉成定长（**只调字距、不变形字形**）：sans 的实际宽度随平台字体（Segoe UI / SF / Helvetica）略变，定长既不用为最宽的那家留大片空白，也不会在窄的那家溢出被裁。两种落地：README 头部的**锁定**用 `assets/banner.svg`（mark + 字标一体，对齐 pulse 的呈现方式，不把 mark 单独留在标题上方）；站点那一轮用 **CSS** 实现同一规格。banner 里的 mark 与 `assets/logo.svg` 是**同一份几何**（同坐标、同圆角，只是内联并缩放到 1.3——测试会逐项比对）。
 
 **favicon**（`assets/favicon.svg`）：48 单位画布缩到 16px 只剩 1/3，9 根柱每根 1 像素宽、缝 0.4 像素，抗锯齿会把墨摊薄（笔画发灰、缝半填）——形状仍读得出，但对比度掉一截，且不同渲染器/DPI 的降采样策略不一致。故降到 **5 根柱、柱宽 6**（同尺寸下柱心实黑）、保留峰与谷两个关键柱；颜色同 logo 写死明暗两档（favicon 不继承宿主 CSS）。**两份文件不是冗余**：一个是 96px+ 的宿主可控色 mark，一个是 16px 的独立自足图标，各解各的尺寸。
 

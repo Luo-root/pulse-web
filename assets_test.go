@@ -418,47 +418,39 @@ func TestBannerMarkMatchesLogo(t *testing.T) {
 		}
 	}
 
-	// <g> 之外只该有一个 <rect>：连字符的替身（短横条），不是连字符字形。
-	if len(banner.ungrouped) != 1 {
-		t.Fatalf("%s 的 <g> 之外有 %d 个 <rect>，期望 1 个（短横条）", bannerPath, len(banner.ungrouped))
-	}
-	if bar := banner.ungrouped[0]; bar.H >= bar.W {
-		t.Errorf("短横条 %g×%g 不像连字符比例（宽应大于高）", bar.W, bar.H)
+	// <g> 之外不该有 <rect>：字标整段是 <text>，连字符用字体自带字形。
+	if len(banner.ungrouped) != 0 {
+		t.Errorf("%s 的 <g> 之外有 %d 个 <rect>，期望 0 个（字标是纯文字）",
+			bannerPath, len(banner.ungrouped))
 	}
 	assertThemeColors(t, bannerPath, banner.style)
 }
 
-// TestBannerWordmarkStructure 钉住字标结构：pulse + 短横条（<rect>）+ web，
-// 两段文字必须定长——否则短横条与 web 的位置会随等宽字体的 advance 漂移。
+// TestBannerWordmarkStructure 钉住字标口径：与 pulse 同一套 sans 栈、大写字面、
+// 文字定长（textLength 只调字距、不变形字形），且起点在 mark 右侧。
 func TestBannerWordmarkStructure(t *testing.T) {
 	banner := readBrandSVG(t, bannerPath)
-	if len(banner.texts) != 2 {
-		t.Fatalf("%s 期望 2 个 <text>（pulse / web），实际 %d 个", bannerPath, len(banner.texts))
+	if len(banner.texts) != 1 {
+		t.Fatalf("%s 期望 1 个 <text>（Pulse-Web），实际 %d 个", bannerPath, len(banner.texts))
 	}
-	if len(banner.ungrouped) != 1 {
-		t.Fatalf("%s 期望 1 个 <g> 之外的 <rect>（短横条），实际 %d 个", bannerPath, len(banner.ungrouped))
+	txt := banner.texts[0]
+	if got := strings.TrimSpace(txt.content); got != "Pulse-Web" {
+		t.Errorf("字标内容 = %q，期望 %q（大写首字母 + 字体自带连字符）", got, "Pulse-Web")
 	}
-	for i, want := range []string{"pulse", "web"} {
-		if got := strings.TrimSpace(banner.texts[i].content); got != want {
-			t.Errorf("第 %d 个 <text> = %q，期望 %q", i+1, got, want)
-		}
-		attrs := banner.texts[i].attrs
-		if attrs["textLength"] == "" {
-			t.Errorf("%q 没有 textLength——不定长的话短横条与 web 的位置会随字体漂移", want)
-		}
-		if attrs["lengthAdjust"] != "spacingAndGlyphs" {
-			t.Errorf("%q 的 lengthAdjust = %q，期望 spacingAndGlyphs", want, attrs["lengthAdjust"])
-		}
-		if !strings.Contains(attrs["font-family"], "monospace") {
-			t.Errorf("%q 的 font-family 没有等宽兜底：%q", want, attrs["font-family"])
-		}
+	if txt.attrs["textLength"] == "" {
+		t.Errorf("字标没有 textLength——sans 宽度随平台字体变，不定长就得为最宽的那家留空白")
+	} else if txt.attrs["lengthAdjust"] != "spacing" {
+		t.Errorf("lengthAdjust = %q，期望 spacing（只调字距，不变形字形）", txt.attrs["lengthAdjust"])
+	}
+	if !strings.Contains(txt.attrs["font-family"], "Segoe UI") {
+		t.Errorf("字标 font-family = %q——应与 pulse 用同一套 sans 栈", txt.attrs["font-family"])
+	}
+	if txt.attrs["font-weight"] != "700" {
+		t.Errorf("字标 font-weight = %q，期望 700", txt.attrs["font-weight"])
 	}
 
-	bar := banner.ungrouped[0]
-	xPulse := numOf(t, banner.texts[0].attrs["x"])
-	xWeb := numOf(t, banner.texts[1].attrs["x"])
-	if !(bar.X > xPulse && bar.X+bar.W < xWeb) {
-		t.Errorf("短横条 x = %.1f..%.1f 没落在 pulse（x = %.1f）与 web（x = %.1f）之间",
-			bar.X, bar.X+bar.W, xPulse, xWeb)
+	// mark 墨迹右边界 = 20 + (39.3+3)*1.3 ≈ 75；字标必须落在它右侧（同一行锁定不重叠）。
+	if x := numOf(t, txt.attrs["x"]); x < 76 {
+		t.Errorf("字标 x = %g，压到 mark 墨迹范围（右边界 ≈75）上了", x)
 	}
 }

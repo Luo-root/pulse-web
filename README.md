@@ -1,5 +1,5 @@
 <div align="center">
-  <img alt="pulse-web" src="assets/banner.svg" width="344">
+  <img alt="Pulse-Web" src="assets/banner.svg" width="353">
 </div>
 
 基于 [pulse](https://github.com/Luo-root/pulse) 的 **kernel** 与 **observability** 构建的通用 Go web 服务框架。

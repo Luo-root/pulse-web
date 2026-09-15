@@ -1,17 +1,20 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 344 96" fill="none" role="img" aria-labelledby="pw-banner-title">
-  <title id="pw-banner-title">pulse-web</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 353 96" fill="none" role="img" aria-labelledby="pw-banner-title">
+  <title id="pw-banner-title">Pulse-Web</title>
   <!--
-    README 头部的锁定：mark + 字标放在一起（对齐 pulse 的呈现方式）。
+    README 头部的锁定：mark + 字标放在一起（与 pulse 的 banner 同一构成方式）。
 
     mark 与 assets/logo.svg 是**同一份几何**（同坐标 / 同圆角 / 同 currentColor），
     只是内联进这里的 <g>——assets_test.go 会逐项比对，防止两处各画一遍后漂移。
 
-    字标规格见设计文档「品牌标识」：等宽字体 + 负字距 + 连字符换成短横条。
-    两段文字用 textLength 钉成定长：等宽字体各家 advance 不同（Consolas ≈ 0.55em、
-    Menlo ≈ 0.6em），不定长的话短横条与 "web" 的位置会随字体漂移。
-    短横条是 <rect>（16×5，与字重匹配，居中在该字符格里），不是连字符字形。
+    字标用与 pulse **同一套 sans 栈**（大写首字母 + 700 字重）：两库并排是同一族字面；
+    连字符用字体自带字形（bold sans 的连字符本身就是与字重匹配的短横条）。
+    font-size / 基线取 pulse banner 的同一口径（46 / y=64）。
+    文字用 textLength + lengthAdjust="spacing"（只调字距、不变形字形）钉成定长：
+    sans 的实际宽度随平台字体（Segoe UI / SF / Helvetica）略变，定长可以保证
+    viewBox 不用为最宽的那家留太多空白，也不会在窄的那家溢出被裁。
 
-    颜色：currentColor + 明暗两档中性色（同 logo.svg 口径）；站点那一轮用选择器覆盖。
+    颜色：currentColor + 明暗两档中性色（#17181a / #f4f3f0，白米档）；站点那一轮用选择器覆盖。
+    viewBox 宽度 353 与纵向位置按实测墨迹边界定（左 27 / 右 27、上 22 / 下 23）。
   -->
   <style>
     svg { color: #17181a }
@@ -29,11 +32,8 @@
     <rect x="35.10" y="23.00" width="3.00" height="4.00" rx="1.20" fill="currentColor"/>
     <rect x="39.30" y="23.00" width="3.00" height="4.00" rx="1.20" fill="currentColor"/>
   </g>
-  <text x="95" y="64" textLength="123" lengthAdjust="spacingAndGlyphs"
-        font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace"
-        font-size="46" font-weight="600" fill="currentColor">pulse</text>
-  <rect x="222.3" y="47.5" width="16" height="5" rx="2.5" fill="currentColor"/>
-  <text x="242.6" y="64" textLength="73.8" lengthAdjust="spacingAndGlyphs"
-        font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace"
-        font-size="46" font-weight="600" fill="currentColor">web</text>
+  <text x="96" y="64"
+        font-family="-apple-system, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif"
+        font-size="46" font-weight="700" textLength="232" lengthAdjust="spacing"
+        fill="currentColor">Pulse-Web</text>
 </svg>
