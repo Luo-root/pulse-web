@@ -544,13 +544,8 @@ func (e *Engine) finish(c *Ctx, rw *responseWriter) {
 		}
 	}
 
-	if !rw.wrote {
-		code := rw.statusHint
-		if code == 0 {
-			code = http.StatusOK
-		}
-		rw.WriteHeader(code)
-	}
+	// 收尾落码与 Write / Flush 同源（writeHeaderNow）：吃 Status() 提示、缺省 200。
+	rw.writeHeaderNow()
 
 	if e.accessLog && e.sink != nil {
 		e.writeAccessLog(c, rw)

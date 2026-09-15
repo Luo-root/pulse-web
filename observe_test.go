@@ -97,6 +97,34 @@ func TestMalformedTraceHeadersIgnored(t *testing.T) {
 	}
 }
 
+// TestZeroTraceIDTreatedAsAbsent：全零 trace-id 一律视为不存在（两条入站路径同一口径）。
+//
+// W3C traceparent 明文规定 trace-id 不得为全零；B3 未禁止，但同样按不存在处理——
+// 否则带该头的请求会在日志里共享同一条 TraceID（比链路断裂更难排查）。review 提出，PR #35。
+func TestZeroTraceIDTreatedAsAbsent(t *testing.T) {
+	const zero = "00000000000000000000000000000000"
+	cases := []struct{ name, header, value string }{
+		{"traceparent 全零", "Traceparent", "00-" + zero + "-1111111111111111-01"},
+		{"B3 32hex 全零", "X-B3-TraceId", zero},
+		{"B3 16hex 全零", "X-B3-TraceId", "0000000000000000"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e, _ := newTestEngine(t)
+			e.GET("/t", func(c *Ctx) error { return c.Text(http.StatusOK, c.TraceID()) })
+
+			rec := doReq(e, "GET", "/t", nil, c.header, c.value)
+			got := rec.Header().Get("X-Trace-Id")
+			if got == zero {
+				t.Fatalf("全零 trace-id 被采纳了：%q（应视为不存在、回落到框架生成器）", got)
+			}
+			if len(got) != 32 {
+				t.Fatalf("X-Trace-Id = %q，want 32hex（框架生成）", got)
+			}
+		})
+	}
+}
+
 func TestAccessLogRecordFields(t *testing.T) {
 	e, sink := newTestEngine(t)
 	e.GET("/things/{id}", func(c *Ctx) error {

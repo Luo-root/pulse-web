@@ -129,8 +129,6 @@ func (w *plainWriter) Header() http.Header {
 func (w *plainWriter) WriteHeader(code int)        { w.code = code }
 func (w *plainWriter) Write(b []byte) (int, error) { return w.buf.Write(b) }
 
-// TestCtxFlushWithoutFlusherReturnsError：底层不支持 Flush 时给出明确 error，
-// 而不是静默当作成功。
 // TestFlushFirstWriteUsesStatus 验证首刷落 Status() 设置的状态码：此前 Flush
 // 硬编码 200，`c.Status(201); c.Flush()` 会写出 200，与 Status 的公开语义打架（#33）。
 func TestFlushFirstWriteUsesStatus(t *testing.T) {
@@ -194,6 +192,60 @@ func TestStatusAfterFlushIgnored(t *testing.T) {
 	}
 }
 
+// TestStatusAppliedOnFirstWrite：首刷不只是 Flush —— 直接往包装器写字节同样是
+// 首刷，Status() 的提示必须在这里就落定。
+//
+// review 提出（PR #35）：流式 handler 的自然顺序是「先写第一段、再 Flush」，若只有
+// Flush 吃提示，`Status(201)` 会被第一次 Write 的隐式 200 吃掉，README 那句
+// 「在首刷之前设好状态码」也就给不出有效指引。
+func TestStatusAppliedOnFirstWrite(t *testing.T) {
+	e, _ := newTestEngine(t)
+	e.GET("/s", func(c *Ctx) error {
+		c.Status(http.StatusCreated)
+		if _, err := c.Writer().Write([]byte("x")); err != nil {
+			return err
+		}
+		return c.Flush()
+	})
+	srv := httptest.NewServer(e)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d，want 201（Write 也是首刷）", resp.StatusCode)
+	}
+}
+
+// TestStatusAfterWriteIgnored：Write 落定后与 Flush 同规则——状态码不再可改。
+func TestStatusAfterWriteIgnored(t *testing.T) {
+	e, _ := newTestEngine(t)
+	e.GET("/s", func(c *Ctx) error {
+		c.Status(http.StatusCreated)
+		if _, err := c.Writer().Write([]byte("x")); err != nil {
+			return err
+		}
+		c.Status(http.StatusInternalServerError)
+		return nil
+	})
+	srv := httptest.NewServer(e)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d，want 201（Write 已落定）", resp.StatusCode)
+	}
+}
+
+// TestCtxFlushWithoutFlusherReturnsError：底层不支持 Flush 时给出明确 error，
+// 而不是静默当作成功。
 func TestCtxFlushWithoutFlusherReturnsError(t *testing.T) {
 	e, _ := newTestEngine(t)
 	var flushErr error

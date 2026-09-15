@@ -135,7 +135,8 @@ func (c *Ctx) SetHeader(key, value string) { c.w.Header().Set(key, value) }
 // 要升级协议（WebSocket）需要原始 writer：用 `Wrap` 包一个 stdlib handler（代价是拿不到 `*Ctx`）。
 func (c *Ctx) Writer() http.ResponseWriter { return c.w }
 
-// Status 只**设置**状态码，不立即写出；由 JSON / Text、Flush 首刷或引擎收尾时落定。
+// Status 只**设置**状态码，不立即写出；由 JSON / Text、首刷（直接写字节 / Flush）
+// 或引擎收尾时落定。首刷之后响应头已发出，再调 Status 不会改变已落定的状态码。
 func (c *Ctx) Status(code int) *Ctx {
 	c.w.statusHint = code
 	return c
@@ -179,7 +180,7 @@ func (c *Ctx) Flush() error { return c.w.flush() }
 type responseWriter struct {
 	http.ResponseWriter
 	status     int // 已落定的状态码（AccessLog 采样）
-	statusHint int // Status() 设置的意图：首刷（Flush / 引擎收尾）用它，0 → 200
+	statusHint int // Status() 设置的意图：任何隐式落码都用它，0 → 200
 	bytes      int
 	wrote      bool
 }
@@ -193,10 +194,24 @@ func (w *responseWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
-func (w *responseWriter) Write(b []byte) (int, error) {
-	if !w.wrote {
-		w.WriteHeader(http.StatusOK)
+// writeHeaderNow 落定首刷状态码：吃 Status() 的提示（缺省 200）。
+//
+// 三条隐式落码路径共用它——Write、flush、引擎收尾。**写一段再 Flush 是流式
+// handler 的自然顺序**，若只有 flush 吃提示，`Status(201)` 会被第一次 Write
+// 的隐式 200 吃掉（gin 的 WriteHeaderNow() 是同一语义）。
+func (w *responseWriter) writeHeaderNow() {
+	if w.wrote {
+		return
 	}
+	code := w.statusHint
+	if code == 0 {
+		code = http.StatusOK
+	}
+	w.WriteHeader(code)
+}
+
+func (w *responseWriter) Write(b []byte) (int, error) {
+	w.writeHeaderNow()
 	n, err := w.ResponseWriter.Write(b)
 	w.bytes += n
 	return n, err
@@ -215,13 +230,7 @@ func (w *responseWriter) flush() error {
 	if !ok {
 		return errors.New("web: ResponseWriter does not support Flush")
 	}
-	if !w.wrote {
-		code := w.statusHint
-		if code == 0 {
-			code = http.StatusOK
-		}
-		w.WriteHeader(code)
-	}
+	w.writeHeaderNow()
 	f.Flush()
 	return nil
 }

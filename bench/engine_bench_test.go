@@ -54,6 +54,27 @@ func enginePathAppMinimal(tb testing.TB) (*web.Engine, func()) {
 	return app, func() { app.Root().Dispose() }
 }
 
+// pingJSONPayload 是 JSON 档的固定载荷：放包级，别把「构造载荷」的分配
+// 记到请求路径上。
+type pingJSONPayload struct {
+	Status string `json:"status"`
+}
+
+var pingJSON = pingJSONPayload{Status: "pong"}
+
+// enginePathAppJSON 同上，但 handler 用 c.JSON —— 把「先编码到 buffer、成功才写头」
+// 这条路径纳入基线。
+//
+// 单独一档的理由：其余各档的 handler 都是 `c.Text`，压根不经过 c.JSON；而
+// c.JSON 自 #33 起多一个 bytes.Buffer（实测每响应 +2 allocs/op）。没有这一档时，
+// 该路径的分配变化分配门禁抓不到（review 提出，PR #35）。
+func enginePathAppJSON(tb testing.TB) (*web.Engine, func()) {
+	tb.Helper()
+	app := web.New(web.WithSink(nopSink{}))
+	app.GET("/ping", func(c *web.Ctx) error { return c.JSON(http.StatusOK, pingJSON) })
+	return app, func() { app.Root().Dispose() }
+}
+
 // runRequestPath 是「一次请求」的循环体：benchmark 与分配预算门禁共用。
 //
 // 每轮在循环内重建请求：`httptest.NewRequest` 的开销同时计入 ns/op 与 allocs/op
