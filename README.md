@@ -100,6 +100,18 @@ app.GET("/users", func(c *web.Ctx) error {
 app := web.New(web.WithMaxBodyBytes(2 << 20)) // 2 MiB：超限读取立即失败 → 413
 ```
 
+一个值要罩住所有路由时用上面的全局闸；要分得更细，用 `web.BodyLimit` 中间件挂在**分组**或**单条路由**上：
+
+```go
+app := web.New(web.WithMaxBodyBytes(2 << 20))                    // 全局兜底 2 MiB
+app.Group("/upload", web.BodyLimit(100<<20)).POST("/avatar", h)  // 上传这块放宽
+app.POST("/api/export", h, web.BodyLimit(1<<20))                 // 导出这条收紧
+```
+
+**闸门只能收紧，不能放宽**：与全局闸叠加时**取更严的那个**——上面 `/api/export` 的 1 MiB 生效；反过来把 `BodyLimit(100<<20)` 挂在全局 2 MiB 之下，仍会被 2 MiB 掐住。边界是**恰好 n 字节通过**，n+1 起 413；`n <= 0` 表示不限。
+
+超限统一 413 + `body_too_large`，cause 是 `*http.MaxBytesError`——自定义 `ErrorHandler` 用 `errors.As` 只认这一个类型即可覆盖**全部**超限路径（全局闸的预检 / 读取两条 + `BodyLimit` 的两条）。自己写中间件包 `http.MaxBytesReader` 也拦得住，但会静默丢掉 stdlib 的「超限关连接」语义（响应少了 `Connection: close`）——`MaxBytesReader` 的 `w` 参数只在超限时用，且只有原始 writer 才实现那个未导出接口，原因见设计文档的「请求体上限」节。
+
 ## 日志落地（持久化归谁）
 
 **默认档只写 stdout，它本身不是持久化**：进程只把行写进 fd 1，落盘、轮转、保留都由平台负责。

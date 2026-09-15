@@ -67,6 +67,9 @@ func NotFound(code string, cause error) *HTTPError {
 func Conflict(code string, cause error) *HTTPError {
 	return &HTTPError{Status: http.StatusConflict, Code: code, cause: cause}
 }
+func TooLarge(code string, cause error) *HTTPError {
+	return &HTTPError{Status: http.StatusRequestEntityTooLarge, Code: code, cause: cause}
+}
 func Internal(code string, cause error) *HTTPError {
 	return &HTTPError{Status: http.StatusInternalServerError, Code: code, cause: cause}
 }

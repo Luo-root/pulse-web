@@ -14,7 +14,7 @@
 1. **Engine**——路由注册、分组、中间件（闭包组合，洋葱模型）
 2. **Ctx**——路径参数（读 `Request.PathValue`，不另存）、查询、请求级 KV、响应写出（JSON / Text / Status / Header / Writer / Flush）
 3. **错误模型**——`HTTPError` + `StatusCoder` 接口 + 默认 mapper（脱敏）
-4. **请求体绑定**——`Ctx.Bind` 按 Content-Type 分派（JSON / XML / form-urlencoded / multipart，全 stdlib 实现），`BindQuery` 显式 query；可选 `WithMaxBodyBytes` 上限（见 [#32](https://github.com/Luo-root/pulse-web/issues/32)）
+4. **请求体绑定**——`Ctx.Bind` 按 Content-Type 分派（JSON / XML / form-urlencoded / multipart，全 stdlib 实现），`BindQuery` 显式 query；可选 `WithMaxBodyBytes` 全局上限（见 [#32](https://github.com/Luo-root/pulse-web/issues/32)）；`BodyLimit(n)` 中间件按路由 / 分组收紧（见 [#38](https://github.com/Luo-root/pulse-web/issues/38)）
 5. **请求作用域**——每请求派生 kernel scope，handler 返回即 `Dispose`（在写响应之前）
 6. **一等观测**——装配期 `Bootstrap` + 请求期 `Trace` + `AccessLog`；32hex TraceID；`X-Trace-Id` 回写
 7. **进程级装配面**——`app.Root()` / `web.WithRoot(k)`；其余用 kernel 原生 API（`Provide` / `Use` / `Loader`）
@@ -335,6 +335,23 @@ app := web.New(web.WithErrorHandler(myMapper))
 - **安全默认**：`cause` 只进观测记录；**非 `HTTPError` 的普通 error 一律 500** + 通用文案
 - panic 有专用类型：`PanicError{Value, Stack}`——默认 mapper 一律 **500**（栈只进记录）。**陷阱要显眼写**：`panic(pulse.Unauthorized(…))` 不会返回 401，要 4xx 请 `return`
 
+### 请求体上限（`WithMaxBodyBytes` + `BodyLimit`）
+
+两道闸，一道全局、一道按路由 / 分组：
+
+```go
+app := web.New(web.WithMaxBodyBytes(2 << 20))            // 全局：所有路由
+app.Group("/upload", web.BodyLimit(100<<20)).POST("/avatar", h)  // 分组：只有这块放宽
+app.POST("/api/export", h, web.BodyLimit(1<<20))                 // 单条路由：收紧
+```
+
+- **闸门做成中间件，不新增注册参数**：`Group(prefix, mw...)` 与 `GET/POST(..., mw...)` 本来就吃中间件，`BodyLimit` 就是一个中间件——不动路由签名、不引入注册期状态。生态同形：echo 的 `middleware.BodyLimit` 同样是中间件。
+- **闸门只能收紧，不能放宽**：引擎级先套一层 `MaxBytesReader`，路由级再套一层，实际生效的是两者中**更小的**那个。`BodyLimit(1<<20)` 挂在 `WithMaxBodyBytes(1<<10)` 的路由里仍被 1 KiB 掐住。不做「就近覆盖 / 可 raise」——去掉内层包装意味着换掉整个 body reader，代价与风险都不成比例。这条是**显式口径**，别让调用方以为可以 raise。
+- **两条路径，同一类错误**：有 `Content-Length` 时先按声明值快速失败（**不读 body**）；声明未知（chunked）或声明偏小时由读取闸门兜底。两条路径都产出 413 + `body_too_large`，cause 都是 `*http.MaxBytesError`——与 `WithMaxBodyBytes` 的两条路径同型，自定义 `ErrorHandler` 用 `errors.As` 只认这一个类型即可覆盖全部超限路径。边界口径：body **恰好 n 字节通过**，n+1 起 413。
+- **`n <= 0` 表示不限**（直通，也不包 body），与 `WithMaxBodyBytes(0)` 同口径。
+- **`MaxBytesReader` 的 `w` 必须传原始 writer**：它**只在超限时用**——stdlib 会调 `w.(requestTooLarger).requestTooLarge()` 给响应加 `Connection: close` 并在回复后关连接（防继续灌数据、防 keep-alive 把残留 body 当成下一个请求）。这个未导出接口只有 server 内部的 `*response` 实现，而 `c.Writer()` 是框架包装器——用户自己写中间件时传它就**静默丢掉**这个语义。原始 writer 只有包内实现拿得到，所以这件事该由框架做（引擎级那道闸同理）。
+- 因此补了导出构造器 `TooLarge(code, cause)`：内置构造器原先只有 400 / 401 / 403 / 404 / 409 / 500，**没有 413**，而 `HTTPError.cause` 不导出——外部想返回**带 cause 的 413** 没有正规路径。
+
 ### 中间件与 stdlib 互操作
 
 ```go
@@ -485,7 +502,7 @@ app.POST("/jobs", func(c *web.Ctx) error {
 
 `WithoutAccessLog()` 关闭访问日志（用户已接自己的日志系统时用）——只关 AccessLog，`Trace` 与 panic 兜底（500 响应）不受影响。**关闭后 panic 不再写观测记录**：AccessLog 是访问级记录的唯一人工出口；`PanicError.Stack` 只经 `Record.Err` 抵达 Sink，默认出口不打印栈——需要时由宿主自定义 Sink 用 `errors.As` 从 `Record.Err` 取 `*PanicError`。
 
-v1 选项面：`New()` / `Minimal()` / `WithSink` / `WithoutAccessLog` / `WithRoot` / `WithHostID` / `WithServer` / `WithErrorHandler` / `WithTemplates` / `WithMaxBodyBytes` / `WithTrustedTraceHeader` / `WithCollector` / `OnShutdown`。注意 **`AsyncSink` 不在选项面**——它是**出口实现**，用 `WithSink(observability.NewAsyncSink(...))` 接入，框架不另造缓冲层。
+v1 选项面：`New()` / `Minimal()` / `WithSink` / `WithoutAccessLog` / `WithRoot` / `WithHostID` / `WithServer` / `WithErrorHandler` / `WithTemplates` / `WithMaxBodyBytes` / `WithTrustedTraceHeader` / `WithCollector` / `OnShutdown`。注意 **`AsyncSink` 不在选项面**——它是**出口实现**，用 `WithSink(observability.NewAsyncSink(...))` 接入，框架不另造缓冲层。**`BodyLimit` 同样不在选项面**——它是**中间件**，按路由 / 分组挂（见「请求体上限」）。
 
 ### 默认出口：给人读的控制台列式（`ConsoleSink`）
 
@@ -654,6 +671,7 @@ pulse-web/
 │                              # Run / Serve（信号注册）/ serve（执行体）、Handler、OnShutdown
 ├── context.go                 # Ctx、请求级 KV、响应写出（Writer / Flush / JSON / Text）、responseWriter 包装器
 ├── bind.go                    # 请求体 / query 绑定：Content-Type 分派 + form / query 映射器（#32）
+├── bodylimit.go               # BodyLimit 中间件：按路由 / 分组限请求体（#38）
 ├── errors.go                  # HTTPError / StatusCoder / PanicError / 默认 mapper
 ├── observe.go                 # TraceID 生成与上游头解析（32hex）
 ├── wrap.go                    # stdlib 互操作（Wrap）
@@ -716,6 +734,8 @@ mark 的走势**直接沿用 pulse**（平段 → 上升 → 峰值 → 深谷 �
   证据：`TestCtxFlushStreamsIncrementally`（第一段在 handler 仍挂起时已到达客户端——只有真 flush 做得到；同一条用例断 `Status="200"` 与 `http.response.body.size=18`）、`TestFlushFirstWriteUsesStatus` / `TestFlushFirstWriteDefaultsTo200` / `TestStatusAfterFlushIgnored`（首刷吃 `Status`，首刷后不可改）、`TestStatusAppliedOnFirstWrite` / `TestStatusAfterWriteIgnored`（直接写字节同样是首刷）、`TestCtxFlushWithoutFlusherReturnsError`、`TestResponseWriterKeepsFlusherCapability`（能力边界：`Flusher` ✅，`FlushError` / `Hijacker` / `Pusher` / `SetWriteDeadline` ❌）。
 - [x] 请求体绑定完整：`Ctx.Bind` 按 Content-Type 分派（JSON / XML / form-urlencoded / multipart；无 body 落 query），`BindQuery` 显式 query；`WithMaxBodyBytes` 上限对**全部**读取路径生效（超限 → 413 + `body_too_large`）
   证据：`bind_test.go` 19 条——分派（`TestBindJSON` / `TestBindXML` / `TestBindForm` / `TestBindFormQueryIsNotMerged` / `TestBindMultipart` / `TestBindQuery` / `TestBindUnsupportedMediaType` / `TestBindNoContentTypeFallsBackToForm` / `TestBindContentTypeWithParameters` / `TestBindJSONSlice`）、映射（`TestBindMoreScalarKinds`）、上限（`TestBindMaxBodyBytes` 读取闸门 + Content-Length 预检两路径、`TestBindURLEncodedOverLimit` 10 MiB 解析闸有 / 无 CT、`TestBindUserWrappedMaxBytesReader` 用户自包、`TestBindDefaultNoLimit` 默认不限）、健壮性（`TestBindMalformedInputs` / `TestBindJSONTrailingData` / `TestBindTargetErrors` / `TestBindQueryTargetError`）。
+- [x] **按路由 / 分组限请求体**：`BodyLimit(n)` 中间件可挂分组与单条路由，与引擎级 `WithMaxBodyBytes` 叠加时**取最严**（只能收紧、不能放宽）；超限 413 + `body_too_large`，cause 与既有两条超限路径同型（`*http.MaxBytesError`）；补导出构造器 `TooLarge`（#38）
+  证据：`bodylimit_test.go` 10 条——分组（`TestBodyLimitOnGroup`）、路由与分组叠加（`TestBodyLimitOnRoute`）、边界（`TestBodyLimitBoundary`：恰好 n 通过 / n+1 得 413）、声明未知 chunked（`TestBodyLimitChunked`）、只能收紧（`TestBodyLimitCannotLoosen`：引擎级 1 KiB 拦得住路由级 1 MiB）、预检不读 body（`TestBodyLimitPrecheckRejectsDeclaredOverLimit`）、cause 同型两条路径（`TestBodyLimitCauseType`）、`n <= 0` 直通（`TestBodyLimitNonPositiveIsPassThrough`）、构造器（`TestTooLargeConstructor`）、真实连接上「超限关连接」语义不丢（`TestBodyLimitKeepsCloseConnection`：断言响应带 `Connection: close`，即 `MaxBytesReader` 的 `w` 拿到的是原始 writer 而非包装器）。
 - [x] 写出 / 错误语义收口：`c.JSON` 先编码成功才写头（失败 → 500 统一错误体，不再 200 空体）；`c.Flush` 与包装器 `Flush` 同一实现、首刷吃 `Status()`；`panic(web.NotFound(...))` 一律 500（要 4xx 请 return）
   证据：`TestJSONEncodeFailureMappedTo500` / `TestJSONBytesStable`（尾换行保留）/ `TestPanicHTTPErrorMapsTo500`；Flush 三条见上一条。
 - [x] 性能回归：请求路径开销进入仓库 bench，作为基线不劣化
