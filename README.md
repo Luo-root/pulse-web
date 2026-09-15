@@ -162,7 +162,7 @@ if err := sink.Err(); err != nil { /* 告警：访问日志已经写不进去了
 
 ## 开发
 
-CI 门禁（`.github/workflows/ci.yml`）：`go build` / `go vet` / **`gofmt -l` 判空** / `go test -race` / bench 编译检查。
+CI 门禁（`.github/workflows/ci.yml`）：`go build` / `go vet` / **`gofmt -l` 判空** / `go test -race` / **分配预算门禁**（`go test -run TestRequestPathAllocBudget ./bench/`，必须不带 `-race`）/ bench 编译检查。
 
 本地复现格式化门禁时，有**三条会造成假阳性的坑**，判据不要直接看输出：
 
@@ -181,3 +181,14 @@ CI 门禁（`.github/workflows/ci.yml`）：`go build` / `go vet` / **`gofmt -l`
 # Windows PowerShell —— 这里 `go env GOROOT` 返回 `C:\...`，bash 起不来，所以给 PowerShell 形态
 & (Join-Path (go env GOROOT) 'bin\gofmt.exe') -l (git ls-files '*.go')
 ```
+
+## 参与
+
+- **贡献流程**——Issue 五段（做什么 / 不做什么 / 为什么 / 设计理念 / 验收标准）、PR 六段、本地六条门禁命令、review 会检查的约定：见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+- **安全问题**——**不要开公开 Issue**，按 [SECURITY.md](SECURITY.md) 私密上报（含范围界定与已加固清单）。
+- **行为准则**——社区交往按 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
+- **给 AI coding agent 的仓库指南**——[AGENTS.md](AGENTS.md)。
+
+## 许可证
+
+[MIT License](LICENSE)
