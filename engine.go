@@ -105,9 +105,9 @@ func WithSink(sink observability.Sink) Option {
 // 每行一样、字段按字母序、亚毫秒耗时取整成 `duration_ms=0`。#18 的真实负载对比里，
 // 观测档掉 35%（c=64）/ 12%（c=256）吞吐，而 `ConsoleSink` 掉到 14% / 4%。
 //
-// 渲染同一条访问记录（`io.Discard`、`-benchtime=20000x -count=10` 同会话配对）：
-// `SlogSink` ~1340 ns / 18 allocs，`ConsoleSink` ~210 ns / **0 allocs**——省下的
-// 是「把 Record 摊平成 []any 再交给 slog」那一步。
+// 渲染同一条访问记录（`io.Discard`、`-benchtime=20000x -count=10` 同会话配对、
+// 取中位轮）：`SlogSink` ~1310 ns / 18 allocs，`ConsoleSink` ~236 ns / **0 allocs**
+// ——省下的是「把 Record 摊平成 []any 再交给 slog」那一步。
 // 要切回结构化出口用 WithSink —— 只换出口，装配不变。
 func newDefaultSink() observability.Sink {
 	return NewConsoleSink(os.Stdout)

@@ -259,6 +259,60 @@ func TestConsoleSinkColor(t *testing.T) {
 	}
 }
 
+// failingWriter 每次写都失败（stdout 管道被关掉 / journald socket 满 / 磁盘满），
+// 并记录被调用次数——用来验证「失败之后仍然继续尝试写」。
+type failingWriter struct {
+	err   error
+	calls int
+}
+
+func (w *failingWriter) Write(p []byte) (int, error) {
+	w.calls++
+	return 0, w.err
+}
+
+// TestConsoleSinkErrSurfacesWriteFailure 是写失败那条路的行为回归。
+//
+// 设计文档写着「写错误不抛，但可查」，而 `Err()` / `Flush()` 现在是**内嵌上游出口
+// 白送**的——只有「方法是从上游嵌进来的」这层推理撑着，没有任何用例跑过写失败。
+// 这里把三件事钉住：首错为准（后续错误不覆盖）、失败后继续尝试写、`Flush()` 把首错
+// 交出来（关闭时序第 ⑤ 步读的就是它，见 `sinkFlusher` 与 `TestShutdownFlushesBufferingSink`）。
+func TestConsoleSinkErrSurfacesWriteFailure(t *testing.T) {
+	w := &failingWriter{err: errors.New("broken pipe")}
+	s := NewConsoleSink(w, WithColor(false))
+
+	if err := s.Err(); err != nil {
+		t.Fatalf("还没写过就 Err()：%v", err)
+	}
+
+	s.Write(httpRecord("200", time.Microsecond))
+	if s.Err() == nil {
+		t.Fatal("写失败之后 Err() 必须非 nil——「日志早就不写了却没人知道」正是要避免的形态")
+	}
+	if got := s.Err().Error(); !strings.Contains(got, "broken pipe") {
+		t.Fatalf("Err() 应原样返回写错误，实得 %q", got)
+	}
+
+	// 失败之后仍然继续尝试写：不静默退出、不改缓冲策略。
+	before := w.calls
+	s.Write(httpRecord("500", time.Microsecond))
+	if w.calls == before {
+		t.Fatal("写失败后不再尝试写：出口静默退化了")
+	}
+
+	// 首错为准：后续换成别的错误也不覆盖它。
+	w.err = errors.New("second failure")
+	s.Write(httpRecord("200", time.Microsecond))
+	if got := s.Err().Error(); !strings.Contains(got, "broken pipe") {
+		t.Fatalf("Err() 应保持首次错误，实得 %q", got)
+	}
+
+	// Flush 把首错交出来（关闭时序第 ⑤ 步据此记 slog.Warn）。
+	if err := s.Flush(); err == nil || !strings.Contains(err.Error(), "broken pipe") {
+		t.Fatalf("Flush() 应返回首错，实得 %v", err)
+	}
+}
+
 // TestConsoleSinkConcurrentWrites：并发写不串台（-race 下同时验数据竞争），
 // 且每个并发调用都不需要自己拿锁。
 func TestConsoleSinkConcurrentWrites(t *testing.T) {
@@ -334,10 +388,11 @@ func TestConsoleSinkNilWriterPanics(t *testing.T) {
 // TestConsoleSinkDurationColumn：耗时列的单位与精度（亚毫秒不取整成 0——旧默认
 // 出口的毛病），口径来自上游 `observability.AppendDuration`。
 //
-// 这条同时钉住**迁移到 LineSink 时唯一的行为变化**：耗时从「浮点四舍五入」改成
-// 上游口径的「整数截断」。旧实现走 `strconv.AppendFloat('f')`，585199ns 会渲染成
-// `585.2µs`、7629999ns 成 `7.63ms`；上游口径是 `585.1µs` / `7.62ms`。理由写在
-// Issue #27：口径必须是各出口共用的一致性资产，本地不再留第二份实现。
+// 这条同时钉住**迁移到 LineSink 的三处变化里的一处**：耗时从「浮点四舍五入」
+// 改成上游口径的「整数截断」。旧实现走 `strconv.AppendFloat('f')`，585199ns 会
+// 渲染成 `585.2µs`、7629999ns 成 `7.63ms`；上游口径是 `585.1µs` / `7.62ms`。
+// 另两处是行首标识（`PULSE`）与列补齐按显示宽度，理由写在 Issue #27：口径必须是
+// 各出口共用的一致性资产，本地不再留第二份实现。
 // 谁把它改回四舍五入（或改小数位），先红在这条上。
 func TestConsoleSinkDurationColumn(t *testing.T) {
 	durCol := func(d time.Duration) string {

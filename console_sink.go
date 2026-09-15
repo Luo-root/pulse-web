@@ -104,12 +104,16 @@ const (
 // 也不会被吞掉：内嵌的 `LineSink` 把**首次**写失败记在 `Err()` 上——「日志早就不
 // 写了却没人知道」是落地场景里最痛的失败形态（stdout 管道被关掉、journald socket
 // 满、磁盘满都是这一类）。失败之后仍然继续尝试写，不静默退出、不改缓冲策略。
-// 用法是**定期检查**，例如在健康检查或关停钩子里读一次：
+//
+// **框架已经替你读了一次**：`Run()` 的关闭流程第 ⑤ 步会调 `Flush()`，首错会被
+// 记成 `slog.Warn("pulse.web: sink flush", …)`。所以只有「进程不退出也想告警」的
+// 场合才需要自己接——在健康检查里定期读一次即可：
 //
 //	if err := sink.Err(); err != nil { /* 告警：访问日志已经写不进去了 */ }
 //
-// 这个通道现在由内嵌出口白送，不必为了 `Err()` 换成裸 `LineSink`；`Flush()` 同理，
-// 负责把最后一段缓冲落盘。
+// 这个通道现在由内嵌出口白送，不必为了 `Err()` 换成裸 `LineSink`。`Flush()` 在本
+// 出口下**不等于**「把缓冲落盘」：`WithImmediate` 让每条写完即出、缓冲区通常是空
+// 的，它的实际作用是**把首错交出来**（顺带兜住最后一条未写的记录）。
 //
 // # 并发
 //
@@ -197,6 +201,10 @@ func appendHTTPLine(dst []byte, r observability.Record, color bool) []byte {
 
 	// 耗时列（右对齐，带单位）。先渲染进栈上小缓冲，再按列宽补前导空格。
 	// 16 字节按最长一档定：秒档 `9223372036.85s` = 14 字节。
+	//
+	// 这一列是全文唯一按 **rune 数**而不是显示宽度补齐的地方（其余三列走
+	// `DisplayWidth`），与上游默认渲染器同一个位置同一种写法：耗时文本只有 ASCII
+	// 数字与 `µ`（两者都是 1 列宽），rune 数 == 显示列数，两条口径在这条路径上恒等。
 	dst = append(dst, consoleSep...)
 	var scratch [16]byte
 	dur := observability.AppendDuration(scratch[:0], r.Duration)
@@ -283,35 +291,31 @@ func appendHTTPLine(dst []byte, r observability.Record, color bool) []byte {
 	// 「组非空」，不是「有可渲染项」——列键全被吃掉时 `AppendAttrsExcept` 产出
 	// 0 字节（与空组同形），先写的分隔符就成了悬空的 ` | `。上游 godoc 点名了这两条
 	// （见 `observability.AppendAttrsExcept`），本仓不另立一套判空口径。
-	var skip [6]string
-	n := 0
+	// 数组长度 = 固定列个数，容量恰好用满：`skip` 只是它的前缀视图，
+	// `append` 不触发扩容，因此整条路径仍然 0 分配。
+	var skipArr [6]string
+	skip := skipArr[:0]
 	if okMethod {
-		skip[n] = attrHTTPMethod
-		n++
+		skip = append(skip, attrHTTPMethod)
 	}
 	if okRoute {
-		skip[n] = attrHTTPRoute
-		n++
+		skip = append(skip, attrHTTPRoute)
 	}
 	if okPath {
-		skip[n] = attrURLPath
-		n++
+		skip = append(skip, attrURLPath)
 	}
 	if okClient {
-		skip[n] = attrClientAddr
-		n++
+		skip = append(skip, attrClientAddr)
 	}
 	if okErrType {
-		skip[n] = attrErrorType
-		n++
+		skip = append(skip, attrErrorType)
 	}
 	if okSize {
-		skip[n] = attrHTTPBodySize
-		n++
+		skip = append(skip, attrHTTPBodySize)
 	}
 	mark := len(dst)
 	dst = append(dst, consoleSep...)
-	dst = observability.AppendAttrsExcept(dst, r.Attrs, skip[:n]...)
+	dst = observability.AppendAttrsExcept(dst, r.Attrs, skip...)
 	if len(dst) == mark+len(consoleSep) {
 		dst = dst[:mark] // 固定列全吃掉了，这一组不写
 	}
