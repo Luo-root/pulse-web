@@ -520,7 +520,10 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			c.setErr(&HTTPError{
 				Status: http.StatusRequestEntityTooLarge,
 				Code:   "body_too_large",
-				cause:  fmt.Errorf("content-length %d exceeds limit %d", r.ContentLength, e.maxBodyBytes),
+				// cause 用 *http.MaxBytesError 与「读取闸门 / 用户自包」两条路径
+				// 同型：自定义 ErrorHandler 只认这一个类型即可覆盖四条超限路径
+				// （默认 mapper 两条分支结果相同——413 + body_too_large）。
+				cause: &http.MaxBytesError{Limit: e.maxBodyBytes},
 			})
 			return
 		}

@@ -19,6 +19,12 @@ import (
 // 请求体**总量**上限由 WithMaxBodyBytes 的读取闸门承担，与本阈值分层无关。
 const multipartMemoryLimit = 32 << 20
 
+// maxFormSize 是 urlencoded body 的解析上限，与 net/http.parsePostForm 同值。
+// stdlib 对 form 有这道隐式默认闸；本包用显式实现对齐它——既保证两条
+// form 路径（有 / 无 Content-Type）闸门一致，又产出可识别的
+// *http.MaxBytesError（stdlib 超限时给的是无法分类的明文错误）。
+const maxFormSize = 10 << 20
+
 // Bind 把请求体解析进 v（必须是非 nil 指针），按 Content-Type 分派：
 //
 //	application/json（含 +json 后缀）      encoding/json
@@ -29,6 +35,10 @@ const multipartMemoryLimit = 32 << 20
 //	无 body（GET / HEAD 等）               落到 query 绑定（等价 BindQuery）
 //	其他类型                               415 unsupported_media_type
 //
+// 目标形状：JSON / XML 走 stdlib Decoder，可解到任意合法目标（struct、
+// *[]T、*map）；form / multipart / query 走字段映射，必须指向 struct
+// （否则 500 bind_target——编程错误，与客户端输入错误区分）。
+//
 // 映射规则（form / multipart / query 共用）：
 //
 //   - tag：form:"name"（urlencoded / multipart）、query:"name"；无 tag 时用
@@ -38,8 +48,11 @@ const multipartMemoryLimit = 32 << 20
 //     *multipart.FileHeader 及其 slice
 //   - 不做嵌套结构、time.Time、值校验（范围说明见 #32）
 //
+// 解析闸门：urlencoded body 与 stdlib 同口径限 10 MiB（超限 413）；其余
+// 大小由 WithMaxBodyBytes 决定（默认不限）。
+//
 // 失败返回 *HTTPError：400 invalid_body（query 来源为 invalid_query）/
-// 413 body_too_large（超过 WithMaxBodyBytes 上限）/ 415 unsupported_media_type。
+// 413 body_too_large（超过上限）/ 415 unsupported_media_type。
 // 因此直接 `return c.Bind(&in)` 即可获得统一错误响应：
 //
 //	var in CreateUser
@@ -63,15 +76,11 @@ func (c *Ctx) Bind(v any) error {
 		return bindDecode(v, json.NewDecoder(c.r.Body), "invalid_body")
 	case isXMLType(mt):
 		return bindDecode(v, xml.NewDecoder(c.r.Body), "invalid_body")
-	case mt == "application/x-www-form-urlencoded":
-		return c.bindForm(v)
+	case mt == "application/x-www-form-urlencoded", mt == "":
+		// 无 Content-Type 但有 body 也按 form 处理（对齐 gin 的缺省口径）
+		return c.bindURLEncoded(v)
 	case mt == "multipart/form-data":
 		return c.bindMultipart(v)
-	case mt == "":
-		// 无 Content-Type 但有 body：按 form 处理（对齐 gin 的缺省口径）。
-		// 不走 ParseForm —— stdlib 对空 Content-Type 不解析 body
-		// （parsePostForm 把空 CT 当 octet-stream），这条路径手工读取。
-		return c.bindRawForm(v)
 	default:
 		return &HTTPError{Status: http.StatusUnsupportedMediaType, Code: "unsupported_media_type"}
 	}
@@ -94,29 +103,43 @@ func bindDecode(v any, d bodyDecoder, code string) error {
 	if err := d.Decode(v); err != nil {
 		return bindError(err, code)
 	}
+	// JSON 拓尾（第一个值之后还有内容）判失败：json.Decoder 默认只消费第一个
+	// 值、静默丢弃其余，而 json.Unmarshal 对多余 token 报错——这里对齐严格
+	// 口径，拼错的客户端（重复序列化）立即暴露，而不是 200 半绑。
+	if jd, ok := d.(*json.Decoder); ok && jd.More() {
+		return &HTTPError{
+			Status: http.StatusBadRequest,
+			Code:   code,
+			cause:  errors.New("web: trailing data after first JSON value"),
+		}
+	}
 	return nil
 }
 
-func (c *Ctx) bindForm(v any) error {
-	if err := c.r.ParseForm(); err != nil {
-		return bindError(err, "invalid_body")
+// bindURLEncoded 解析 urlencoded body（有 / 无 Content-Type 两条公开路径共用）。
+//
+// 不用 stdlib 的 ParseForm：它对空 Content-Type 不解析 body（当成
+// octet-stream），且对 >10 MiB 的 body 产出明文错误（errors.New("http: POST
+// too large")）无法分类。这里与 parsePostForm 对齐同一道 10 MiB 闸，超限
+// 统一产出 *http.MaxBytesError（bindError 与自定义 mapper 都认）。
+// 解析结果写回 r.PostForm，与 ParseForm 的缓存语义对齐（重复调用幂等、
+// 后续自读 PostForm 的代码也能拿到值）。
+func (c *Ctx) bindURLEncoded(v any) error {
+	if c.r.PostForm == nil {
+		b, err := io.ReadAll(io.LimitReader(c.r.Body, maxFormSize+1))
+		if err != nil {
+			return bindError(err, "invalid_body")
+		}
+		if int64(len(b)) > maxFormSize {
+			return bindError(&http.MaxBytesError{Limit: maxFormSize}, "invalid_body")
+		}
+		vs, err := url.ParseQuery(string(b))
+		if err != nil {
+			return bindError(err, "invalid_body")
+		}
+		c.r.PostForm = vs
 	}
-	// PostForm 只含 body 的字段（不含 URL query），这正是 Bind 的语义
 	return mapValues(v, c.r.PostForm, "form", "invalid_body")
-}
-
-// bindRawForm 解析无 Content-Type 的 form body：stdlib 的 ParseForm 对空
-// Content-Type 不解析 body（parsePostForm 把它当 octet-stream），手工补齐。
-func (c *Ctx) bindRawForm(v any) error {
-	b, err := io.ReadAll(c.r.Body)
-	if err != nil {
-		return bindError(err, "invalid_body")
-	}
-	vs, err := url.ParseQuery(string(b))
-	if err != nil {
-		return bindError(err, "invalid_body")
-	}
-	return mapValues(v, vs, "form", "invalid_body")
 }
 
 func (c *Ctx) bindMultipart(v any) error {

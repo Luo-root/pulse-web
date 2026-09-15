@@ -544,6 +544,86 @@ func TestBindMalformedInputs(t *testing.T) {
 	}
 }
 
+func TestBindJSONSlice(t *testing.T) {
+	// JSON / XML 走 stdlib Decoder，目标是 *[]T / *map 同样合法（不限于 struct）
+	e, _ := newTestEngine(t)
+	e.POST("/us", func(c *Ctx) error {
+		var in []bindUser
+		if err := c.Bind(&in); err != nil {
+			return err
+		}
+		return c.JSON(200, in)
+	})
+	rec := bindReq(e, "POST", "/us", "application/json", strings.NewReader(`[{"name":"a"},{"name":"b"}]`))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d，body = %s", rec.Code, rec.Body.String())
+	}
+	var got []bindUser
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[1].Name != "b" {
+		t.Fatalf("解析 = %+v", got)
+	}
+}
+
+func TestBindJSONTrailingData(t *testing.T) {
+	// 第一个 JSON 值之后还有内容：Decoder 默认静默丢弃，这里判 400
+	e, _ := newTestEngine(t)
+	e.POST("/u", func(c *Ctx) error {
+		var in bindUser
+		if err := c.Bind(&in); err != nil {
+			return err
+		}
+		return c.JSON(200, in)
+	})
+	rec := bindReq(e, "POST", "/u", "application/json", strings.NewReader(`{"name":"a"}{"name":"b"}`))
+	if rec.Code != 400 || errCode(t, rec) != "invalid_body" {
+		t.Fatalf("拓尾：status = %d，code = %s", rec.Code, errCode(t, rec))
+	}
+}
+
+func TestBindURLEncodedOverLimit(t *testing.T) {
+	// 与 stdlib parsePostForm 同口径的 10 MiB 解析闸：有 / 无 Content-Type
+	// 两条公开路径都要产出 413 + 可识别的 *http.MaxBytesError，
+	// 且不依赖 WithMaxBodyBytes 选项。
+	e, _ := newTestEngine(t)
+	e.POST("/f", func(c *Ctx) error {
+		var in struct {
+			Name string `form:"name"`
+		}
+		if err := c.Bind(&in); err != nil {
+			return err
+		}
+		return c.JSON(200, in)
+	})
+
+	big := strings.Repeat("x", maxFormSize+1)
+	for _, ct := range []string{"application/x-www-form-urlencoded", ""} {
+		rec := bindReq(e, "POST", "/f", ct, strings.NewReader(big))
+		if rec.Code != http.StatusRequestEntityTooLarge || errCode(t, rec) != "body_too_large" {
+			t.Fatalf("ct=%q：status = %d，code = %s", ct, rec.Code, errCode(t, rec))
+		}
+	}
+
+	// 选项打开且更小时，内层读取闸门先掐——同样是 413
+	e2, _ := newTestEngine(t, WithMaxBodyBytes(1<<10))
+	e2.POST("/f", func(c *Ctx) error {
+		var in struct {
+			Name string `form:"name"`
+		}
+		if err := c.Bind(&in); err != nil {
+			return err
+		}
+		return c.JSON(200, in)
+	})
+	rec := bindReq(e2, "POST", "/f", "application/x-www-form-urlencoded",
+		strings.NewReader(strings.Repeat("x", 2<<10)))
+	if rec.Code != http.StatusRequestEntityTooLarge || errCode(t, rec) != "body_too_large" {
+		t.Fatalf("选项路径：status = %d，code = %s", rec.Code, errCode(t, rec))
+	}
+}
+
 func TestBindQueryTargetError(t *testing.T) {
 	e, _ := newTestEngine(t)
 	e.GET("/q", func(c *Ctx) error {
