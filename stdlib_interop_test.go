@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// ---- stdlib 互操作（设计验收标准第 6 条）----
+// ---- stdlib 互操作（设计验收标准『标准库兼容』条）----
 //
 // 设计只承诺两条路径：`Wrap` 把 stdlib handler 接进来、`Handler()` 把 Engine 导出去。
 // **不提供**「框架内挂 stdlib 中间件」的 API——stdlib 中间件包在 Engine 外面即可
