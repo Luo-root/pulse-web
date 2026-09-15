@@ -490,7 +490,7 @@ PULSE | 2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /us
 尾段的 `route=` / `size=` / `host=` / 错误 / `trace=` 是各自独立的 ` | ` 字段，有才出现；
 逐字版本由 `console_sink_test.go` 的 `TestConsoleSinkHTTPLine` 钉住——改版式时以那条断言为准。）
 
-**为什么换掉 `SlogSink`**（决策与实测见 [#20](https://github.com/Luo-root/pulse-web/issues/20)）：`SlogSink` 是**给机器读**的结构化出口——固定前缀每行一样、字段按字母序、亚毫秒耗时取整成 `duration_ms=0`，做默认出口既贵又难扫。`Record` 里的字段一个不少，缺的只是渲染层。
+**为什么换掉 `SlogSink`**（决策与实测见 [#20](https://github.com/Luo-root/pulse-web/issues/20)）：`SlogSink` 是**给机器读**的结构化出口——接宿主 logger、要 JSON、喂采集器时用它。上游 v0.2.3 起它已与 `LineSink` 对齐字段与顺序（`duration_ms` 是**不截断**的毫秒数值、Attrs 走插入序、不自己输出 `time`），所以这不是「`SlogSink` 有缺陷」，而是**默认位置该给人读**：`0.585` 与 `585.1µs` 是同一条耗时，开机第一眼要的是后者；再叠上 18 allocs vs 0 的成本差（同会话渲染实测，见表）。`Record` 里的字段一个不少，缺的只是渲染层。
 
 | | 渲染一条（io.Discard） | 请求路径（同会话配对） |
 |---|---|---|

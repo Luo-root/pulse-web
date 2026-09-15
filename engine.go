@@ -101,13 +101,18 @@ func WithSink(sink observability.Sink) Option {
 // newDefaultSink 造默认装配的出口：**给人读**的控制台列式出口，写 stdout。
 //
 // 选它的依据（Issue #20 的实测）：默认出口是开箱体验，而旧默认
-// `observability.SlogSink`（→ stderr）是**给机器读**的结构化日志——固定前缀
-// 每行一样、字段按字母序、亚毫秒耗时取整成 `duration_ms=0`。#18 的真实负载对比里，
-// 观测档掉 35%（c=64）/ 12%（c=256）吞吐，而 `ConsoleSink` 掉到 14% / 4%。
+// `observability.SlogSink`（→ stderr）是**给机器读**的结构化出口——接宿主 logger、
+// 要 JSON、喂采集器时才是它。#18 的真实负载对比里（采集口径），观测档掉
+// 35%（c=64）/ 12%（c=256）吞吐，而 `ConsoleSink` 掉到 14% / 4%。
 //
 // 渲染同一条访问记录（`io.Discard`、`-benchtime=20000x -count=10` 同会话配对、
 // 取中位轮）：`SlogSink` ~1310 ns / 18 allocs，`ConsoleSink` ~236 ns / **0 allocs**
 // ——省下的是「把 Record 摊平成 []any 再交给 slog」那一步。
+//
+// 两者不是「同一样东西换个格式」：上游 v0.2.3 起 `SlogSink` 已与 `LineSink` 对齐
+// 字段与顺序（`duration_ms` 是**不截断**的毫秒数值、Attrs 走插入序、不自己输出
+// `time`），差别只剩**同一事实的机器面与人读面**——`0.585` 与 `585.1µs` 是同一条
+// 耗时，开机第一眼要的是后者。
 // 要切回结构化出口用 WithSink —— 只换出口，装配不变。
 func newDefaultSink() observability.Sink {
 	return NewConsoleSink(os.Stdout)

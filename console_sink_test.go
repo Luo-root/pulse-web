@@ -447,14 +447,16 @@ func TestConsoleSinkNilWriterPanics(t *testing.T) {
 	NewConsoleSink(nil)
 }
 
-// TestConsoleSinkDurationColumn：耗时列的单位与精度（亚毫秒不取整成 0——旧默认
-// 出口的毛病），口径来自上游 `observability.AppendDuration`。
+// TestConsoleSinkDurationColumn：耗时列的单位与精度，口径来自上游
+// `observability.AppendDuration`——它与另一个出口的 `duration_ms` 是同一条事实的
+// 人读面与机器面。
 //
 // 这条同时钉住**迁移到 LineSink 的五处变化里的一处**：耗时从「浮点四舍五入」
 // 改成上游口径的「整数截断」。旧实现走 `strconv.AppendFloat('f')`，585199ns 会
 // 渲染成 `585.2µs`、7629999ns 成 `7.63ms`；上游口径是 `585.1µs` / `7.62ms`。
-// 另两处是行首标识（`PULSE`）与列补齐按显示宽度，理由写在 Issue #27：口径必须是
-// 各出口共用的一致性资产，本地不再留第二份实现。
+// 另四处是行首标识（`PULSE`）、列补齐按显示宽度、键名按需加引号、短状态列的
+// ANSI 位置，理由写在 Issue #27：口径必须是各出口共用的一致性资产，本地不再留
+// 第二份实现。
 // 谁把它改回四舍五入（或改小数位），先红在这条上。
 func TestConsoleSinkDurationColumn(t *testing.T) {
 	durCol := func(d time.Duration) string {
