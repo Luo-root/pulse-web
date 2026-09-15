@@ -41,6 +41,62 @@ PULSE | 2026/09/14 - 08:30:00 | pulse.kernel.fiber_state host=svc fiber=db state
 
 要机器可读 / 接既有日志管道：`web.New(web.WithSink(observability.SlogSink{...}))`（或 `NewAsyncSink`、`NewLineSink`）——**只换出口，装配不变**。
 
+## 日志落地（持久化归谁）
+
+**默认档只写 stdout，它本身不是持久化**：进程只把行写进 fd 1，落盘、轮转、保留都由平台负责。
+三条常见路径，各配各的：
+
+**① 容器 / k8s**——什么都不用改，运行时把 stdout 收成节点上的 JSON 文件。
+**要显式设轮转**，否则默认值要么很小要么无限增长：
+
+```yaml
+# docker-compose
+logging: { driver: json-file, options: { max-size: "50m", max-file: "5" } }
+```
+```yaml
+# kubelet（节点级）
+containerLogMaxSize: 50Mi
+containerLogMaxFiles: 5
+```
+
+**② systemd（单机 VPS）**——服务的 stdout/stderr **默认就进 journald**，零额外组件；
+保留策略在 `/etc/systemd/journald.conf`：
+
+```ini
+SystemMaxUse=2G
+MaxRetentionSec=2week
+```
+
+查日志：`journalctl -u <服务名> --since "10 min ago"`，`-f` 跟流。
+
+**③ 直接落文件**——自己开文件交给出口；轮转/保留自备（框架不内置，零依赖）：
+
+```go
+f, err := os.OpenFile("/var/log/myapp.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+if err != nil { log.Fatal(err) }
+app := web.New(web.WithSink(web.NewConsoleSink(f)))
+```
+
+既要人能看又要送采集器，用上游的扇出：
+
+```go
+web.WithSink(observability.MultiSink{
+    web.NewConsoleSink(os.Stdout),
+    observability.NewLineSink(f),   // 32 KiB 缓冲，进程退出时引擎会 Flush
+})
+```
+
+**丢多少由缓冲层级决定**：`ConsoleSink` 无缓冲（只丢内核 page cache 里没回写的那一段）→
+`LineSink` 32 KiB → `AsyncSink` 队列（满时按策略丢）。要更强的保证得自己 `fsync`
+（每请求毫秒级代价，access log 通常不值）；要「一条不丢」的语义，那不是日志通道的事。
+
+**写失败要看一眼**：`Sink` 接口不返回错误，所以失败（stdout 管道被关、journald socket 满、
+磁盘满）从 `ConsoleSink.Err()` 读——它返回**首次**写失败：
+
+```go
+if err := sink.Err(); err != nil { /* 告警：访问日志已经写不进去了 */ }
+```
+
 ## 文档
 
 - [框架设计（v1）](docs/design/web-framework-design.md)——定位、决策、API 面、运行时契约、观测设计、明确不做清单

@@ -376,6 +376,68 @@ func TestConsoleSinkZeroAlloc(t *testing.T) {
 	}
 }
 
+// TestConsoleSinkErrReportsFirstFailure：写失败不 panic，`Err()` 给出**首次**错误，
+// 不被后续失败或后续成功覆盖——语义与上游 `observability.LineSink.Err()` 一致。
+func TestConsoleSinkErrReportsFirstFailure(t *testing.T) {
+	rec := httpRecord("200", time.Microsecond)
+
+	var buf bytes.Buffer
+	ok := NewConsoleSink(&buf, WithColor(false))
+	if err := ok.Err(); err != nil {
+		t.Fatalf("没有写失败时 Err() 应为 nil，实得 %v", err)
+	}
+	ok.Write(rec)
+	if err := ok.Err(); err != nil {
+		t.Fatalf("写成功后 Err() 仍应为 nil，实得 %v", err)
+	}
+
+	first := errors.New("write: broken pipe")
+	fw := &failingWriter{err: first}
+	s := NewConsoleSink(fw, WithColor(false))
+	s.Write(rec)
+	if !errors.Is(s.Err(), first) {
+		t.Fatalf("Err() 应报出首次写失败 %v，实得 %v", first, s.Err())
+	}
+
+	fw.err = errors.New("write: no space left on device")
+	s.Write(rec)
+	if !errors.Is(s.Err(), first) {
+		t.Fatalf("首次错误被后来的失败覆盖：%v", s.Err())
+	}
+	if fw.calls != 2 {
+		t.Fatalf("写失败后应继续尝试写（不静默退出），实得 %d 次调用", fw.calls)
+	}
+}
+
+// TestConsoleSinkErrConcurrent：`Err()` 与并发写共用一把锁——-race 下必须干净。
+func TestConsoleSinkErrConcurrent(t *testing.T) {
+	fw := &failingWriter{err: errors.New("write: broken pipe")}
+	s := NewConsoleSink(fw, WithColor(false))
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 32; j++ {
+				s.Write(httpRecord("200", time.Microsecond))
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for j := 0; j < 256; j++ {
+			_ = s.Err()
+		}
+	}()
+	wg.Wait()
+
+	if s.Err() == nil {
+		t.Fatal("整程都在写失败，Err() 不该是 nil")
+	}
+}
+
 func TestConsoleSinkNilWriterPanics(t *testing.T) {
 	defer func() {
 		if recover() == nil {
@@ -388,7 +450,7 @@ func TestConsoleSinkNilWriterPanics(t *testing.T) {
 // TestConsoleSinkDurationColumn：耗时列的单位与精度（亚毫秒不取整成 0——旧默认
 // 出口的毛病），口径来自上游 `observability.AppendDuration`。
 //
-// 这条同时钉住**迁移到 LineSink 的三处变化里的一处**：耗时从「浮点四舍五入」
+// 这条同时钉住**迁移到 LineSink 的五处变化里的一处**：耗时从「浮点四舍五入」
 // 改成上游口径的「整数截断」。旧实现走 `strconv.AppendFloat('f')`，585199ns 会
 // 渲染成 `585.2µs`、7629999ns 成 `7.63ms`；上游口径是 `585.1µs` / `7.62ms`。
 // 另两处是行首标识（`PULSE`）与列补齐按显示宽度，理由写在 Issue #27：口径必须是

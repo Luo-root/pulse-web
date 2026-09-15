@@ -129,6 +129,84 @@ g2.GET("/users", h, mw3)
 
 **回归门禁**：本表的**分配计数与 B/op** 已固化成断言（`bench/budget_test.go`，由 CI 的 `Alloc budget` 步骤执行，不带 `-race` 跑）。**ns 不设阈值**——跨轮会漂 2–4×，拿它做门禁等于把机器状态引进 CI；ns 对比仍走人工 benchstat，口径见表 A / 表 B 各自的说明。断言失败时按提示同步刷新常量与本表。
 
+### 表 C：与 gin 的真实负载对比（2026-09-14 一次性验证，采集工程未入库）
+
+验收标准第 8 条的落地。**结论留在这里，采集工程没有进仓库**——`loadtest/`（带 gin 依赖的独立
+module）是为回答「与 gin 同级吗、观测的钱花在哪」做的一次性验证，工程保留在 PR #19 的分支
+`bench/gin-compare`（未合并、未删除），要复现就切过去；本页只留口径与结论。
+
+**口径先行**——这类对比最容易变成「谁的数字好看谁赢」，所以先把口径钉死：
+
+- 两侧**独立进程**，共用同一份 `http.ListenAndServe` bootstrap，**只让 handler 是变量**
+  （不用 `gin.Run()` / `Engine.Run()`，免得把各自的默认 server 配置引进对比）
+- 同一格内两侧**相邻**跑，奇偶轮交换先后，**4 轮**；每格取 **RPS 中位那一轮**的整套分位；
+  两侧比值取**逐轮配对比值的中位**
+- 路径 `GET /users/42` → 两侧同一份 JSON；压测器自写（固定并发、连接全复用、计时窗口内
+  **每个**请求都进分位，不采样）
+- 机器：i9-14900HX / 32 逻辑核 / `GOMAXPROCS=32` / Go 1.27 / Windows amd64
+
+两个对拍档：`bare` = `gin.New()` ↔ `web.New(web.Minimal())`；`obs` = `gin.Default()` ↔ `web.New()`
+（运行时 `web.New()` 的默认出口还是 `SlogSink`——见下面的 ⚠️）。
+
+| 档位 | 并发 | pulse-web RPS | gin RPS | pulse/gin | pulse p99 | gin p99 |
+|---|---|---|---|---|---|---|
+| bare | 64 | 58562 | 61790 | **0.94x** | 4.63ms | 4.71ms |
+| bare | 256 | 64986 | 67915 | **0.97x** | 16.80ms | 20.07ms |
+| obs | 64 | 38020 | 59127 | **0.65x** | 7.10ms | 4.98ms |
+| obs | 256 | 57152 | 65874 | 0.88x | 20.57ms | 21.14ms |
+
+- **裸档同级**：0.94–0.97×，差 3–6%；并发 256 时 p99 反而更低（16.80ms vs 20.07ms）。
+- **绝对值只做量级参考**——同一格换一次会话就能从 49k 变到 78k（±20%），所以本表只认同轮配对比值：
+  与表 A / 表 B 的「ns 跨轮漂 2–4×」是同一条纪律。
+- ⚠️ **`obs` 档是当时口径**：它当时用的是**旧默认出口 `SlogSink`**。这个「默认观测档落后」的结论
+  直接促成了 #20 的选型与 #21 的实现（默认出口已换成 `ConsoleSink`），**所以这一档数字代表旧默认、
+  不代表现状**；换默认后没有重跑（工程未入库），现状量级看「默认出口」一节的微基准。
+
+**观测开销拆解**（诊断档，只跑 pulse-web 一侧——它们回答「钱花在哪」，不回答「谁快」）：
+
+| 并发 | bare | 关访问日志 | 默认 `SlogSink` | 换 `LineSink` | `AsyncSink(LineSink)` | 原型 `fastsink` |
+|---|---|---|---|---|---|---|
+| 64 | 58562 | 54930 (−6%) | **38020 (−35%)** | 48583 (−17%) | 54727 (−7%) | 50621 (−14%) |
+| 256 | 64986 | 63739 (−2%) | **57152 (−12%)** | 60711 (−7%) | 62588 (−4%) | 62309 (−4%) |
+
+- **TraceID 生成 + 记录组装本身几乎免费**：关掉访问日志后只掉 6%（c=64）/ 2%（c=256）。
+- **钱几乎全花在「把记录写进出口」这一步，而且换出口差别巨大**：默认 `SlogSink` 掉 35%/12%，
+  `LineSink` 掉 17%/7%，`AsyncSink(LineSink)` 只掉 7%/4%。gin 侧同一档只掉 3%（`Logger` 就是一行
+  文本，没有第二条路可选）。
+- **渲染本身能便宜一个量级**：`fastsink` 是当时的原型出口（池化缓冲 + 不用 `fmt` + 列式版式），
+  掉 14%/4%——同一批字段，从默认档的 −35% 收到 −14%。它与 `obs-line` 的差别落在逐轮极差内
+  （10% / 4%），**本表不为这两者分胜负**；能确定的是「渲染方式本身值这么多」——这个结论已经由
+  #21 的 `ConsoleSink` 兑现（渲染 ~190 ns / 0 allocs）。
+
+**条数与内容**：
+
+- **条数一样**：pulse-web 每请求 **1 条**结构化 `Record`（Engine 收尾里的 AccessLog；`c.Observe`
+  要业务自己调，默认不写第二条），gin 每请求 **1 行**文本。pulse-web 另有**装配期 3 条**
+  （Bootstrap），不是每请求。
+- **内容不一样**：pulse-web 带 TraceID（32hex）、路由**模板**（`/users/{id}`）、错误分类（有错才写）；
+  gin 那行只有时间 / 状态 / 耗时 / 客户端 / 方法+路径。给 gin 配上等价物要另装第三方中间件——
+  所以这一档量的是「各家默认开箱配置」，不是「等价功能的成本」。
+
+**成本分解**（micro-benchmark，**不是胜负承诺**；口径与表 A / 表 B 不同，数字不要跨表相减）：
+
+| 档位 | ns/op | B/op | allocs/op |
+|---|---|---|---|
+| gin/bare | ~300 | 120 | 5 |
+| pulse/bare | ~640 | 825 | 11 |
+| gin/obs | ~1140 | 346 | 15 |
+| pulse/obs-nolog | ~860 | 890 | 14 |
+| pulse/obs-line | ~1425 | 1330 | 17 |
+| pulse/obs-async | ~1450 | 1650 | 18 |
+| **pulse/obs（默认 `SlogSink`，旧）** | **~2850** | **2538** | **35** |
+| pulse/obs-fast（原型出口，不进框架） | ~1180 | 1284 | 16 |
+
+- 微基准把拆解表里那笔钱量得更直白：`SlogSink` 每请求 **+24 allocs / +2.2µs**（每条都要
+  `make([]any, 0, 18)` 再交给 slog），`LineSink` 只 +6 allocs，`AsyncSink` 把格式化挪出请求路径后
+  +7 allocs。
+- **微基准与真实负载可以给出相反的印象**：pulse-web 的**裸**路径微基准约是 gin 的 2×（多 6 次分配），
+  真实负载下只差 3–6%（请求路径不是瓶颈，网络栈与调度才是）。这正是「不以 micro-benchmark 胜负
+  作承诺」的实证——拿上面那张表去说谁快，会得到一个与真实负载相反的印象。
+
 ## 设计红线
 
 1. 请求路径一律 `EmitLocal`，禁用全树 `Emit`（v0.2.1 实测 23ns vs 1778ns）
@@ -390,7 +468,7 @@ app.POST("/jobs", func(c *web.Ctx) error {
 | `Minimal(), WithSink(s)` | 关 | 关 | 关 | **开** | `s`（仅供 `c.Observe` 与用户自装中间件） |
 | `New(WithCollector())` | 开 | 开 | 开 | 开 | 默认 Sink |
 
-**`WithSink` 只换出口，不复活 Trace / AccessLog**——要观测就别用 `Minimal()`（或自己 `app.Use(web.Trace())`）。
+**`WithSink` 只换出口，不复活 Trace / AccessLog**——要观测就别用 `Minimal()`。框架**没有**可单独挂载的 `Trace()` / `AccessLog()` 中间件（本文档早期版本写过 `app.Use(web.Trace())`，那个 API 不存在，已删）：默认装配是一体的，`Minimal()` 下要自己写中间件 + `c.Observe()` 打点。
 
 `WithCollector()` 每请求把 `observability.Collector` 装进请求作用域（上游 v0.2.1 起是 `kernel.Local()` 作用域局部绑定；实测 **+385 ns / +12 allocs 每请求**，**与插件树规模无关**——口径见表 B）。
 
@@ -430,7 +508,7 @@ PULSE | 2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /us
 - **固定列盖不住的属性不丢**：未知键按插入序附在行尾（`| llm.model=… k=v`）。
 - **颜色**只在目的地是终端时出现（状态列按区间），重定向到文件 / 管道自动关；`NewConsoleSink(w, WithColor(true))` 可强制。
 - **不缓冲**：写完即落 `io.Writer`——终端要即时，缓冲会把安静应用的日志扣在内存里。要吞吐 / 异步 / 机器可读就 `WithSink(…)` 换出口（`AsyncSink` / `SlogSink` / `NewLineSink`），**`WithSink` 只换出口，装配不变**。
-- **写错误不抛，但可查**：`Sink` 接口没有错误通道，所以默认路径不会因为磁盘满而中断请求；`ConsoleSink` 内嵌上游 `LineSink`，自带 `Err()`（首个写错误）与 `Flush()`——要错误可见就查它，不必为了 `Err()` 换成别的出口。
+- **写错误不抛，但可查**：`Sink` 接口没有错误通道，所以默认路径不会因为磁盘满而中断请求；`ConsoleSink` 内嵌上游 `LineSink`，`Err()` 报出**首次**写失败（stdout 管道被关掉、journald socket 满、磁盘满都从这里读），失败后**继续尝试写**、不静默退出、不改缓冲策略——要错误可见就查它，不必为了 `Err()` 换成别的出口。框架关闭时序第 ⑤ 步已经替你读过一次（记 `slog.Warn`），自己接的场合是「进程不退出也想告警」。
 - **并发下渲染与写出共用一把锁**：`LineSink` 用一个自持缓冲换零分配，代价是 `WithRenderer` 在临界区内被调用。实测同一条记录并行写比单线程慢 ~75 ns/条（`ConsoleSink` 228 → 310、上游缺省版式 266 → 340，两者增量同级，说明这个代价属于上游的锁范围而非本渲染器）。代价落在出口的临界区上，不进请求路径——上面「请求路径」一列的分配与 B/op 与 `nopSink` 档逐项相同。
 
 实现分工（pulse v0.2.4 起）：本出口只留**版式知识**（列序与列宽、状态配色、http / 非 http 两条分支、尾段顺序），行首标识（取上游缺省 `PULSE`）、结尾换行、缓冲、颜色判定、耗时与引号口径、写错误收集全部交回 `observability.LineSink`。**渲染器是包级函数不是闭包**——闭包嵌在另一个函数值里时 `Attrs.Range` 的逐值装箱消不掉（实测 6 属性记录每条 5 次分配），包级函数 + `Get[T]` 才是 0。
@@ -443,7 +521,26 @@ PULSE | 2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /us
 4. **兜底组与事件行的键名按需加引号**：新实现走 `AppendAttrs`，键名也过 `AppendTextValue`；旧实现 `appendField` / `appendKeyValue` 裸写键名。（`| weird key=1 k=v=2` → `| "weird key"=1 "k=v"=2`）
 5. **`color=on` 且状态列短于 3 显示列时的 ANSI 码位置**：从「补空格之后」挪到「补空格之前」（`|   \x1b[31m5\x1b[0m |` → `| \x1b[31m  5\x1b[0m |`），新顺序与上游一致
 
-前三条是「把本地第二份实现换成上游的一致性资产」，**后两条是同一个动作的副作用**。第 4、5 条**引擎自己产出的记录触发不到**（状态恒为 3 字符、属性键是 OTel 点分名），实际影响为零；之所以要列出来，是因为声明写的是「除这三处外逐字节不变」，而原来的 44 组语料（全 ASCII 状态 + 点分键名）**结构上就覆盖不到这两格**——断言的覆盖面就是语料的覆盖面，写「只有 N 处」时先问语料能不能证伪它。
+前三条是「把本地第二份实现换成上游的一致性资产」，**后两条是同一个动作的副作用**。第 4、5 条**引擎自己产出的记录触发不到**（状态恒为 3 字符、属性键是 OTel 点分名），实际影响为零。之所以一条不少地列出来：这条声明从「唯一一处」一路走到「五处」，**每一步都是被语料推翻的**——最初的 44 组对照全是 ASCII 状态 + 点分键名，**结构上就覆盖不到第 3、4、5 条**，直到补了非 ASCII / 类型不符 / 需引号键名 / 短状态 + color 的边界语料才逐条现形。断言的覆盖面就是语料的覆盖面，写「只有 N 处」之前先问手里的语料能不能证伪它。
+
+### 日志落地与持久化（框架不负责那一半）
+
+**默认档只写 stdout，它本身不是持久化**：进程把行写进 fd 1，落盘 / 轮转 / 保留归平台。
+这条划分是有意的（12-factor 第 11 条）：应用不管文件系统，平台管，两者用 stdout 解耦。
+
+| 路径 | 做法 | 轮转 / 保留归谁 |
+|---|---|---|
+| 容器 / k8s | 默认出口即可 | 运行时：docker `log-opts max-size/max-file`、kubelet `containerLogMaxSize/containerLogMaxFiles`——**默认值往往很小或无限增长，要显式设** |
+| systemd（单机） | 默认出口即可（stdout 默认进 journald） | `journald.conf` 的 `SystemMaxUse` / `MaxRetentionSec`；查用 `journalctl -u <svc>` |
+| 直接落文件 | `os.OpenFile(…, O_APPEND\|O_CREATE\|O_WRONLY, 0o644)` + `WithSink(NewConsoleSink(f))`；要同时给人看和送采集器用上游 `observability.MultiSink{…}` | **宿主自备**（框架零依赖，不内置轮转） |
+
+**丢失窗口按缓冲层级**：`ConsoleSink` 无缓冲（只丢内核 page cache 未回写的那一段）→
+`LineSink` 32 KiB（引擎在优雅关闭时会 `Flush`）→ `AsyncSink` 队列（满时按策略丢）。
+要更强保证得自己 `fsync`（每请求毫秒级代价，access log 通常不值）；要「一条不丢」的
+语义，那不是日志通道的事。
+
+**明确不做**：轮转 / 保留 / 压缩（属宿主或第三方，引 lumberjack 是独立决定）、fsync 策略、
+采样丢弃、把写错误塞进请求路径。这些要动，先开票（见 #22）。
 
 ### 打点入口（复用上游，不新造协议）
 
@@ -487,6 +584,24 @@ PULSE | 2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /us
 | Attrs | `error.type` | 错误分类串；**与 `Record.Err` 并存**（`Err` 供出口输出错误文本、`error.type` 供聚合查询，OTel 亦然） |
 
 **隐私边界**：Attrs 只有标量，无 payload 逃生舱——能记 method / status / duration / bytes，**记不了**请求体、响应体、prompt。
+
+**与 OTel HTTP 语义约定的覆盖对照**（上游 semconv：HTTP server span）。「对齐」是指**同名字段用同一套语义**，不等于把 OTel 的属性表抄全：
+
+| OTel 属性 | 等级 | pulse-web |
+|---|---|---|
+| `http.request.method` | Required | ✅ |
+| `url.path` | Required | ✅ |
+| `url.scheme` | Required | ❌ 不记（反代 / 终止 TLS 后框架这一层看到的 scheme 未必是真值） |
+| `http.response.status_code` | Conditional | ⚠️ 记在 **`Record.Status`**（状态码字符串），不是 attr——与 `Duration` / `Err` 同理：状态型事实走记录字段 |
+| `http.route` | Conditional | ✅（含路径模板，低基数） |
+| `error.type` | Conditional | ✅（有错才写，与 `Record.Err` 并存） |
+| `url.query` | Conditional | ❌ 不记（基数高，且常带敏感参数） |
+| `client.address` | Recommended | ✅（对端地址，不解析 `X-Forwarded-For`——信任边界交给反代） |
+| `network.protocol.version` / `server.address` / `user_agent.original` | Recommended | ❌ 不记（v1 范围外） |
+| `http.request.body.size` / `http.response.body.size` | **Opt-In** | 只记**响应**侧：框架包了 `ResponseWriter`（顺手得到字节数），**没有包 `r.Body`**——量请求体要拦 body 读取，破坏流式语义且每请求多一层 |
+| `http.request.header.*` / `http.response.header.*` / `http.request.size` / `http.response.size` | **Opt-In** | ❌ 不做（默认不记头 / 体：体积按请求数放大、会把 token / cookie 写进日志、破低基数聚合）。要记就在中间件里 `c.Observe()` 显式记，自己把关 |
+
+需要「请求进来那一刻」的记录（而不是收尾那一条）**没有现成开关**：框架的访问日志刻意写在收尾（要 `status` / `duration`），要入口记录就在中间件里 `c.Observe()`——框架**不提供** `Trace()` / `AccessLog()` 这类可单独挂载的中间件，默认装配是一体的（`WithSink` 只换出口，不复活被 `Minimal()` 关掉的观测）。
 
 ### TraceID 兼容
 
@@ -547,4 +662,4 @@ pulse-web/
 - [ ] 观测贯穿：单请求 TraceID 在 router → handler → Sink 一致；后台任务共享同一 TraceID
 - [ ] 标准库兼容：挂载 stdlib 中间件无侵入；`Wrap` 双向适配
 - [ ] 性能回归：请求路径开销进入仓库 bench，作为基线不劣化
-- [ ] 真实负载下与 gin 同级（不以 micro-benchmark 胜负作承诺）
+- [x] 真实负载下与 gin 同级（不以 micro-benchmark 胜负作承诺）——**已验证一次**：裸档 0.94× / 0.97×（见「表 C」；采集工程不入库，保留在 PR #19 的分支 `bench/gin-compare`）
