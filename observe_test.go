@@ -69,6 +69,23 @@ func TestB3TraceIDAdopted(t *testing.T) {
 	}
 }
 
+func TestB3TraceID16HexNormalized(t *testing.T) {
+	// Zipkin 的 B3 也允许 16hex（64-bit）；左垫 0 归一为 32hex 后采纳——
+	// 网关后链路不会因为上游用 16hex 而断裂（#33）。
+	e, _ := newTestEngine(t)
+	e.GET("/t", func(c *Ctx) error { return c.Text(http.StatusOK, c.TraceID()) })
+
+	const b3 = "0af7651916cd43dd"
+	const want = "00000000000000000af7651916cd43dd"
+	rec := doReq(e, "GET", "/t", nil, "X-B3-TraceId", b3)
+	if got := rec.Header().Get("X-Trace-Id"); got != want {
+		t.Fatalf("X-Trace-Id = %q, want %q", got, want)
+	}
+	if got := rec.Body.String(); got != want {
+		t.Fatalf("handler TraceID = %q, want %q", got, want)
+	}
+}
+
 func TestMalformedTraceHeadersIgnored(t *testing.T) {
 	e, _ := newTestEngine(t)
 	e.GET("/t", func(c *Ctx) error { return c.Text(http.StatusOK, c.TraceID()) })
@@ -77,6 +94,34 @@ func TestMalformedTraceHeadersIgnored(t *testing.T) {
 	got := rec.Header().Get("X-Trace-Id")
 	if got == "tooshort" || len(got) != 32 {
 		t.Fatalf("malformed header should be ignored, got %q", got)
+	}
+}
+
+// TestZeroTraceIDTreatedAsAbsent：全零 trace-id 一律视为不存在（两条入站路径同一口径）。
+//
+// W3C traceparent 明文规定 trace-id 不得为全零；B3 未禁止，但同样按不存在处理——
+// 否则带该头的请求会在日志里共享同一条 TraceID（比链路断裂更难排查）。review 提出，PR #35。
+func TestZeroTraceIDTreatedAsAbsent(t *testing.T) {
+	const zero = "00000000000000000000000000000000"
+	cases := []struct{ name, header, value string }{
+		{"traceparent 全零", "Traceparent", "00-" + zero + "-1111111111111111-01"},
+		{"B3 32hex 全零", "X-B3-TraceId", zero},
+		{"B3 16hex 全零", "X-B3-TraceId", "0000000000000000"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e, _ := newTestEngine(t)
+			e.GET("/t", func(c *Ctx) error { return c.Text(http.StatusOK, c.TraceID()) })
+
+			rec := doReq(e, "GET", "/t", nil, c.header, c.value)
+			got := rec.Header().Get("X-Trace-Id")
+			if got == zero {
+				t.Fatalf("全零 trace-id 被采纳了：%q（应视为不存在、回落到框架生成器）", got)
+			}
+			if len(got) != 32 {
+				t.Fatalf("X-Trace-Id = %q，want 32hex（框架生成）", got)
+			}
+		})
 	}
 }
 

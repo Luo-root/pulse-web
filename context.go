@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -34,9 +35,8 @@ type Ctx struct {
 	traceID string
 	started time.Time
 
-	kv     map[string]any
-	status int
-	err    error
+	kv  map[string]any
+	err error
 }
 
 // ---- 请求信息 ----
@@ -121,7 +121,7 @@ func (c *Ctx) SetHeader(key, value string) { c.w.Header().Set(key, value) }
 //	w := c.Writer()
 //	for ev := range events {
 //		fmt.Fprintf(w, "data: %s\n\n", ev)
-//		if err := c.Flush(); err != nil { return err }  // 首刷落 200，此后逐段推送
+//		if err := c.Flush(); err != nil { return err }  // 首刷落 Status() 设置（缺省 200），此后逐段推送
 //	}
 //
 // 返回的是框架的包装器：状态码与响应体积照常被 AccessLog 采集（写多少字节就记多少）。
@@ -135,17 +135,29 @@ func (c *Ctx) SetHeader(key, value string) { c.w.Header().Set(key, value) }
 // 要升级协议（WebSocket）需要原始 writer：用 `Wrap` 包一个 stdlib handler（代价是拿不到 `*Ctx`）。
 func (c *Ctx) Writer() http.ResponseWriter { return c.w }
 
-// Status 只**设置**状态码，不立即写出；由 JSON/Text 或引擎收尾时落定。
+// Status 只**设置**状态码，不立即写出；由 JSON / Text、首刷（直接写字节 / Flush）
+// 或引擎收尾时落定。首刷之后响应头已发出，再调 Status 不会改变已落定的状态码。
 func (c *Ctx) Status(code int) *Ctx {
-	c.status = code
+	c.w.statusHint = code
 	return c
 }
 
 // JSON 写出 JSON 响应。
+//
+// **先编码成功、后写响应头**：编码失败（chan / func / 环）在写头之前返回
+// error，交由统一错误映射成 5xx —— 否则 WriteHeader 先生效，「已写响应不被
+// 覆盖」规则会把错误吞成一个 200 空体（与 c.HTML 同一课，见其注释）。
+// 编码走 json.Encoder → buffer：成功路径的字节与直接编码到响应逐一致
+// （含 Encoder 的尾换行）。
 func (c *Ctx) JSON(code int, v any) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(v); err != nil {
+		return err
+	}
 	c.w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	c.w.WriteHeader(code)
-	return json.NewEncoder(c.w).Encode(v)
+	_, err := buf.WriteTo(c.w)
+	return err
 }
 
 // Text 写出纯文本响应。
@@ -157,23 +169,20 @@ func (c *Ctx) Text(code int, s string) error {
 }
 
 // Flush 把已写内容刷到客户端（SSE / 流式响应）。
-func (c *Ctx) Flush() error {
-	f, ok := c.w.ResponseWriter.(http.Flusher)
-	if !ok {
-		return errors.New("web: ResponseWriter does not support Flush")
-	}
-	c.w.WriteHeader(http.StatusOK)
-	f.Flush()
-	return nil
-}
+//
+// 首刷落 Status() 设置的状态码（缺省 200）——首刷之后响应头已发出，
+// 再调 Status 不会改变已落定的状态码。底层 writer 不支持 http.Flusher 时
+// 返回明确 error，且不产生任何写出副作用。
+func (c *Ctx) Flush() error { return c.w.flush() }
 
 // responseWriter 包装 http.ResponseWriter，采集状态码与响应体积。
 // 首次写入生效：重复 WriteHeader 是 no-op（不产生 superfluous WriteHeader 警告）。
 type responseWriter struct {
 	http.ResponseWriter
-	status int
-	bytes  int
-	wrote  bool
+	status     int // 已落定的状态码（AccessLog 采样）
+	statusHint int // Status() 设置的意图：任何隐式落码都用它，0 → 200
+	bytes      int
+	wrote      bool
 }
 
 func (w *responseWriter) WriteHeader(code int) {
@@ -185,20 +194,43 @@ func (w *responseWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
-func (w *responseWriter) Write(b []byte) (int, error) {
-	if !w.wrote {
-		w.WriteHeader(http.StatusOK)
+// writeHeaderNow 落定首刷状态码：吃 Status() 的提示（缺省 200）。
+//
+// 三条隐式落码路径共用它——Write、flush、引擎收尾。**写一段再 Flush 是流式
+// handler 的自然顺序**，若只有 flush 吃提示，`Status(201)` 会被第一次 Write
+// 的隐式 200 吃掉（gin 的 WriteHeaderNow() 是同一语义）。
+func (w *responseWriter) writeHeaderNow() {
+	if w.wrote {
+		return
 	}
+	code := w.statusHint
+	if code == 0 {
+		code = http.StatusOK
+	}
+	w.WriteHeader(code)
+}
+
+func (w *responseWriter) Write(b []byte) (int, error) {
+	w.writeHeaderNow()
 	n, err := w.ResponseWriter.Write(b)
 	w.bytes += n
 	return n, err
 }
 
-func (w *responseWriter) Flush() {
-	if !w.wrote {
-		w.WriteHeader(http.StatusOK)
+// Flush 实现 http.Flusher（供 c.Writer().(http.Flusher) 与
+// http.ResponseController.Flush() 路径调用）。接口签名无返回值，无法把
+// 「底层不支持」报出——需要明确 error 请用 Ctx.Flush()。
+func (w *responseWriter) Flush() { _ = w.flush() }
+
+// flush 是两条 Flush 路径（Ctx.Flush 与包装器 Flush）的唯一实现：
+// 首刷落 Status() 提示（缺省 200）；底层不支持 http.Flusher 时返回明确
+// error，且不写任何内容（显式失败不产生副作用）。
+func (w *responseWriter) flush() error {
+	f, ok := w.ResponseWriter.(http.Flusher)
+	if !ok {
+		return errors.New("web: ResponseWriter does not support Flush")
 	}
-	if f, ok := w.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
+	w.writeHeaderNow()
+	f.Flush()
+	return nil
 }

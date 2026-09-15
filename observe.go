@@ -56,26 +56,55 @@ func (e *Engine) resolveTraceID(r *http.Request) string {
 	return generateTraceID()
 }
 
+// zeroTraceID 是全零 trace-id。W3C traceparent 明文规定 trace-id 不得为全零
+// （B3 未禁止）——两条入站路径统一按「不存在」处理：否则带该头的请求会在日志里
+// 共享同一条 TraceID，比链路断裂更难排查。
+const zeroTraceID = "00000000000000000000000000000000"
+
 // traceIDFromHeader 读取 W3C traceparent / B3 的 trace-id。
-// 格式不符（长度、字符集）一律视为不存在 —— 不信任畸形输入。
+// traceparent 的 trace-id 必须是 32 位 hex（W3C 规定）；B3 接受 32hex 与
+// 16hex（Zipkin 64-bit，左垫 0 归一）。格式不符（长度、字符集）或全零一律
+// 视为不存在 —— 不信任畸形输入。
 func traceIDFromHeader(r *http.Request) string {
 	if tp := strings.TrimSpace(r.Header.Get("Traceparent")); tp != "" {
 		// version-traceid-parentid-flags
 		parts := strings.Split(tp, "-")
 		if len(parts) >= 3 && isHex32(parts[1]) {
-			return strings.ToLower(parts[1])
+			if id := strings.ToLower(parts[1]); id != zeroTraceID {
+				return id
+			}
 		}
 	}
-	if b3 := strings.TrimSpace(r.Header.Get("X-B3-TraceId")); isHex32(b3) {
-		return strings.ToLower(b3)
+	if b3 := strings.TrimSpace(r.Header.Get("X-B3-TraceId")); b3 != "" {
+		if id := normalizeB3(b3); id != zeroTraceID {
+			return id
+		}
 	}
 	return ""
 }
 
-func isHex32(s string) bool {
-	if len(s) != 32 {
-		return false
+// normalizeB3 归一 B3 trace-id：32hex（128-bit）原样小写；16hex（Zipkin
+// 64-bit）左垫 16 个 0 归一为 32hex；其余返回空串（视为不存在）。
+//
+// 补零方向取「高 64 位为零」这一多数 tracer 的约定 —— B3 规格只要求
+// 「32 或 16 个 hex 字符、标识符不透明」，**未规定** 64→128 的补零方向
+// （openzipkin/b3-propagation 的 README 未涉及）。将来若要与某个 128-bit
+// 上游按位对齐，以对方的位序为准。
+func normalizeB3(s string) string {
+	switch {
+	case isHex32(s):
+		return strings.ToLower(s)
+	case isHex16(s):
+		return "0000000000000000" + strings.ToLower(s)
 	}
+	return ""
+}
+
+func isHex32(s string) bool { return len(s) == 32 && isHex(s) }
+
+func isHex16(s string) bool { return len(s) == 16 && isHex(s) }
+
+func isHex(s string) bool {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
