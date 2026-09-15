@@ -17,6 +17,12 @@ coverage.html
 .DS_Store
 Thumbs.db
 
+# Secrets（与 SECURITY.md / CONTRIBUTING.md 的声明对齐；仓库已开 secret scanning + push protection）
+.env
+.env.*
+*.pem
+*.secrets
+
 # Scratch（本地草稿与一次性实验）
 _scratch/
 .tmp-*

@@ -662,7 +662,7 @@ v1 只做当前视图：`app.Debug("/debug/pulse")` 输出 `kernel.FiberSnapshot
 | 请求级数据对 kernel 插件**通用**可见 | 不做——上游 v0.2.1 已给出 `kernel.Local()`（这条"属上游改动"的阻塞已解除），但把整个请求 KV 袋挂进 scope 是每条绑定 ≈ +250 ns / +12 allocs（同轮实测，表 B），且语义上把"通用容器"当成"语义性绑定"。只做 `WithCollector()` 这一处显式、边界清楚的用例 |
 | 内置 agent / LLM 相关的观测与装配接线 | 不做——pulse-web **只依赖 kernel 与 observability**，与 pulse 其余组件（llm / loop / host / toolset…）无耦合；需要时由调用方在自己的装配代码里显式接入 |
 
-## 仓库结构（初版）
+## 仓库结构
 
 ```
 pulse-web/
@@ -688,8 +688,19 @@ pulse-web/
 │   └── favicon.svg            # 16px 简化版（5 柱）+ 明暗自适应
 ├── bench/                     # 性能回归基线 + 分配预算门禁（go test ./bench/）
 │   └── muxprobe/              # 路由选型的一次性实测程序（「路由选型的边界」的数据来源）
-└── .github/workflows/ci.yml   # build / vet / gofmt 判空 / test -race / 分配预算 / bench 编译检查
+├── docs/design/               # 设计文档（本文件）
+├── LICENSE                    # MIT
+├── CONTRIBUTING.md            # 贡献流程：Issue 五段 / PR 六段 / 本地门禁 / review 约定（中英双语）
+├── SECURITY.md                # 漏洞上报与范围界定（中英双语）
+├── CODE_OF_CONDUCT.md         # Contributor Covenant v2.1（官方英文原文 + 中文导读）
+├── AGENTS.md                  # 给 AI coding agent 的仓库指南
+└── .github/
+    ├── PULL_REQUEST_TEMPLATE.md
+    ├── ISSUE_TEMPLATE/        # bug_report.yml / feature_request.yml / config.yml
+    └── workflows/ci.yml       # build / vet / gofmt 判空 / test -race / 分配预算 / bench 编译检查
 ```
+
+**协作规范面**（`LICENSE` 与四个规范文件、`.github` 下的模板）不是框架设计的一部分，但同样是仓库的事实源：流程规则改**这些文件**，不要只在 Issue 评论里约定——评论会沉，文件不会。四份文件的契约关系是：`CONTRIBUTING.md` 管代码怎么提，`CODE_OF_CONDUCT.md` 管人怎么相处，`SECURITY.md` 管漏洞往哪报，`AGENTS.md` 管 agent 怎么在这个仓库里干活。
 
 ## 品牌标识
 
