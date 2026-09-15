@@ -5,16 +5,17 @@ Both halves are equivalent: English first, 中文在后.
 
 ## Supported versions
 
-Fixes land on `main` and in the newest release. Older `0.x` releases are not maintained.
+**There is no tagged release yet.** Until the first `vX.Y.Z` tag exists, `main` is the only
+supported version — the rows below apply from that first tag onward.
 
 | Version | Supported |
 | --- | --- |
 | `main` | ✅ |
-| newest `v0.x` release (see [Releases](https://github.com/Luo-root/pulse-web/releases)) | ✅ |
+| newest `v0.x` release (see [Releases](https://github.com/Luo-root/pulse-web/releases)) | ✅ *(from the first tag onward)* |
 | older `0.x` releases | ❌ |
 
-If you are on an older release, the fix will be in the newest one — there are no backports
-during the `0.x` line.
+Fixes land on `main` and in the newest release. There are no backports during the `0.x` line,
+so the fix for an older release is always the newest one.
 
 ## Reporting a vulnerability
 
@@ -92,8 +93,9 @@ what is described here, that part is worth reporting.
   framework always generates its own. This is a deployment trade-off, stated in the option's
   documentation.
 - **The request body has no size limit by default** (`WithMaxBodyBytes` is unset), matching the
-  default shape of gin and echo: a limit is a business policy. Production deployments set the
-  option or put a limit in the reverse proxy.
+  default shape of gin and echo: a limit is a business policy. Production deployments either set
+  the option (global), attach `BodyLimit` to the routes and groups that need a different limit
+  (it can only tighten the global one, never loosen it), or set a limit in the reverse proxy.
 - **`http.request` records are written for every request** (unless `WithoutAccessLog()` is set),
   including failed ones. The record carries method, route template, path, status, duration,
   response size and peer address — see the next section for what it cannot carry.
@@ -133,15 +135,16 @@ Pulse-Web 目前仍在 1.0 之前（`v0.x`）。本文件说明漏洞上报方�
 
 ### 支持范围
 
-修复只落在 `main` 与最新一版 release 上；更早的 `0.x` 版本不再维护。
+**目前还没有 tag 过的 release。** 在首个 `vX.Y.Z` 之前，唯一受支持的版本是 `main`；
+下表自首个 tag 起生效。
 
 | 版本 | 是否支持 |
 | --- | --- |
 | `main` | ✅ |
-| 最新的 `v0.x` release（见 [Releases](https://github.com/Luo-root/pulse-web/releases)） | ✅ |
+| 最新的 `v0.x` release（见 [Releases](https://github.com/Luo-root/pulse-web/releases)） | ✅（自首个 tag 起） |
 | 更早的 `0.x` 版本 | ❌ |
 
-如果你还在旧版本上，修复会出现在最新版里——`0.x` 期间不做 backport。
+修复落在 `main` 与最新一版 release 上。`0.x` 期间不做 backport，所以旧版本上的修复就是升级到最新版。
 
 ### 上报漏洞
 
@@ -203,7 +206,8 @@ Pulse-Web 目前仍在 1.0 之前（`v0.x`）。本文件说明漏洞上报方�
   出现在你日志里的 trace-id。若服务直接暴露，把它设成 `false`，框架就总是自生成。这是部署取舍，
   写在该选项的文档里。
 - **请求体默认不设上限**（不传 `WithMaxBodyBytes`），与 gin、echo 的默认形态一致：上限值是业务
-  策略。生产部署要么设这个选项，要么在反代设限。
+  策略。生产部署的三条出口：设这个选项（全局）、给需要不同上限的路由 / 分组挂 `BodyLimit`
+  （只能收紧全局那道，不能放宽）、或者在反代设限。
 - **每个请求都会写 `http.request` 记录**（设了 `WithoutAccessLog()` 时除外），包括失败的请求。
   记录里是 method、路由模板、路径、状态码、耗时、响应体积与对端地址——**装不下**什么见下一节。
 - **写出侧超时默认关闭。** `ServerConfig` 自带读侧保护（`ReadHeaderTimeout` 5s、

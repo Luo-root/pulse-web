@@ -93,4 +93,4 @@ docs/design/            # 设计文档（决策与验收清单的事实源）
 - **不要用 `Get-Content | … | Set-Content` 改文件内容**（PS 5.1 默认 ANSI 会静默损坏 UTF-8）；用 `read`/`write`/`edit` 工具，或写 Python 脚本（`encoding='utf-8'`）。
 - **删文件会被安全策略拦**：用移走（`_scratch/`）或移到备份位置，不要 `Remove-Item`。
 - **基线对照用 `git worktree add --detach <dir> <base>`**，两边跑同一组输入再逐字节 diff。
-- **Python 回写文件会把 CRLF 变 LF**，`git status` 会假报 modified（提交的 blob 不受影响）；用 `git checkout -- <file>` 还原，或用 `.gitattributes` 的 `* text=auto eol=lf` 口径解释它。
+- **Python 改文件时注意行尾**：CRLF 变 LF 要**两个条件同时成立**——读侧是文本模式（`read_text` / `open('r')`，会把 `\r\n` 规整成 `\n`）**且**写侧不回译（`write_bytes` / `open('wb')`，或 `open('w', newline='')`）。实测 6 种组合里只有这 3 种会变；「文本读 + 文本写」会被写侧把 `\n` 回译成 `\r\n` 而往返不变。要绝对稳妥就两边都用二进制。变了的后果是 `git status` 假报 modified（提交的 blob 不受影响）——用 `git checkout -- <file>` 还原。
