@@ -19,8 +19,12 @@ const (
 	attrErrorType    = "error.type"
 )
 
-// 列宽与版式常量。列宽按**显示宽度**算，不是字节数：`µ` 是 2 字节 1 列，
-// 按 len() 补齐会错位（宽度口径见 observability.DisplayWidth）。
+// 列宽与版式常量。列宽按**显示宽度**算，不是字节数、也不是 rune 数：`µ` 是
+// 2 字节 1 列（按 len() 补齐会错位），全角字符是 1 rune **2 列**（按 rune 补齐会
+// 多补、把后续列整体推右）。宽度口径走上游 `observability.DisplayWidth`。
+//
+// 迁移到 LineSink 之前这里用的是 `utf8.RuneCount`——ASCII 下等价，全角下不等价，
+// 属于本次迁移的第二处行为变化（见 `TestConsoleSinkPaddingUsesDisplayWidth`）。
 const (
 	consoleTimeLayout = "2006/01/02 - 15:04:05" // 21 列
 	consoleSep        = " | "
@@ -265,12 +269,15 @@ func appendHTTPLine(dst []byte, r observability.Record, color bool) []byte {
 	// 固定列盖不住的属性**不丢**：未知键按插入序附成一组 ` | k=v k=v`
 	// （中间件 / 业务往访问记录里加的字段走这里）。
 	//
-	// 传进 `AppendAttrsExcept` 的必须只是「**真的渲染成了列**」的键（consumed），
-	// 不是「这个名字属于某一列」：列键类型不符时固定列并没有渲染它，它就必须落进
+	// 传进 `AppendAttrsExcept` 的必须只是「**真的渲染成了列**」的键，不是
+	// 「这个名字属于某一列」：列键类型不符时固定列并没有渲染它，它就必须落进
 	// 兜底组——只按名字跳过会让它在固定列与兜底组之间两头落空（属性静默消失）。
+	// 所以 `skip` 是按 `okX` 逐个攒的，而不是拿一张列键表整表传进去。
 	//
-	// 先比条数再拼分隔符：条数相等即无未知键，常见路径完全不写这一组
-	// （`Len()` 问的是「组非空」，不是「有可渲染项」）。
+	// 分隔符**先写、再按产出长度决定撤回**，不能拿 `Len()` 判空：`Len()` 问的是
+	// 「组非空」，不是「有可渲染项」——列键全被吃掉时 `AppendAttrsExcept` 产出
+	// 0 字节（与空组同形），先写的分隔符就成了悬空的 ` | `。上游 godoc 点名了这两条
+	// （见 `observability.AppendAttrsExcept`），本仓不另立一套判空口径。
 	var skip [6]string
 	n := 0
 	if okMethod {
@@ -297,9 +304,11 @@ func appendHTTPLine(dst []byte, r observability.Record, color bool) []byte {
 		skip[n] = attrHTTPBodySize
 		n++
 	}
-	if r.Attrs.Len() > n {
-		dst = append(dst, consoleSep...)
-		dst = observability.AppendAttrsExcept(dst, r.Attrs, skip[:n]...)
+	mark := len(dst)
+	dst = append(dst, consoleSep...)
+	dst = observability.AppendAttrsExcept(dst, r.Attrs, skip[:n]...)
+	if len(dst) == mark+len(consoleSep) {
+		dst = dst[:mark] // 固定列全吃掉了，这一组不写
 	}
 	return dst
 }

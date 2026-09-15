@@ -55,6 +55,23 @@ func TestConsoleSinkHTTPLine(t *testing.T) {
 	}
 }
 
+// TestConsoleSinkPaddingUsesDisplayWidth 钉住列补齐按**显示宽度**算，不是 rune 数。
+//
+// 全角字符占 2 列：`客户端-甲:1234` 是 10 rune / 14 显示列，正确补齐后该列占满
+// 15 显示列（补 1 个空格）。按 rune 数补会补 5 个空格、把后续列整体推右 4 格——
+// 旧实现就是那样（`utf8.RuneCount`），迁移时换成了上游 `DisplayWidth`。
+func TestConsoleSinkPaddingUsesDisplayWidth(t *testing.T) {
+	rec := httpRecord("200", 585100*time.Nanosecond)
+	observability.Set(&rec.Attrs, attrClientAddr, "客户端-甲:1234")
+
+	got := renderLine(t, rec)
+	want := "2026/09/14 - 08:30:00 | 200 |   585.1µs | 客户端-甲:1234  | GET     /users/42" +
+		" | route=/users/{id} | size=29 | host=pulse-web | trace=8f2e1a3b4c5d6e7f8a9b0c1d2e3f4a5b\n"
+	if got != want {
+		t.Fatalf("客户端列应按显示宽度占满 %d 列（全角算 2 列）：\n got=%q\nwant=%q", colClient, got, want)
+	}
+}
+
 // consoleFields 按 ` | ` 切列并去掉两侧填充（断言列内容时不必逐个数空格）。
 func consoleFields(line string) []string {
 	raw := strings.Split(strings.TrimSuffix(line, "\n"), consoleSep)
