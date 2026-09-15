@@ -41,6 +41,8 @@ PULSE | 2026/09/14 - 08:30:00 | pulse.kernel.fiber_state host=svc fiber=db state
 
 要机器可读 / 接既有日志管道：`web.New(web.WithSink(observability.SlogSink{...}))`（或 `NewAsyncSink`、`NewLineSink`）——**只换出口，装配不变**。
 
+> `WithRoot` 注意：接入既有 kernel 树时，`Run` / `Serve` 返回后该 root 会被级联销毁（连同挂在它上面的插件）——不要在 Run 返回后继续使用。
+
 ### 流式响应（SSE）
 
 `c.Writer()` 拿响应写出器直接写字节，`c.Flush()` 逐段推给客户端：
@@ -64,7 +66,7 @@ app.GET("/events", func(c *web.Ctx) error {
 ```
 
 写出器是框架的包装器：状态码与响应体积照常进 AccessLog（写多少字节就记多少）。能力面是**有意的窄口**——只保证 `http.Flusher`（`http.NewResponseController(w).Flush()` 也可用）；`Hijacker` / `Pusher` / `FlushError` / `SetWriteDeadline` **不透出**，要升级协议拿原始 writer 请用 `web.Wrap` 包 stdlib handler。
-（`Flush` 的首刷会落 200，所以流式接口不要在流里再改状态码。）
+（首刷 = **第一次写出**：`c.Writer().Write`、`c.Flush()`、handler 返回三处里的最先一个；它落 `Status()` 设置的状态码（缺省 200）。首刷之后响应头已发出，流式接口要在首刷**之前**设好状态码。）
 
 ## 请求体绑定
 

@@ -231,6 +231,49 @@ func TestStatusOnlyResponse(t *testing.T) {
 	}
 }
 
+func TestJSONEncodeFailureMappedTo500(t *testing.T) {
+	// 编码失败（不可编码的值）必须在写头之前暴露：客户端拿到 500 + 统一
+	// 错误体，而不是 200 空响应（c.HTML 的同一课，见其注释）。
+	e, _ := newTestEngine(t)
+	e.GET("/j", func(c *Ctx) error { return c.JSON(http.StatusOK, make(chan int)) })
+
+	rec := doReq(e, "GET", "/j", nil)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d，want 500（body=%q）", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"internal"`) {
+		t.Fatalf("body = %q，want 统一错误体", rec.Body.String())
+	}
+}
+
+func TestJSONBytesStable(t *testing.T) {
+	// 成功路径字节与「编码器直写」逐一致（保留 Encoder 的尾换行）。
+	e, _ := newTestEngine(t)
+	e.GET("/j", func(c *Ctx) error { return c.JSON(http.StatusOK, map[string]int{"a": 1}) })
+	rec := doReq(e, "GET", "/j", nil)
+	if got, want := rec.Body.String(), "{\"a\":1}\n"; got != want {
+		t.Fatalf("body = %q，want %q", got, want)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json; charset=utf-8" {
+		t.Fatalf("Content-Type = %q", ct)
+	}
+}
+
+func TestPanicHTTPErrorMapsTo500(t *testing.T) {
+	// mapper 注释的承诺：panic(web.NotFound(...)) 不返回 404 —— 一律 500
+	// （要 4xx 请 return）；业务码不泄露进响应体。
+	e, _ := newTestEngine(t)
+	e.GET("/p", func(c *Ctx) error { panic(NotFound("gone", nil)) })
+
+	rec := doReq(e, "GET", "/p", nil)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d，want 500", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "gone") {
+		t.Fatalf("业务码不应泄露：%q", rec.Body.String())
+	}
+}
+
 func TestErrorHandlerFailureFallsBackTo500(t *testing.T) {
 	e, _ := newTestEngine(t, WithErrorHandler(func(c *Ctx, err error) error {
 		panic("mapper exploded")

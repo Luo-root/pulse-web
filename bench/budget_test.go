@@ -47,7 +47,14 @@ const (
 	// 一个缓冲（256 B）在 20000 次请求上的摊销——改成内嵌 LineSink 后归零。
 	budgetConsoleSinkAllocs = 22
 	budgetConsoleSinkBytes  = 6314
-	budgetSlackBytes        = 8
+	// JSON 响应那一档：c.JSON 自 #33 起先编码到 bytes.Buffer、成功才写头，
+	// 比「直接编码进响应」多一次分配——两棵树同一探针实测 main 23 → 本分支 25
+	// allocs/op、B/op 6341 → 6438（+2 allocs / +97 B），代价换「编码失败不再发
+	// 200 空体」。其余各档 handler 都用 c.Text，不经过这条路径，所以单列一档把
+	// 它纳入基线（review 提出，PR #35）。
+	budgetJSONAllocs = 25
+	budgetJSONBytes  = 6438
+	budgetSlackBytes = 8
 )
 
 // TestRequestPathAllocBudget 把表 B 的分配计数固化成断言。
@@ -74,6 +81,8 @@ func TestRequestPathAllocBudget(t *testing.T) {
 		// 成本」分开量），这一档把默认装配实际用的 ConsoleSink 接回来——出口
 		// 是 0 分配，所以它与 nopSink 档的分配计数应当相同，差在这里就是回归。
 		{"default+console-sink", enginePathAppConsoleSink, budgetConsoleSinkAllocs, budgetConsoleSinkBytes},
+		// JSON 响应那一档：把「先编码到 buffer、成功才写头」这条路径也钉住。
+		{"default+json", enginePathAppJSON, budgetJSONAllocs, budgetJSONBytes},
 	}
 
 	for _, c := range cases {
