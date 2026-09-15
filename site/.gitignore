@@ -1,0 +1,6 @@
+node_modules/
+.vitepress/dist/
+.vitepress/cache/
+
+# 品牌资产由 scripts/sync-assets.mjs 从仓库的 assets/ 生成，事实源只有那一处
+public/*.svg

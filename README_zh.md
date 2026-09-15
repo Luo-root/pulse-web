@@ -7,6 +7,7 @@
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-green.svg"></a>
   <a href="https://github.com/Luo-root/pulse-web/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Luo-root/pulse-web/actions/workflows/ci.yml/badge.svg"></a>
   <a href="#安装"><img alt="依赖：标准库 + 两个 pulse 包" src="https://img.shields.io/badge/deps-stdlib%20%2B%202%20packages-2563eb.svg"></a>
+  <a href="https://luo-root.github.io/pulse-web/"><img alt="文档：English | 中文" src="https://img.shields.io/badge/docs-English%20%7C%20%E4%B8%AD%E6%96%87-2563eb.svg"></a>
 </div>
 
 <br />
@@ -213,6 +214,7 @@ http.Handle("/app/", http.StripPrefix("/app", app.Handler()))    // 引擎作为
 
 ## 文档
 
+- [文档站点](https://luo-root.github.io/pulse-web/)——指南、观测专题与公开的性能数据
 - [设计文档](docs/design/web-framework-design.md)——定位、决策、API 面、运行时契约、观测设计，以及一份明确的「不做什么」清单，含成本分解与和 gin 的真实负载对比
 - [Issue #1](https://github.com/Luo-root/pulse-web/issues/1)——上面那些决策被定下来的设计讨论
 

@@ -7,6 +7,7 @@
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-green.svg"></a>
   <a href="https://github.com/Luo-root/pulse-web/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Luo-root/pulse-web/actions/workflows/ci.yml/badge.svg"></a>
   <a href="#install"><img alt="Deps: standard library + two pulse packages" src="https://img.shields.io/badge/deps-stdlib%20%2B%202%20packages-2563eb.svg"></a>
+  <a href="https://luo-root.github.io/pulse-web/"><img alt="Docs: English | 中文" src="https://img.shields.io/badge/docs-English%20%7C%20%E4%B8%AD%E6%96%87-2563eb.svg"></a>
 </div>
 
 <br />
@@ -213,6 +214,7 @@ What it is not: a batteries-included micro-framework with a large middleware cat
 
 ## Documentation
 
+- [Documentation site](https://luo-root.github.io/pulse-web/) — guides, the observability walkthrough and the public performance numbers
 - [Design document](docs/design/web-framework-design.md) — positioning, decisions, API surface, runtime contracts, observability design and an explicit "what we do not do" list, including the measured cost breakdown and the load-test comparison with gin
 - [Issue #1](https://github.com/Luo-root/pulse-web/issues/1) — the design discussion where those decisions were settled
 
