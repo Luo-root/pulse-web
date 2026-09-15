@@ -66,6 +66,36 @@ app.GET("/events", func(c *web.Ctx) error {
 写出器是框架的包装器：状态码与响应体积照常进 AccessLog（写多少字节就记多少）。能力面是**有意的窄口**——只保证 `http.Flusher`（`http.NewResponseController(w).Flush()` 也可用）；`Hijacker` / `Pusher` / `FlushError` / `SetWriteDeadline` **不透出**，要升级协议拿原始 writer 请用 `web.Wrap` 包 stdlib handler。
 （`Flush` 的首刷会落 200，所以流式接口不要在流里再改状态码。）
 
+## 请求体绑定
+
+`c.Bind()` 按 Content-Type 分派——JSON / XML / form-urlencoded / multipart 一套覆盖，失败按语义映射错误码：
+
+```go
+app.POST("/users", func(c *web.Ctx) error {
+    var in CreateUser
+    if err := c.Bind(&in); err != nil {
+        return err // 400 invalid_body / 413 body_too_large / 415 unsupported_media_type
+    }
+    return c.JSON(201, in)
+})
+
+app.GET("/users", func(c *web.Ctx) error {
+    var q ListQuery
+    if err := c.Bind(&q); err != nil { // 无 body 的请求自动落到 query
+        return err // 400 invalid_query
+    }
+    return c.JSON(200, filter(q))
+})
+```
+
+表单字段用 `form:"..."` / `query:"..."` tag（无 tag 用字段名，大小写不敏感）；支持 string / bool / 数值全系、多值 slice（`?ids=1&ids=2` → `[]int`）与指针字段；multipart 额外支持 `*multipart.FileHeader`。
+
+请求体默认**不设上限**（对齐 gin / echo 的默认形态——上限值是业务策略）；生产建议显式设置，或依赖前置反代（nginx 默认 `client_max_body_size 1m`）：
+
+```go
+app := web.New(web.WithMaxBodyBytes(2 << 20)) // 2 MiB：超限读取立即失败 → 413
+```
+
 ## 日志落地（持久化归谁）
 
 **默认档只写 stdout，它本身不是持久化**：进程只把行写进 fd 1，落盘、轮转、保留都由平台负责。

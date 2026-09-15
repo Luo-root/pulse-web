@@ -69,6 +69,7 @@ type config struct {
 	server           ServerConfig
 	templates        *TemplateConfig
 	collector        bool
+	maxBodyBytes     int64
 }
 
 func defaultConfig() config {
@@ -146,6 +147,22 @@ func WithErrorHandler(h ErrorHandler) Option {
 // WithServer 覆盖 Server 参数：非零字段生效，零值字段保持默认。
 func WithServer(sc ServerConfig) Option {
 	return func(cfg *config) { cfg.server = mergeServer(cfg.server, sc) }
+}
+
+// WithMaxBodyBytes 设置请求体读取上限（字节）：读取超过 n 的部分立即失败
+// （*http.MaxBytesError），`Ctx.Bind` 将其映射为 413 + code body_too_large。
+//
+// 默认 0 = 不限——上限值是业务策略（JSON API 2MB 与文件上传 100MB 不可能
+// 同值），与 gin / echo 的默认形态一致（gin 无默认限制；echo 的 BodyLimit
+// 中间件需显式启用）。生产建议显式设置，或依赖前置反代
+// （nginx 默认 client_max_body_size 1m）。
+//
+// 实现分层：请求入口先按 Content-Length 快速失败（声明即超限时不读 body），
+// 声明未知（chunked）或声明偏小时由 http.MaxBytesReader 读取闸门兜底。
+// 上限对**所有**读取路径生效（绑定、用户自读 body、中间件读 body），
+// 不依赖调用方记得包一层。
+func WithMaxBodyBytes(n int64) Option {
+	return func(cfg *config) { cfg.maxBodyBytes = n }
 }
 
 // Minimal 关闭默认装配（默认 Sink、Trace、访问日志），保留路由骨架与 panic 兜底。
@@ -247,6 +264,7 @@ type Engine struct {
 	errorHandler     ErrorHandler
 	templates        *templateSet
 	collector        bool
+	maxBodyBytes     int64
 
 	prefix string
 	mw     []Middleware
@@ -304,6 +322,7 @@ func New(opts ...Option) *Engine {
 		server:           cfg.server,
 		errorHandler:     handler,
 		collector:        cfg.collector,
+		maxBodyBytes:     cfg.maxBodyBytes,
 		life:             &lifecycle{},
 	}
 
@@ -491,6 +510,22 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		scope.Dispose()
 		e.finish(c, rw)
 	}()
+
+	// 请求体上限（WithMaxBodyBytes）：声明即超限 → 快速失败，不读 body；
+	// 声明未知 / 偏小时由读取闸门兜底。MaxBytesReader 的 w 传**原始 writer**
+	// —— net/http 的「超限关连接」通知走未导出接口 requestTooLarger，
+	// 框架的 responseWriter 包装器不实现它（传包装器会静默丢这个语义）。
+	if e.maxBodyBytes > 0 {
+		if r.ContentLength > e.maxBodyBytes {
+			c.setErr(&HTTPError{
+				Status: http.StatusRequestEntityTooLarge,
+				Code:   "body_too_large",
+				cause:  fmt.Errorf("content-length %d exceeds limit %d", r.ContentLength, e.maxBodyBytes),
+			})
+			return
+		}
+		req.Body = http.MaxBytesReader(w, r.Body, e.maxBodyBytes)
+	}
 
 	e.mux.ServeHTTP(rw, req)
 }

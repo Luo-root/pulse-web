@@ -18,6 +18,13 @@
 //		}
 //		return c.JSON(http.StatusOK, u)
 //	})
+//	app.POST("/users", func(c *web.Ctx) error {
+//		var in CreateUser
+//		if err := c.Bind(&in); err != nil {   // 按 Content-Type 分派：JSON / XML / form / multipart
+//			return err                        // 400 / 413 / 415 已按语义映射
+//		}
+//		return c.JSON(http.StatusCreated, in)
+//	})
 //	app.Run(":8080")                          // 阻塞：信号 → drain → OnShutdown → root.Dispose → Sink flush
 //
 // # 运行时契约

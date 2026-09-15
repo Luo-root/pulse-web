@@ -14,7 +14,7 @@
 1. **Engine**——路由注册、分组、中间件（闭包组合，洋葱模型）
 2. **Ctx**——路径参数（读 `Request.PathValue`，不另存）、查询、请求级 KV、响应写出（JSON / Text / Status / Header / Writer / Flush）
 3. **错误模型**——`HTTPError` + `StatusCoder` 接口 + 默认 mapper（脱敏）
-4. **JSON 绑定**——stdlib `encoding/json`（Go 1.27 起由 v2 实现支撑）
+4. **请求体绑定**——`Ctx.Bind` 按 Content-Type 分派（JSON / XML / form-urlencoded / multipart，全 stdlib 实现），`BindQuery` 显式 query；可选 `WithMaxBodyBytes` 上限（见 [#32](https://github.com/Luo-root/pulse-web/issues/32)）
 5. **请求作用域**——每请求派生 kernel scope，handler 返回即 `Dispose`（在写响应之前）
 6. **一等观测**——装配期 `Bootstrap` + 请求期 `Trace` + `AccessLog`；32hex TraceID；`X-Trace-Id` 回写
 7. **进程级装配面**——`app.Root()` / `web.WithRoot(k)`；其余用 kernel 原生 API（`Provide` / `Use` / `Loader`）
@@ -261,6 +261,8 @@ app.OnShutdown(fn func(ctx context.Context) error) // 单回调
 ```go
 func (c *Ctx) Path(name string) string   // == c.Request().PathValue(name)（同源，不另存）
 func (c *Ctx) Query(name string) string
+func (c *Ctx) Bind(v any) error          // 请求体绑定：按 Content-Type 分派；无 body 落 query（#32）
+func (c *Ctx) BindQuery(v any) error     // query 参数绑定（GET / 过滤场景）
 func (c *Ctx) Request() *http.Request
 func (c *Ctx) TraceID() string
 
@@ -479,7 +481,7 @@ app.POST("/jobs", func(c *web.Ctx) error {
 
 `WithoutAccessLog()` 关闭访问日志（用户已接自己的日志系统时用）——只关 AccessLog，`Trace` 与 panic 兜底不受影响。
 
-v1 选项面：`New()` / `Minimal()` / `WithSink` / `WithoutAccessLog` / `WithRoot` / `WithHostID` / `WithServer` / `WithErrorHandler` / `WithTemplates` / `WithTrustedTraceHeader` / `WithCollector` / `OnShutdown`。注意 **`AsyncSink` 不在选项面**——它是**出口实现**，用 `WithSink(observability.NewAsyncSink(...))` 接入，框架不另造缓冲层。
+v1 选项面：`New()` / `Minimal()` / `WithSink` / `WithoutAccessLog` / `WithRoot` / `WithHostID` / `WithServer` / `WithErrorHandler` / `WithTemplates` / `WithMaxBodyBytes` / `WithTrustedTraceHeader` / `WithCollector` / `OnShutdown`。注意 **`AsyncSink` 不在选项面**——它是**出口实现**，用 `WithSink(observability.NewAsyncSink(...))` 接入，框架不另造缓冲层。
 
 ### 默认出口：给人读的控制台列式（`ConsoleSink`）
 
@@ -647,6 +649,7 @@ pulse-web/
 │                              # ServeHTTP（时序）、Engine 层收尾、
 │                              # Run / Serve（信号注册）/ serve（执行体）、Handler、OnShutdown
 ├── context.go                 # Ctx、请求级 KV、响应写出（Writer / Flush / JSON / Text）、responseWriter 包装器
+├── bind.go                    # 请求体 / query 绑定：Content-Type 分派 + form / query 映射器（#32）
 ├── errors.go                  # HTTPError / StatusCoder / PanicError / 默认 mapper
 ├── observe.go                 # TraceID 生成与上游头解析（32hex）
 ├── wrap.go                    # stdlib 互操作（Wrap）
@@ -680,6 +683,8 @@ pulse-web/
   证据：`TestDefaultServerConfigValues`、`TestWithServerMergesNonZeroFields`、`TestServerConfigReachesHTTPServer`（1 KiB 上限下超限请求头被拒 431）。
 - [x] 流式响应可用：`c.Writer()` + `c.Flush()` 逐段推送（SSE），首刷落 200；底层不支持 `http.Flusher` 时返回明确 error；**仍是一条 AccessLog**（状态码与体积照常采集）
   证据：`TestCtxFlushStreamsIncrementally`（第一段在 handler 仍挂起时已到达客户端——只有真 flush 做得到；同一条用例断 `Status="200"` 与 `http.response.body.size=18`）、`TestCtxFlushWithoutFlusherReturnsError`、`TestResponseWriterKeepsFlusherCapability`（能力边界：`Flusher` ✅，`FlushError` / `Hijacker` / `Pusher` / `SetWriteDeadline` ❌）。
+- [x] 请求体绑定完整：`Ctx.Bind` 按 Content-Type 分派（JSON / XML / form-urlencoded / multipart；无 body 落 query），`BindQuery` 显式 query；`WithMaxBodyBytes` 上限对**全部**读取路径生效（超限 → 413 + `body_too_large`）
+  证据：`bind_test.go` 16 条——分派（`TestBindJSON` / `TestBindXML` / `TestBindForm` / `TestBindFormQueryIsNotMerged` / `TestBindMultipart` / `TestBindQuery` / `TestBindUnsupportedMediaType` / `TestBindNoContentTypeFallsBackToForm` / `TestBindContentTypeWithParameters`）、映射（`TestBindMoreScalarKinds`）、上限（`TestBindMaxBodyBytes` 读取闸门 + Content-Length 预检两路径、`TestBindUserWrappedMaxBytesReader` 用户自包、`TestBindDefaultNoLimit` 默认不限）、健壮性（`TestBindMalformedInputs` / `TestBindTargetErrors` / `TestBindQueryTargetError`）。
 - [x] 性能回归：请求路径开销进入仓库 bench，作为基线不劣化
   证据：`bench/` 全套基准 + 分配预算门禁 `TestRequestPathAllocBudget`（CI 的 `Alloc budget` 步骤，不带 `-race` 执行）。
 - [x] 真实负载下与 gin 同级（不以 micro-benchmark 胜负作承诺）——**已验证一次**：裸档 0.94× / 0.97×（见「表 C」；采集工程不入库，保留在 PR #19 的分支 `bench/gin-compare`）
