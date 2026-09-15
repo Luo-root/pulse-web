@@ -1,0 +1,20 @@
+{
+  "name": "pulse-web-docs",
+  "private": true,
+  "type": "module",
+  "description": "pulse-web 文档站点（VitePress）。库本身零第三方依赖，站点工具链只活在这个目录里。",
+  "scripts": {
+    "sync-assets": "node scripts/sync-assets.mjs",
+    "predocs:dev": "node scripts/sync-assets.mjs",
+    "docs:dev": "vitepress dev",
+    "predocs:build": "node scripts/sync-assets.mjs",
+    "docs:build": "vitepress build",
+    "docs:preview": "vitepress preview"
+  },
+  "devDependencies": {
+    "vitepress": "^1.6.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
