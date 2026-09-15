@@ -184,13 +184,24 @@ Templates are a thin wrapper over `html/template`; there is no template engine o
 
 Every request gets a 32-hex TraceID, one `http.request` record, and a request scope that is disposed as soon as the handler returns — before the engine maps the outcome and writes anything further.
 
+**There is nothing to wire up.** `New()` already installs a sink: `ConsoleSink`, one human-readable column-aligned line per request, written to stdout. The same TraceID shows up in the handler, in that line, and in anything you attach later.
+
 ```go
-app := web.New(
-	web.WithSink(observability.SlogSink{Logger: slog.Default()}), // or NewLineSink / NewAsyncSink / MultiSink
-	web.WithHostID("orders-api"),
-	web.WithoutAccessLog(),                                       // trace and panic recovery stay on
-)
+app := web.New(web.WithHostID("orders-api"))   // ConsoleSink → stdout is already the default
 ```
+
+`WithSink` replaces it — **changing the sink changes nothing else in the assembly**. Pick by who reads the output:
+
+```go
+web.WithSink(web.NewConsoleSink(os.Stdout))                     // humans — the default: unbuffered, writes straight through
+web.WithSink(observability.SlogSink{Logger: slog.Default()})    // machines — host logger, JSON, log collectors (stderr by default)
+web.WithSink(observability.NewAsyncSink(inner))                 // throughput — the write leaves the request path
+web.WithSink(observability.MultiSink{a, b})                     // several destinations at once
+```
+
+**If the sink is what your throughput is waiting on, wrap it in `NewAsyncSink`.** The observation cost sits almost entirely in getting the record out of the door, and the kernel dispatches events synchronously — so a slow sink is a slow request path. `AsyncSink` puts the write on a background worker behind a preallocated ring queue and hands the request goroutine straight back. What you pay is ownership: the queue is bounded (back-pressure by default, `DropOnFull()` to drop-and-count instead), and its lifecycle is yours — `Flush` or `Close` it on shutdown, or the queued records leave with the process.
+
+`WithoutAccessLog()` turns the access record off for services that already log elsewhere; trace and panic recovery stay on.
 
 - `c.TraceID()` — the same id in the handler, the access log and downstream calls
 - `c.Observe("order.paid", func(a *observability.Attrs) { a.Set("order_id", id) })` — your own events land in the same sink as the framework's

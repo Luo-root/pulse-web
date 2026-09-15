@@ -184,13 +184,24 @@ app := web.New(web.WithTemplates(web.TemplateConfig{
 
 每个请求都有一个 32hex 的 TraceID、一条 `http.request` 记录，以及一个**在 handler 返回时立即回收**的请求作用域——早于引擎做错误映射与任何后续写出。
 
+**不需要配任何东西。** `New()` 已经装好了出口：`ConsoleSink`，每请求一行给人读的列式输出，写 stdout。同一个 TraceID 在 handler、这一行，以及你之后挂上的任何出口里都在。
+
 ```go
-app := web.New(
-	web.WithSink(observability.SlogSink{Logger: slog.Default()}), // 或 NewLineSink / NewAsyncSink / MultiSink
-	web.WithHostID("orders-api"),
-	web.WithoutAccessLog(),                                       // Trace 与 panic 兜底保留
-)
+app := web.New(web.WithHostID("orders-api"))   // ConsoleSink → stdout 已经是默认
 ```
+
+`WithSink` 用来换掉它——**换出口不改变装配里的任何其它东西**。按「谁来读这份输出」选：
+
+```go
+web.WithSink(web.NewConsoleSink(os.Stdout))                     // 给人读——默认：不缓冲，写完即落
+web.WithSink(observability.SlogSink{Logger: slog.Default()})    // 给机器读——接宿主 logger / JSON / 采集器（默认写 stderr）
+web.WithSink(observability.NewAsyncSink(inner))                 // 要吞吐——把写出口移出请求路径
+web.WithSink(observability.MultiSink{a, b})                     // 同时送多个目的地
+```
+
+**如果瓶颈就在出口上，用 `NewAsyncSink` 把它包起来。** 观测的成本几乎全花在「把记录送出门」这一步，而 kernel 的事件派发是全同步的——出口有多慢，请求路径就有多慢。`AsyncSink` 把写入放到后台协程、前置一个预分配的环形队列，请求 goroutine 立刻返回。代价是**所有权归你**：队列是有界的（缺省回压，`DropOnFull()` 改为丢弃并计数），生命周期也归你——关闭前 `Flush` 或 `Close`，否则队列里的记录随进程一起消失。
+
+`WithoutAccessLog()` 给已经另有日志系统的服务关掉访问记录；Trace 与 panic 兜底不受影响。
 
 - `c.TraceID()`——handler、访问日志与下游调用拿到的是同一个 id
 - `c.Observe("order.paid", func(a *observability.Attrs) { a.Set("order_id", id) })`——你自己的事件与框架的进同一个出口
