@@ -415,11 +415,13 @@ v1 选项面：`New()` / `Minimal()` / `WithSink` / `WithoutAccessLog` / `WithRo
 
 | | 渲染一条（io.Discard） | 请求路径（同会话配对） |
 |---|---|---|
-| `ConsoleSink`（默认） | ~190 ns / **0 allocs** | ~2080 ns / **22 allocs** / 6325 B/op |
-| `SlogSink`（旧默认） | 1531 ns / 19 allocs | （观测档，见 #18 的真实负载对比） |
-| `LineSink` | ~262 ns / 1 alloc | — |
+| `ConsoleSink`（默认） | ~210 ns / **0 allocs** | ~2260 ns / **22 allocs** / 6314 B/op |
+| `SlogSink`（旧默认） | ~1340 ns / 18 allocs | （观测档，见 #18 的真实负载对比） |
+| `LineSink`（上游缺省版式） | ~266 ns / **0 allocs** | — |
 
-请求路径那一列对照的是 `nopSink` 档（~1880 ns / 22 allocs / 6314 B/op，`bench/budget_test.go` 的 `default+console-sink` 一档是它的门禁）：**分配计数相同**，多出的 ~190 ns 就是渲染。配对只在同一会话内有效，别拿它和表 B 的绝对值相减（跨会话 ns 会漂）。
+口径 `-benchtime=20000x -count=10` 取中位轮（原表 `~190 ns` / `1531 ns / 19 allocs` / `~262 ns / 1 alloc` 是 v0.2.4 之前的会话，**只能整表替换**，不能只换一格）。请求路径那一列对照的是 `nopSink` 档（~1900 ns / 22 allocs / 6314 B/op，`bench/budget_test.go` 的 `default+console-sink` 一档是它的门禁）：**分配计数与 B/op 都逐项相同**——出口渲染既不新增分配、也不改变请求路径的分配形状；ns 上多出的那一段就是渲染。
+
+渲染那一列要三格一起看：`ConsoleSink` 比**上游缺省版式的 `LineSink`** 还快，不是因为它绕过了谁（它内嵌的就是 `LineSink`，见下），而是域知识让它能少写字——同一条记录 `ConsoleSink` 出 **163 字节**，上游缺省版式出 **268 字节**（带 `PULSE` 前缀、毫秒时间戳、独立 event 列、`source=`、以及全限定属性名 `http.request.method=GET`）。渲染成本与输出长度同阶，省下的就是这部分。
 
 **行为口径**：
 
@@ -427,7 +429,10 @@ v1 选项面：`New()` / `Minimal()` / `WithSink` / `WithoutAccessLog` / `WithRo
 - **固定列盖不住的属性不丢**：未知键按插入序附在行尾（`| llm.model=… k=v`）。
 - **颜色**只在目的地是终端时出现（状态列按区间），重定向到文件 / 管道自动关；`NewConsoleSink(w, WithColor(true))` 可强制。
 - **不缓冲**：写完即落 `io.Writer`——终端要即时，缓冲会把安静应用的日志扣在内存里。要吞吐 / 异步 / 机器可读就 `WithSink(…)` 换出口（`AsyncSink` / `SlogSink` / `NewLineSink`），**`WithSink` 只换出口，装配不变**。
-- **写错误不抛**（`Sink` 接口没有错误通道）：要错误可见的场合用 `LineSink`（有 `Err()`）。
+- **写错误不抛，但可查**：`Sink` 接口没有错误通道，所以默认路径不会因为磁盘满而中断请求；`ConsoleSink` 内嵌上游 `LineSink`，自带 `Err()`（首个写错误）与 `Flush()`——要错误可见就查它，不必为了 `Err()` 换成别的出口。
+- **并发下渲染与写出共用一把锁**：`LineSink` 用一个自持缓冲换零分配，代价是 `WithRenderer` 在临界区内被调用。实测同一条记录并行写比单线程慢 ~75 ns/条（`ConsoleSink` 210 → 287、上游缺省版式 266 → 344，**增量一致**，说明这个代价属于上游的锁范围而非本渲染器）。代价落在出口的临界区上，不进请求路径——上面「请求路径」一列的分配与 B/op 与 `nopSink` 档逐项相同。
+
+实现分工（pulse v0.2.4 起）：本出口只留**版式知识**（列序与列宽、状态配色、http / 非 http 两条分支、尾段顺序），行首标识、结尾换行、缓冲、颜色判定、耗时与引号口径、写错误收集全部交回 `observability.LineSink`。**渲染器是包级函数不是闭包**——闭包嵌在另一个函数值里时 `Attrs.Range` 的逐值装箱消不掉（实测 6 属性记录每条 5 次分配），包级函数 + `Get[T]` 才是 0。
 
 ### 打点入口（复用上游，不新造协议）
 

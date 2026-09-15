@@ -291,6 +291,17 @@ func TestConsoleSinkZeroAlloc(t *testing.T) {
 	if n := testing.AllocsPerRun(1000, func() { s.Write(event) }); n != 0 {
 		t.Fatalf("事件行应 0 分配，实测 %v allocs/op", n)
 	}
+
+	// 固定列之外还有属性（中间件 / 业务往访问记录里加的字段）——这一格以前没有
+	// 用例覆盖：旧实现在这条路上走 `Attrs.Range` 兜底，实测每条 6 次分配；
+	// 换成上游 `AppendAttrsExcept`（无闭包）之后是 0。
+	withExtras := httpRecord("200", 585*time.Microsecond)
+	observability.Set(&withExtras.Attrs, "llm.model", "MiniMax-M3")
+	observability.Set(&withExtras.Attrs, "llm.temp", 0.75)
+	s.Write(withExtras)
+	if n := testing.AllocsPerRun(1000, func() { s.Write(withExtras) }); n != 0 {
+		t.Fatalf("含未知属性的行应 0 分配，实测 %v allocs/op", n)
+	}
 }
 
 func TestConsoleSinkNilWriterPanics(t *testing.T) {
@@ -302,20 +313,32 @@ func TestConsoleSinkNilWriterPanics(t *testing.T) {
 	NewConsoleSink(nil)
 }
 
-// TestAppendDurationUnits：单位与精度（亚毫秒不取整成 0——旧默认出口的毛病）。
-func TestAppendDurationUnits(t *testing.T) {
+// TestConsoleSinkDurationColumn：耗时列的单位与精度（亚毫秒不取整成 0——旧默认
+// 出口的毛病），口径来自上游 `observability.AppendDuration`。
+//
+// 这条同时钉住**迁移到 LineSink 时唯一的行为变化**：耗时从「浮点四舍五入」改成
+// 上游口径的「整数截断」。旧实现走 `strconv.AppendFloat('f')`，585199ns 会渲染成
+// `585.2µs`、7629999ns 成 `7.63ms`；上游口径是 `585.1µs` / `7.62ms`。理由写在
+// Issue #27：口径必须是各出口共用的一致性资产，本地不再留第二份实现。
+// 谁把它改回四舍五入（或改小数位），先红在这条上。
+func TestConsoleSinkDurationColumn(t *testing.T) {
+	durCol := func(d time.Duration) string {
+		return consoleFields(renderLine(t, httpRecord("200", d)))[2]
+	}
 	cases := []struct {
 		d    time.Duration
 		want string
 	}{
 		{820 * time.Nanosecond, "820ns"},
 		{585100 * time.Nanosecond, "585.1µs"},
+		{585199 * time.Nanosecond, "585.1µs"}, // 截断，不是 585.2
 		{7623 * time.Microsecond, "7.62ms"},
+		{7629999 * time.Nanosecond, "7.62ms"}, // 截断，不是 7.63
 		{1234 * time.Millisecond, "1.23s"},
 	}
 	for _, c := range cases {
-		if got := string(appendDuration(nil, c.d)); got != c.want {
-			t.Errorf("appendDuration(%v) = %q，want %q", c.d, got, c.want)
+		if got := durCol(c.d); got != c.want {
+			t.Errorf("耗时列(%v) = %q，want %q", c.d, got, c.want)
 		}
 	}
 }
@@ -328,8 +351,8 @@ func TestDefaultSinkIsConsoleSink(t *testing.T) {
 	if !ok {
 		t.Fatalf("默认出口应为 *ConsoleSink，实际 %T", sink)
 	}
-	if cs.w == nil {
-		t.Fatal("默认出口必须绑定一个 writer")
+	if cs.LineSink == nil {
+		t.Fatal("默认出口必须是一层挂在 LineSink 上的薄壳")
 	}
 }
 
