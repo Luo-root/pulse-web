@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 344 96" fill="none" role="img" aria-labelledby="pw-banner-title">
+  <title id="pw-banner-title">pulse-web</title>
+  <!--
+    README 头部的锁定：mark + 字标放在一起（对齐 pulse 的呈现方式）。
+
+    mark 与 assets/logo.svg 是**同一份几何**（同坐标 / 同圆角 / 同 currentColor），
+    只是内联进这里的 <g>——assets_test.go 会逐项比对，防止两处各画一遍后漂移。
+
+    字标规格见设计文档「品牌标识」：等宽字体 + 负字距 + 连字符换成短横条。
+    两段文字用 textLength 钉成定长：等宽字体各家 advance 不同（Consolas ≈ 0.55em、
+    Menlo ≈ 0.6em），不定长的话短横条与 "web" 的位置会随字体漂移。
+    短横条是 <rect>（16×5，与字重匹配，居中在该字符格里），不是连字符字形。
+
+    颜色：currentColor + 明暗两档中性色（同 logo.svg 口径）；站点那一轮用选择器覆盖。
+  -->
+  <style>
+    svg { color: #17181a }
+    @media (prefers-color-scheme: dark) { svg { color: #f4f3f0 } }
+  </style>
+  <!-- mark：与 assets/logo.svg 同一份几何，缩放到 1.3 与字标配比 -->
+  <g transform="translate(20 16.8) scale(1.3)">
+    <rect x="5.70" y="23.00" width="3.00" height="4.00" rx="1.20" fill="currentColor"/>
+    <rect x="9.90" y="21.00" width="3.00" height="6.00" rx="1.20" fill="currentColor"/>
+    <rect x="14.10" y="15.00" width="3.00" height="12.00" rx="1.20" fill="currentColor"/>
+    <rect x="18.30" y="4.00" width="3.00" height="23.00" rx="1.20" fill="currentColor"/>
+    <rect x="22.50" y="27.00" width="3.00" height="10.00" rx="1.20" fill="currentColor"/>
+    <rect x="26.70" y="27.00" width="3.00" height="17.00" rx="1.20" fill="currentColor"/>
+    <rect x="30.90" y="27.00" width="3.00" height="8.00" rx="1.20" fill="currentColor"/>
+    <rect x="35.10" y="23.00" width="3.00" height="4.00" rx="1.20" fill="currentColor"/>
+    <rect x="39.30" y="23.00" width="3.00" height="4.00" rx="1.20" fill="currentColor"/>
+  </g>
+  <text x="95" y="64" textLength="123" lengthAdjust="spacingAndGlyphs"
+        font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace"
+        font-size="46" font-weight="600" fill="currentColor">pulse</text>
+  <rect x="222.3" y="47.5" width="16" height="5" rx="2.5" fill="currentColor"/>
+  <text x="242.6" y="64" textLength="73.8" lengthAdjust="spacingAndGlyphs"
+        font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', monospace"
+        font-size="46" font-weight="600" fill="currentColor">web</text>
+</svg>

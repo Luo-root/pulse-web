@@ -20,22 +20,45 @@ import (
 const (
 	designDocPath = "docs/design/web-framework-design.md"
 	logoAssetPath = "assets/logo.svg"
+	bannerPath    = "assets/banner.svg"
 	faviconPath   = "assets/favicon.svg"
 )
 
 // svgBar 是一根柱（<rect>）的几何。
 type svgBar struct{ X, Y, W, H, RX float64 }
 
-// readBrandSVG 解出 SVG 的柱、元素名序列与 <style> 文本。
-// 走 token 流而不是反序列化进结构体：既要 rect 的几何，也要能断言「图上没有别的形状」。
-func readBrandSVG(t *testing.T, path string) (bars []svgBar, elems []string, style string) {
+// svgContent 是一次解析的结果。
+//
+// grouped / ungrouped 的分法是为了 README 的 banner：它把 mark 内联在一个 <g> 里
+// （与 logo.svg 同一份几何），短横条则是 <g> 之外的独立 <rect>——两者必须分得开。
+type svgContent struct {
+	bars      []svgBar  // 全部 <rect>
+	grouped   []svgBar  // 位于 <g> 内的 <rect>
+	ungrouped []svgBar  // 不在任何 <g> 里的 <rect>
+	texts     []svgText // <text> 元素（内容 + 原始属性）
+	elems     []string  // 出现过的元素名（用来断言「图上没有别的形状」）
+	style     string    // <style> 文本
+}
+
+// svgText 是 <text> 元素：内容与原始属性（textLength / font-family 这类要看原值）。
+type svgText struct {
+	content string
+	attrs   map[string]string
+}
+
+// readBrandSVG 解出 SVG 的柱、文字元素、元素名序列与 <style> 文本。
+// 走 token 流而不是反序列化进结构体：既要 rect 的几何，也要能断言「图上没有别的形状」，
+// 还要知道每个 rect 在不在 <g> 里。
+func readBrandSVG(t *testing.T, path string) svgContent {
 	t.Helper()
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("读 %s: %v", path, err)
 	}
+	var out svgContent
+	var cur svgText
 	dec := xml.NewDecoder(strings.NewReader(string(raw)))
-	inStyle := false
+	inStyle, inText, depth := false, false, 0
 	for {
 		tok, err := dec.Token()
 		if err == io.EOF {
@@ -46,33 +69,56 @@ func readBrandSVG(t *testing.T, path string) (bars []svgBar, elems []string, sty
 		}
 		switch el := tok.(type) {
 		case xml.StartElement:
-			elems = append(elems, el.Name.Local)
+			out.elems = append(out.elems, el.Name.Local)
 			switch el.Name.Local {
+			case "g":
+				depth++
 			case "rect":
-				bars = append(bars, svgBar{
+				bar := svgBar{
 					X:  svgAttr(t, path, el, "x"),
 					Y:  svgAttr(t, path, el, "y"),
 					W:  svgAttr(t, path, el, "width"),
 					H:  svgAttr(t, path, el, "height"),
 					RX: svgAttr(t, path, el, "rx"),
-				})
+				}
+				out.bars = append(out.bars, bar)
+				if depth > 0 {
+					out.grouped = append(out.grouped, bar)
+				} else {
+					out.ungrouped = append(out.ungrouped, bar)
+				}
 			case "style":
 				inStyle = true
+			case "text":
+				inText = true
+				cur = svgText{attrs: map[string]string{}}
+				for _, a := range el.Attr {
+					cur.attrs[a.Name.Local] = a.Value
+				}
 			}
 		case xml.EndElement:
-			if el.Name.Local == "style" {
+			switch el.Name.Local {
+			case "g":
+				depth--
+			case "style":
 				inStyle = false
+			case "text":
+				inText = false
+				out.texts = append(out.texts, cur)
 			}
 		case xml.CharData:
 			if inStyle {
-				style += string(el)
+				out.style += string(el)
+			}
+			if inText {
+				cur.content += string(el)
 			}
 		}
 	}
-	if len(bars) == 0 {
+	if len(out.bars) == 0 {
 		t.Fatalf("%s 里一根柱都没有", path)
 	}
-	return bars, elems, style
+	return out
 }
 
 func svgAttr(t *testing.T, path string, el xml.StartElement, name string) float64 {
@@ -194,7 +240,8 @@ func equalFloats(a, b []float64) bool {
 
 // TestLogoMarkMatchesDesignDoc 是 #36 验收第 4 条：文档参数表 ↔ assets/logo.svg 逐项一致。
 func TestLogoMarkMatchesDesignDoc(t *testing.T) {
-	bars, elems, _ := readBrandSVG(t, logoAssetPath)
+	logo := readBrandSVG(t, logoAssetPath)
+	bars, elems := logo.bars, logo.elems
 
 	// 形态：只有 <rect>，没有峰值黑点（circle）也没有折线（path / polyline）。
 	for _, name := range elems {
@@ -253,14 +300,16 @@ func TestLogoMarkMatchesDesignDoc(t *testing.T) {
 
 // TestFaviconIsSimplifiedMark 钉住 favicon 的简化规则：柱更少更粗，但峰谷两个关键柱必须在。
 func TestFaviconIsSimplifiedMark(t *testing.T) {
-	logoBars, _, logoStyle := readBrandSVG(t, logoAssetPath)
+	logo := readBrandSVG(t, logoAssetPath)
+	logoBars, logoStyle := logo.bars, logo.style
 	logoAmps := amplitudes(t, logoBars, baseline(t, logoBars))
 	logoLo, logoHi := logoAmps[0], logoAmps[0]
 	for _, a := range logoAmps {
 		logoLo, logoHi = math.Min(logoLo, a), math.Max(logoHi, a)
 	}
 
-	bars, elems, style := readBrandSVG(t, faviconPath)
+	fav := readBrandSVG(t, faviconPath)
+	bars, elems, style := fav.bars, fav.elems, fav.style
 	for _, name := range elems {
 		switch name {
 		case "svg", "title", "style", "rect":
@@ -322,22 +371,94 @@ func TestBrandAssetPathsResolve(t *testing.T) {
 	}
 	m := regexp.MustCompile(`<img[^>]*src="([^"]+)"`).FindStringSubmatch(string(readme))
 	if m == nil {
-		t.Fatalf("README.md 里没有 <img src=\"...\">——顶部 mark 被删了？")
+		t.Fatalf("README.md 里没有 <img src=\"...\">——顶部锁定被删了？")
 	}
-	if m[1] != logoAssetPath {
-		t.Errorf("README 引的是 %q，资产事实源是 %q（同步面口径见设计文档「品牌标识」）", m[1], logoAssetPath)
+	if m[1] != bannerPath {
+		t.Errorf("README 引的是 %q，顶部锁定是 %q（同步面口径见设计文档「品牌标识」）", m[1], bannerPath)
 	}
 
 	doc, err := os.ReadFile(designDocPath)
 	if err != nil {
 		t.Fatalf("读 %s: %v", designDocPath, err)
 	}
-	for _, p := range []string{logoAssetPath, faviconPath} {
+	for _, p := range []string{logoAssetPath, bannerPath, faviconPath} {
 		if _, err := os.Stat(p); err != nil {
 			t.Errorf("资产缺失 %s: %v", p, err)
 		}
 		if !strings.Contains(string(doc), p) {
 			t.Errorf("设计文档没提到 %s——同步面口径漏了这一处", p)
 		}
+	}
+}
+
+// numOf 解析属性里的数字（<text> 没有几何，只能从原始属性读）。
+func numOf(t *testing.T, raw string) float64 {
+	t.Helper()
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		t.Fatalf("解析数字 %q: %v", raw, err)
+	}
+	return v
+}
+
+// TestBannerMarkMatchesLogo 钉住 README 顶部锁定里的 mark 就是 assets/logo.svg 那一份几何——
+// 「同一枚 mark 在两处各画一遍」是品牌资产最典型的漂移方式。
+func TestBannerMarkMatchesLogo(t *testing.T) {
+	logo := readBrandSVG(t, logoAssetPath)
+	banner := readBrandSVG(t, bannerPath)
+
+	if len(banner.grouped) != len(logo.bars) {
+		t.Fatalf("%s 的 <g> 里有 %d 根柱，%s 有 %d 根——banner 的 mark 必须与 logo 同源",
+			bannerPath, len(banner.grouped), logoAssetPath, len(logo.bars))
+	}
+	for i := range logo.bars {
+		if banner.grouped[i] != logo.bars[i] {
+			t.Errorf("banner 第 %d 根柱 %+v ≠ logo 的 %+v——banner 里的 mark 必须逐项同坐标",
+				i+1, banner.grouped[i], logo.bars[i])
+		}
+	}
+
+	// <g> 之外只该有一个 <rect>：连字符的替身（短横条），不是连字符字形。
+	if len(banner.ungrouped) != 1 {
+		t.Fatalf("%s 的 <g> 之外有 %d 个 <rect>，期望 1 个（短横条）", bannerPath, len(banner.ungrouped))
+	}
+	if bar := banner.ungrouped[0]; bar.H >= bar.W {
+		t.Errorf("短横条 %g×%g 不像连字符比例（宽应大于高）", bar.W, bar.H)
+	}
+	assertThemeColors(t, bannerPath, banner.style)
+}
+
+// TestBannerWordmarkStructure 钉住字标结构：pulse + 短横条（<rect>）+ web，
+// 两段文字必须定长——否则短横条与 web 的位置会随等宽字体的 advance 漂移。
+func TestBannerWordmarkStructure(t *testing.T) {
+	banner := readBrandSVG(t, bannerPath)
+	if len(banner.texts) != 2 {
+		t.Fatalf("%s 期望 2 个 <text>（pulse / web），实际 %d 个", bannerPath, len(banner.texts))
+	}
+	if len(banner.ungrouped) != 1 {
+		t.Fatalf("%s 期望 1 个 <g> 之外的 <rect>（短横条），实际 %d 个", bannerPath, len(banner.ungrouped))
+	}
+	for i, want := range []string{"pulse", "web"} {
+		if got := strings.TrimSpace(banner.texts[i].content); got != want {
+			t.Errorf("第 %d 个 <text> = %q，期望 %q", i+1, got, want)
+		}
+		attrs := banner.texts[i].attrs
+		if attrs["textLength"] == "" {
+			t.Errorf("%q 没有 textLength——不定长的话短横条与 web 的位置会随字体漂移", want)
+		}
+		if attrs["lengthAdjust"] != "spacingAndGlyphs" {
+			t.Errorf("%q 的 lengthAdjust = %q，期望 spacingAndGlyphs", want, attrs["lengthAdjust"])
+		}
+		if !strings.Contains(attrs["font-family"], "monospace") {
+			t.Errorf("%q 的 font-family 没有等宽兜底：%q", want, attrs["font-family"])
+		}
+	}
+
+	bar := banner.ungrouped[0]
+	xPulse := numOf(t, banner.texts[0].attrs["x"])
+	xWeb := numOf(t, banner.texts[1].attrs["x"])
+	if !(bar.X > xPulse && bar.X+bar.W < xWeb) {
+		t.Errorf("短横条 x = %.1f..%.1f 没落在 pulse（x = %.1f）与 web（x = %.1f）之间",
+			bar.X, bar.X+bar.W, xPulse, xWeb)
 	}
 }

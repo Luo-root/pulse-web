@@ -664,6 +664,7 @@ pulse-web/
 ├── *_test.go                  # 与源文件同包（无独立 xxx_test 包），黑盒走 Engine 入口
 ├── assets/
 │   ├── logo.svg               # 品牌 mark（48×48，currentColor；参数见「品牌标识」）
+│   ├── banner.svg             # README 头部锁定：mark + 字标（mark 是同一份几何，内联）
 │   └── favicon.svg            # 16px 简化版（5 柱）+ 明暗自适应
 ├── bench/                     # 性能回归基线 + 分配预算门禁（go test ./bench/）
 │   └── muxprobe/              # 路由选型的一次性实测程序（「路由选型的边界」的数据来源）
@@ -687,11 +688,11 @@ mark 的走势**直接沿用 pulse**（平段 → 上升 → 峰值 → 深谷 �
 
 **颜色**：mark 走 `currentColor`，由宿主决定——内联使用时跟随 `color`，站点可用选择器覆盖。作为 `<img>` 独立渲染时（README / social preview）没有宿主 color 可继承，所以 SVG 内嵌 `svg { color: … }` 给出明暗两档中性色（`#17181a` / `#f4f3f0`，按 `prefers-color-scheme` 切）；**强调色不在这里定**，留给站点那一轮。
 
-**字标**：`pulse-web`，等宽字体 + 负字距，连字符换成**短横条**（等比圆角条、与字重匹配、全同色）。字标是**排版规格不是资产文件**——烤进 SVG 要赌字体可得性，站点用 CSS 实现更稳。
+**字标**：`pulse-web`，等宽字体 + 负字距，连字符换成**短横条**（等比圆角条、与字重匹配、全同色）。两种落地：站点那一轮用 **CSS** 实现（排版规格本身）；README 头部的**锁定**用 `assets/banner.svg`，把 mark 与字标放在一起（对齐 pulse 的呈现方式，不把 mark 单独留在标题上方）。banner 里的 mark 与 `assets/logo.svg` 是**同一份几何**（同坐标、同圆角，只是内联并缩放到 1.3——测试会逐项比对）；两段文字用 `textLength` 钉成定长，短横条画成 `<rect>` 而不是连字符字形——等宽字体各家 advance 不同（Consolas ≈ 0.55em / Menlo ≈ 0.6em），不定长的话短横条与 `web` 的位置会随字体漂移。
 
 **favicon**（`assets/favicon.svg`）：48 单位画布缩到 16px 只剩 1/3，9 根柱每根 1 像素宽、缝 0.4 像素，抗锯齿会把墨摊薄（笔画发灰、缝半填）——形状仍读得出，但对比度掉一截，且不同渲染器/DPI 的降采样策略不一致。故降到 **5 根柱、柱宽 6**（同尺寸下柱心实黑）、保留峰与谷两个关键柱；颜色同 logo 写死明暗两档（favicon 不继承宿主 CSS）。**两份文件不是冗余**：一个是 96px+ 的宿主可控色 mark，一个是 16px 的独立自足图标，各解各的尺寸。
 
-**同步面**：README 顶部引用 `assets/logo.svg`；站点那一轮从 `assets/` 复制到 `site/public/`（favicon 与 social preview 同源），**不在两处各维护一份**。改图后以 `assets/logo.svg` 为准回改本节参数表——`assets_test.go` 会逐项比对（表 ↔ 坐标、favicon 的简化规则、README 相对路径可达），漂移时测试先响，不靠人工比对。
+**同步面**：README 顶部引用 `assets/banner.svg`（mark + 字标一体）；站点那一轮从 `assets/` 复制到 `site/public/`（favicon 与 social preview 同源），**不在两处各维护一份**。改图后以 `assets/logo.svg` 为准回改本节参数表——`assets_test.go` 会逐项比对（表 ↔ 坐标、banner 里的 mark ↔ logo、favicon 的简化规则、README 相对路径可达），漂移时测试先响，不靠人工比对。
 
 ## 验收标准
 
