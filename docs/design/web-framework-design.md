@@ -687,7 +687,7 @@ mark 的走势**直接沿用 pulse**（平段 → 上升 → 峰值 → 深谷 �
 
 **favicon**（`assets/favicon.svg`）：16px 下 9 根细柱会糊，故降到 **5 根柱、柱宽 6**，保留峰与谷两个关键柱；颜色同 logo 写死明暗两档（favicon 不继承宿主 CSS）。
 
-**同步面**：README 顶部引用 `assets/logo.svg`；站点那一轮从 `assets/` 复制到 `site/public/`（favicon 与 social preview 同源），**不在两处各维护一份**。
+**同步面**：README 顶部引用 `assets/logo.svg`；站点那一轮从 `assets/` 复制到 `site/public/`（favicon 与 social preview 同源），**不在两处各维护一份**。改图后以 `assets/logo.svg` 为准回改本节参数表——`assets_test.go` 会逐项比对（表 ↔ 坐标、favicon 的简化规则、README 相对路径可达），漂移时测试先响，不靠人工比对。
 
 ## 验收标准
 
