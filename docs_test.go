@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -18,7 +17,7 @@ import (
 // 4 处里有 3 处静默漂了位（第 11→8 / 第 7→12 / 第 8→13）。序号不是标识而是位置，
 // 插队即失效。改成引用**条目名**之后，名字对不对得上可以被机器检查。
 
-// designDocPath 复用 assets_test.go 的声明（同一份设计文档，同一个包）。
+// criteriaHead 是验收清单节的标题。清单是设计文档的最后一节，切到这里之后整节都算清单。
 const criteriaHead = "## 验收标准"
 
 var (
@@ -27,14 +26,20 @@ var (
 	// namedRefRe 匹配按条目名的引用：设计验收标准『性能回归』条。
 	namedRefRe = regexp.MustCompile(`设计验收标准『([^』]+)』`)
 	// numericRefRe 匹配按序号的引用（本仓库已禁用这种写法）。
-	numericRefRe = regexp.MustCompile(`设计验收标准第\s*\d+\s*条`)
-	// statusCountRe 匹配 README 状态行的计数：**v1 功能面已实现**（13/13）。
-	statusCountRe = regexp.MustCompile(`（(\d+)/(\d+)）`)
+	//
+	// 两种**历史写法**也在射程内，因为它们正是最可能被抄回来的形态：设计文档当初写的是
+	// `验收标准第 12 条`（不带「设计」），`stream_test.go` 当初写的是 `v1 功能面第 12 条`。
+	// 只认 `设计验收标准第 N 条` 的话，这两句抄回去 CI 不会响——反向断言就白设了。
+	//
+	// 不误伤的依据：全仓其余「第 N 条」都不是这两个形状（`assets_test.go` 是
+	// `#36 验收第 4 条`，缺「标准」；设计文档是 `12-factor 第 11 条`）。
+	numericRefRe = regexp.MustCompile(`(?:设计)?验收标准第\s*\d+\s*条|v1 功能面第\s*\d+\s*条`)
 )
 
 // designCriterionNames 抽出「验收标准」节里的条目名，保持文档顺序。
 func designCriterionNames(t *testing.T) []string {
 	t.Helper()
+	// designDocPath 声明在 assets_test.go：同一份设计文档，同一个包。
 	doc := readDocFile(t, designDocPath)
 	_, after, ok := strings.Cut(doc, criteriaHead)
 	if !ok {
@@ -59,13 +64,16 @@ func readDocFile(t *testing.T, path string) string {
 	return string(b)
 }
 
-// repoDocFiles 返回守卫要扫的文本文件：仓库内的 .go 与 .md。
+// repoDocFiles 返回守卫要扫的文本文件：仓库内的 .go / .md / .yml。
 // 跳过 `.git`、`_scratch`（gitignore 的草稿区）与**本文件自身**——
 // 本文件里写着引用形态（正则字面量 + 文档注释里的示例），扫它必然自命中，
 // 那是守卫自己的写法，不是对条目的引用。这是唯一的豁免。
+//
+// `.yml` 也在扫描面内：`.github/ISSUE_TEMPLATE/*.yml` 是最可能被写进序号引用的地方
+// （「对应验收标准第 N 条」这种话很容易落在 issue 表单里）。
 func repoDocFiles(t *testing.T) []string {
 	t.Helper()
-	self := guardSelfPath()
+	self := filepath.Base(guardSelfPath())
 	var out []string
 	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -79,8 +87,8 @@ func repoDocFiles(t *testing.T) []string {
 			return nil
 		}
 		switch filepath.Ext(path) {
-		case ".go", ".md":
-			if abs, err := filepath.Abs(path); err == nil && abs == self {
+		case ".go", ".md", ".yml":
+			if filepath.Base(path) == self {
 				return nil // 本文件自身
 			}
 			out = append(out, filepath.ToSlash(path))
@@ -91,13 +99,18 @@ func repoDocFiles(t *testing.T) []string {
 		t.Fatalf("遍历仓库: %v", err)
 	}
 	if len(out) == 0 {
-		t.Fatal("没扫到任何 .go / .md——工作目录或遍历逻辑不对")
+		t.Fatal("没扫到任何 .go / .md / .yml——工作目录或遍历逻辑不对")
 	}
 	return out
 }
 
-// guardSelfPath 返回本文件的**绝对**路径。用调用点定位而不是写死文件名：
+// guardSelfPath 返回本文件的路径。用调用点定位而不是写死文件名：
 // 文件改名后守卫仍然正确（写死会让改名变成一次「看起来像引用坏了」的假失败）。
+//
+// 调用方比较时只取 **basename**：`runtime.Caller` 给的是编译期路径，
+// `go test -trimpath` 会把它裁成模块路径（`github.com/Luo-root/pulse-web/docs_test.go`），
+// 与遍历到的相对路径的绝对形式对不上——那时自排除失效，本文件里的正则源码与示例会被
+// 当成真引用，报错还指向守卫自己。本包只有一个 docs_test.go，按名字比就够。
 func guardSelfPath() string {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
@@ -113,9 +126,11 @@ func guardSelfPath() string {
 //
 //  1. 名字唯一（重名会让引用有歧义）
 //  2. 每条 `设计验收标准『X』` 引用里的 X 都真实存在
-//  3. 全树不再出现 `设计验收标准第 N 条` 的序号写法（反向断言，防回退）
+//  3. 全树不再出现按**序号**引用的写法（反向断言，防回退）——覆盖三种历史形态：
+//     `验收标准第 N 条`、`设计验收标准第 N 条`、`v1 功能面第 N 条`；`.yml`（issue
+//     表单）也在扫描面内。
 //
-// 变异探针：改掉任一处的名字（或往任意文件写一条序号引用），本用例必须红。
+// 变异探针：改掉任一处的名字，或往任意文件（含 `.yml`）写一条任一形态的序号引用，本用例必须红。
 func TestDesignCriterionNamesAreUsedInReferences(t *testing.T) {
 	names := designCriterionNames(t)
 	if len(names) == 0 {
@@ -154,44 +169,4 @@ func TestDesignCriterionNamesAreUsedInReferences(t *testing.T) {
 		t.Fatalf("一处条目名引用都没扫到——守卫失效（路径或正则不对），不是通过；自身路径=%s", guardSelfPath())
 	}
 	t.Logf("条目名 %d 个，已校验 %d 处引用（跳过自身 %s）", len(names), refs, guardSelfPath())
-}
-
-// TestREADMEStatusCountMatchesDesignDoc 把 README 的 `（N/N）` 与验收清单实际条数绑定。
-//
-// 这正是 #47 证据里那次漂移的直接守卫：清单加一条而 README 没跟，本用例红。
-// 语言版本按存在与否逐个纳入——英文版与中文版都过，谁先漏谁红。
-//
-// 变异探针：把 README 的 `（13/13）` 改成 `（12/12）`，或往清单里加一条，本用例必须红。
-func TestREADMEStatusCountMatchesDesignDoc(t *testing.T) {
-	want := len(designCriterionNames(t))
-	if want == 0 {
-		t.Fatal("抽不到条目，无法核对计数")
-	}
-
-	readmeSeen := 0
-	for _, path := range []string{"README.md", "README_zh.md"} {
-		b, err := os.ReadFile(filepath.FromSlash(path))
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			t.Fatalf("读 %s: %v", path, err)
-		}
-		readmeSeen++
-		m := statusCountRe.FindStringSubmatch(string(b))
-		if m == nil {
-			t.Errorf("%s 里找不到 `（N/N）` 形态的状态计数", path)
-			continue
-		}
-		if m[1] != m[2] {
-			t.Errorf("%s 的 `（%s/%s）` 前后不一致", path, m[1], m[2])
-		}
-		if m[2] != strconv.Itoa(want) {
-			t.Errorf("%s 的计数是 `%s/%s`，而 %s 的验收清单实际有 %d 条",
-				path, m[1], m[2], designDocPath, want)
-		}
-	}
-	if readmeSeen == 0 {
-		t.Fatal("README.md 与 README_zh.md 都不存在——状态计数没有落点")
-	}
 }

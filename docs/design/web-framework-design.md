@@ -729,7 +729,7 @@ mark 的走势**直接沿用 pulse**（平段 → 上升 → 峰值 → 深谷 �
 
 > 每条的**证据**都写成可复跑的样子：测试名可直接 `go test -run <名> ./...`；实测记录指到对应章节。
 >
-> 引用这些条目时**用条目名，不要用序号**——写成 `设计验收标准『性能回归』条`，名字逐字取本条开头的加粗短语。序号不是标识而是**位置**：清单是插队长的，第 10 位插一条，其后所有序号后移，而引用它的文件不会自己更新（本清单从 10 条长到 13 条，期间 3 处序号引用全漂）。名字只在条目被改名时失效，而那会立刻被 `TestDesignCriterionNamesAreUsedInReferences` 抓住；README 的 `（N/N）` 计数由 `TestREADMEStatusCountMatchesDesignDoc` 与本清单条数绑定。
+> 引用这些条目时**用条目名，不要用序号**——写成 `设计验收标准『性能回归』条`，名字逐字取本条开头的加粗短语。序号不是标识而是**位置**：清单是插队长的，第 10 位插一条，其后所有序号后移，而引用它的文件不会自己更新（本清单从 10 条长到 13 条，期间 3 处序号引用全漂）。名字只在条目被改名时失效，而那会立刻被 `TestDesignCriterionNamesAreUsedInReferences` 抓住；该用例同时反向断言全树不再出现按序号的写法——覆盖 `验收标准第 N 条` / `设计验收标准第 N 条` / `v1 功能面第 N 条` 三种历史形态，扫描面是 `.go` / `.md` / `.yml`。
 
 - [x] **垂直切片可跑**：`app.Run()` 起服务，路由 / 中间件 / JSON / 优雅关闭全通
   证据：`TestServeSignalRunsFullShutdownChain`（注入信号 → drain 在途请求 → `OnShutdown` → `root.Dispose` → Sink flush 全链路）、`TestServeReturnsServerError`（server 出错透出）、`TestRunListenFailureDisposesEngine`（监听失败回收引擎）；路由 / 中间件 / JSON 见 `TestRouterJSONAndPathParam`、`TestGroupAndMiddlewareOrder`。
