@@ -135,7 +135,7 @@ g2.GET("/users", h, mw3)
 
 ### 表 C：与 gin 的真实负载对比（2026-09-14 一次性验证，采集工程未入库）
 
-验收标准第 13 条的落地。**结论留在这里，采集工程没有进仓库**——`loadtest/`（带 gin 依赖的独立
+设计验收标准『真实负载与 gin 同级』条的落地。**结论留在这里，采集工程没有进仓库**——`loadtest/`（带 gin 依赖的独立
 module）是为回答「与 gin 同级吗、观测的钱花在哪」做的一次性验证，工程保留在 PR #19 的分支
 `bench/gin-compare`（未合并、未删除），要复现就切过去；本页只留口径与结论。
 
@@ -728,29 +728,31 @@ mark 的走势**直接沿用 pulse**（平段 → 上升 → 峰值 → 深谷 �
 ## 验收标准
 
 > 每条的**证据**都写成可复跑的样子：测试名可直接 `go test -run <名> ./...`；实测记录指到对应章节。
+>
+> 引用这些条目时**用条目名，不要用序号**——写成 `设计验收标准『性能回归』条`，名字逐字取本条开头的加粗短语。序号不是标识而是**位置**：清单是插队长的，第 10 位插一条，其后所有序号后移，而引用它的文件不会自己更新（本清单从 10 条长到 13 条，期间 3 处序号引用全漂）。名字只在条目被改名时失效，而那会立刻被 `TestDesignCriterionNamesAreUsedInReferences` 抓住；README 的 `（N/N）` 计数由 `TestREADMEStatusCountMatchesDesignDoc` 与本清单条数绑定。
 
-- [x] 垂直切片可跑：`app.Run()` 起服务，路由 / 中间件 / JSON / 优雅关闭全通
+- [x] **垂直切片可跑**：`app.Run()` 起服务，路由 / 中间件 / JSON / 优雅关闭全通
   证据：`TestServeSignalRunsFullShutdownChain`（注入信号 → drain 在途请求 → `OnShutdown` → `root.Dispose` → Sink flush 全链路）、`TestServeReturnsServerError`（server 出错透出）、`TestRunListenFailureDisposesEngine`（监听失败回收引擎）；路由 / 中间件 / JSON 见 `TestRouterJSONAndPathParam`、`TestGroupAndMiddlewareOrder`。
-- [x] **`WithRoot()` 可接入外部已有的 kernel 树**：双方 `Provide` 的服务彼此可见（同一 IoC 容器）
+- [x] **WithRoot 接入既有 kernel 树**：双方 `Provide` 的服务彼此可见（同一 IoC 容器）
   证据：`TestWithRootAcceptsPreinstalledTree`——外部树先装插件、web 侧 `Provide` 后 handler 读得到，Bootstrap 仍产出快照记录。
-- [x] **默认路径零全局 `Provide`**（benchmark 不随插件数线性涨）；`WithCollector()` 后是作用域局部绑定，实测同样与插件树规模无关
+- [x] **默认路径零全局 Provide**（benchmark 不随插件数线性涨）；`WithCollector()` 后是作用域局部绑定，实测同样与插件树规模无关
   证据：分配门禁 `bench/budget_test.go` 的 `plugins=50` 档与空树同为 22 allocs/op；表 B 的 10 / 50 / 100 插件三档 allocs 恒为 14。
-- [x] **`c` 上的业务打点与 AccessLog 进同一个 Sink**：同一 `TraceID` / `HostID`；Source 分别为 `"http"`（AccessLog）与 `"bridge"`（`c.Observe` **直写**——该字面值是上游 `observability.SourceAdapter`，此路径不注册 Collector）
+- [x] **业务打点与 AccessLog 同 Sink**：同一 `TraceID` / `HostID`；Source 分别为 `"http"`（AccessLog）与 `"bridge"`（`c.Observe` **直写**——该字面值是上游 `observability.SourceAdapter`，此路径不注册 Collector）
   证据：`TestAccessLogRecordFields` 与 `observe_test.go` 里的业务打点断言（同一 Sink、同一 TraceID、Source 为 `SourceAdapter`）。
-- [x] 观测贯穿：单请求 TraceID 在 router → handler → Sink 一致；后台任务共享同一 TraceID
+- [x] **观测贯穿**：单请求 TraceID 在 router → handler → Sink 一致；后台任务共享同一 TraceID
   证据：`TestTraceIDGeneratedAndSharedAcrossRecord`、`TestDetachSharesTraceAndRootAccess`；入站头采纳另见 `TestTraceparentAdopted` / `TestB3TraceIDAdopted` / `TestB3TraceID16HexNormalized`（16hex 左垫归一）/ `TestZeroTraceIDTreatedAsAbsent`（全零视为不存在）/ `TestMalformedTraceHeadersIgnored`。
-- [x] 标准库兼容：挂载 stdlib 中间件无侵入；`Wrap` 双向适配
+- [x] **标准库兼容**：挂载 stdlib 中间件无侵入；`Wrap` 双向适配
   证据：`TestWrapStdlibHandler`、`TestEngineUnderStdlibMiddleware`、`TestWrapPanicCaughtByEngine`。
-- [x] `ServerConfig` 契约成立：6 个默认值 + 「非零覆盖、零值保持默认」+ 配置**真的**落到 `http.Server` 上
+- [x] **ServerConfig 契约**：6 个默认值 + 「非零覆盖、零值保持默认」+ 配置**真的**落到 `http.Server` 上
   证据：`TestDefaultServerConfigValues`、`TestWithServerMergesNonZeroFields`、`TestServerConfigReachesHTTPServer`（1 KiB 上限下超限请求头被拒 431）。
-- [x] 流式响应可用：`c.Writer()` + `c.Flush()` 逐段推送（SSE），首刷（= 第一次写出：`Write` / `Flush` / 引擎收尾）落 `Status()` 设置（缺省 200）；底层不支持 `http.Flusher` 时返回明确 error；**仍是一条 AccessLog**（状态码与体积照常采集）
+- [x] **流式响应可用**：`c.Writer()` + `c.Flush()` 逐段推送（SSE），首刷（= 第一次写出：`Write` / `Flush` / 引擎收尾）落 `Status()` 设置（缺省 200）；底层不支持 `http.Flusher` 时返回明确 error；**仍是一条 AccessLog**（状态码与体积照常采集）
   证据：`TestCtxFlushStreamsIncrementally`（第一段在 handler 仍挂起时已到达客户端——只有真 flush 做得到；同一条用例断 `Status="200"` 与 `http.response.body.size=18`）、`TestFlushFirstWriteUsesStatus` / `TestFlushFirstWriteDefaultsTo200` / `TestStatusAfterFlushIgnored`（首刷吃 `Status`，首刷后不可改）、`TestStatusAppliedOnFirstWrite` / `TestStatusAfterWriteIgnored`（直接写字节同样是首刷）、`TestCtxFlushWithoutFlusherReturnsError`、`TestResponseWriterKeepsFlusherCapability`（能力边界：`Flusher` ✅，`FlushError` / `Hijacker` / `Pusher` / `SetWriteDeadline` ❌）。
-- [x] 请求体绑定完整：`Ctx.Bind` 按 Content-Type 分派（JSON / XML / form-urlencoded / multipart；无 body 落 query），`BindQuery` 显式 query；`WithMaxBodyBytes` 上限对**全部**读取路径生效（超限 → 413 + `body_too_large`）
+- [x] **请求体绑定完整**：`Ctx.Bind` 按 Content-Type 分派（JSON / XML / form-urlencoded / multipart；无 body 落 query），`BindQuery` 显式 query；`WithMaxBodyBytes` 上限对**全部**读取路径生效（超限 → 413 + `body_too_large`）
   证据：`bind_test.go` 19 条——分派（`TestBindJSON` / `TestBindXML` / `TestBindForm` / `TestBindFormQueryIsNotMerged` / `TestBindMultipart` / `TestBindQuery` / `TestBindUnsupportedMediaType` / `TestBindNoContentTypeFallsBackToForm` / `TestBindContentTypeWithParameters` / `TestBindJSONSlice`）、映射（`TestBindMoreScalarKinds`）、上限（`TestBindMaxBodyBytes` 读取闸门 + Content-Length 预检两路径、`TestBindURLEncodedOverLimit` 10 MiB 解析闸有 / 无 CT、`TestBindUserWrappedMaxBytesReader` 用户自包、`TestBindDefaultNoLimit` 默认不限）、健壮性（`TestBindMalformedInputs` / `TestBindJSONTrailingData` / `TestBindTargetErrors` / `TestBindQueryTargetError`）。
 - [x] **按路由 / 分组限请求体**：`BodyLimit(n)` 中间件可挂分组与单条路由，与引擎级 `WithMaxBodyBytes` 叠加时**取最严**（只能收紧、不能放宽）；超限 413 + `body_too_large`，cause 与既有两条超限路径同型（`*http.MaxBytesError`）；补导出构造器 `TooLarge`（#38）
   证据：`bodylimit_test.go` 10 条——分组（`TestBodyLimitOnGroup`）、路由与分组叠加（`TestBodyLimitOnRoute`）、边界（`TestBodyLimitBoundary`：恰好 n 通过 / n+1 得 413）、声明未知 chunked（`TestBodyLimitChunked`）、只能收紧（`TestBodyLimitCannotLoosen`：引擎级 1 KiB 拦得住路由级 1 MiB）、预检不读 body（`TestBodyLimitPrecheckRejectsDeclaredOverLimit`）、cause 同型两条路径（`TestBodyLimitCauseType`）、`n <= 0` 直通（`TestBodyLimitNonPositiveIsPassThrough`）、构造器（`TestTooLargeConstructor`）、真实连接上「超限关连接」语义不丢（`TestBodyLimitKeepsCloseConnection`：断言响应带 `Connection: close`，即 `MaxBytesReader` 的 `w` 拿到的是原始 writer 而非包装器）。
-- [x] 写出 / 错误语义收口：`c.JSON` 先编码成功才写头（失败 → 500 统一错误体，不再 200 空体）；`c.Flush` 与包装器 `Flush` 同一实现、首刷吃 `Status()`；`panic(web.NotFound(...))` 一律 500（要 4xx 请 return）
+- [x] **写出 / 错误语义收口**：`c.JSON` 先编码成功才写头（失败 → 500 统一错误体，不再 200 空体）；`c.Flush` 与包装器 `Flush` 同一实现、首刷吃 `Status()`；`panic(web.NotFound(...))` 一律 500（要 4xx 请 return）
   证据：`TestJSONEncodeFailureMappedTo500` / `TestJSONBytesStable`（尾换行保留）/ `TestPanicHTTPErrorMapsTo500`；Flush 三条见上一条。
-- [x] 性能回归：请求路径开销进入仓库 bench，作为基线不劣化
+- [x] **性能回归**：请求路径开销进入仓库 bench，作为基线不劣化
   证据：`bench/` 全套基准 + 分配预算门禁 `TestRequestPathAllocBudget`（CI 的 `Alloc budget` 步骤，不带 `-race` 执行）。
-- [x] 真实负载下与 gin 同级（不以 micro-benchmark 胜负作承诺）——**已验证一次**：裸档 0.94× / 0.97×（见「表 C」；采集工程不入库，保留在 PR #19 的分支 `bench/gin-compare`）
+- [x] **真实负载与 gin 同级**（不以 micro-benchmark 胜负作承诺）——**已验证一次**：裸档 0.94× / 0.97×（见「表 C」；采集工程不入库，保留在 PR #19 的分支 `bench/gin-compare`）
