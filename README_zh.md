@@ -15,7 +15,7 @@
 
 [English](README.md) | **中文**
 
-基于 [pulse](https://github.com/Luo-root/pulse) 的 **kernel** 与 **observability** 构建的通用 Go web 服务框架。
+基于 [pulse](https://github.com/Luo-root/pulse) 的 **kernel** 与 **observability** 构建的通用 Go web 服务框架——**带 IoC 生命周期与一等观测的服务基座**，面向装配本身就是难点的那类服务：组件多、需要热更新、需要一份统一的运行观测。
 
 - **装配内核**——kernel 的 IoC、可逆生命周期、请求作用域与事件总线
 - **一等观测**——每请求一个 32hex TraceID、结构化记录与装配诊断，默认就已接好；默认出口把每条记录渲染成一行给人读的列式输出
