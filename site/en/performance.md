@@ -83,27 +83,31 @@ go test -run '^$' -bench 'BenchmarkSinkWrite_ConsoleVsUpstream|BenchmarkRequestP
 
 For choosing a sink see [observability](/en/guide/observability); when throughput matters, wrap the slow sink in `observability.NewAsyncSink`.
 
-## Real load against gin (a one-off verification, 2026-09-14)
+## Real load against gin (2026-09-16, on AC power)
 
 This section answers "**is it on par with gin**". The measurement code (`loadtest/`, a separate module carrying the gin dependency) **never entered the repository**; it lives on branch `bench/gin-compare`. Only the protocol and conclusions are kept here.
 
-Protocol: two separate processes sharing one `http.ListenAndServe` bootstrap with **only the handler varying**; within a cell the two sides run adjacent and swap order on odd/even rounds, with **only even rounds counting**; each cell takes the whole set of percentiles from the round whose RPS is the median, and the ratio takes the **median of the per-round paired ratios**. The load generator is hand-written (fixed concurrency, full connection reuse, every request inside the timing window entering the percentiles, no sampling). Machine: i9-14900HX / 32 logical cores / `GOMAXPROCS=32` / Go 1.27 / Windows amd64.
+Protocol: two separate processes sharing one `http.ListenAndServe` bootstrap with **only the handler varying**; within a cell the two sides run adjacent and swap order on odd/even rounds, with **only even rounds counting**; each cell takes the whole set of percentiles from the round whose RPS is the median, and the ratio takes the **median of the per-round paired ratios**. The load generator is hand-written (fixed concurrency, full connection reuse, every request inside the timing window entering the percentiles, no sampling). Machine: i9-14900HX / 32 logical cores / `GOMAXPROCS=32` / Go 1.27 / Windows amd64, **on AC power**. Both sides point their log sink at a null device — the per-request formatting cost is kept, terminal and pipe I/O are excluded.
 
 | Pairing | Concurrency | pulse-web RPS | gin RPS | pulse/gin | pulse p99 | gin p99 |
 |---|---|---|---|---|---|---|
-| `bare` | 64 | 58562 | 61790 | **0.94x** | 4.63ms | 4.71ms |
-| `bare` | 256 | 64986 | 67915 | **0.97x** | 16.80ms | 20.07ms |
+| `bare` | 64 | 55910 | 62756 | **0.90x** | 4.91ms | 4.56ms |
+| `bare` | 256 | 64423 | 67687 | **0.95x** | 17.74ms | 20.78ms |
+| `obs` | 64 | 47226 | 58620 | **0.81x** | 5.52ms | 5.06ms |
+| `obs` | 256 | 61098 | 66238 | **0.92x** | 18.77ms | 21.04ms |
 
-- **The bare pairing is on par**: 0.94–0.97×, a 3–6% gap; at concurrency 256 the p99 is actually lower (16.80ms vs 20.07ms). The pairing is `gin.New()` ↔ `web.New(web.Minimal())` — neither side carries default middleware.
+- **The bare pairing is on par**: 0.90–0.95×; at concurrency 256 the p99 is actually lower (17.74ms vs 20.78ms). The pairing is `gin.New()` ↔ `web.New(web.Minimal())` — neither side carries default middleware.
+- **The observability pairing** (`gin.Default()` ↔ `web.New()`, both sides with their default middleware): 0.81× / 0.92×. On this pairing pulse-web additionally does three things gin does not — a TraceID, the route template (`/users/{id}` rather than the concrete path), and error classification.
 - **What carries the protocol is the pairing, not the absolute values**: the same cell moved from 49k to 78k between sessions, so only the paired ratio within one round counts (whole-machine drift such as the power state cancels out).
-- An observability pairing (`gin.Default()` ↔ `web.New()`) used the **old default sink** (`SlogSink`, since replaced by `ConsoleSink`), so it does not describe the current state and is not expanded here; it stays in the design document as the record of *why* the default sink changed.
+- The previous round (2026-09-14) had the observability pairing at **0.65× / 0.88×** — that round used the **then-current** default sink `SlogSink`. With the default now `ConsoleSink` and the same protocol re-run, the numbers above are what you get. Absolute values are not comparable across rounds; only the paired ratio from the same round is.
 
 Reproduce:
 
 ```bash
-git worktree add --detach ../pulse-web-gin-compare origin/bench/gin-compare
-cd ../pulse-web-gin-compare/loadtest
-go run ./cmd/compare -probe -passes 4 -d 8s -warmup 2s   # the run recorded in the docs
+git worktree add ../pulse-web-loadtest main                      # the code under test is main
+git -C ../pulse-web-loadtest checkout bench/gin-compare -- loadtest
+cd ../pulse-web-loadtest/loadtest
+go run ./cmd/compare -probe -passes 4 -d 8s -warmup 2s           # the run recorded in the docs
 ```
 
 The comparison project is its own module: the core module has zero third-party dependencies, and **it does not make an exception to compare itself against gin** — gin appears only inside that module.

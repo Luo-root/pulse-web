@@ -83,27 +83,31 @@ go test -run '^$' -bench 'BenchmarkSinkWrite_ConsoleVsUpstream|BenchmarkRequestP
 
 出口怎么选见[观测](/guide/observability)；要吞吐就把慢出口包进 `observability.NewAsyncSink`。
 
-## 与 gin 的真实负载对比（一次性验证，2026-09-14）
+## 与 gin 的真实负载对比（2026-09-16，插电）
 
 这一节回答「**与 gin 同级吗**」。采集工程（`loadtest/`，带 gin 依赖的独立 module）**没有进仓库**，保留在分支 `bench/gin-compare`；这里只留口径与结论。
 
-口径：两侧独立进程、共用同一份 `http.ListenAndServe` bootstrap、**只让 handler 是变量**；同一格内两侧相邻跑、奇偶轮交换先后、**只用偶数轮**；每格取 RPS 中位那一轮的整套分位，两侧比值取**逐轮配对比值的中位**。压测器自写（固定并发、连接全复用、计时窗口内每个请求都进分位，不采样）。机器：i9-14900HX / 32 逻辑核 / `GOMAXPROCS=32` / Go 1.27 / Windows amd64。
+口径：两侧独立进程、共用同一份 `http.ListenAndServe` bootstrap、**只让 handler 是变量**；同一格内两侧相邻跑、奇偶轮交换先后、**只用偶数轮**；每格取 RPS 中位那一轮的整套分位，两侧比值取**逐轮配对比值的中位**。压测器自写（固定并发、连接全复用、计时窗口内每个请求都进分位，不采样）。机器：i9-14900HX / 32 逻辑核 / `GOMAXPROCS=32` / Go 1.27 / Windows amd64，**插电**。两侧的日志出口都指向空设备——保留每请求的格式化成本，排除终端 / 管道 I/O。
 
 | 档位 | 并发 | pulse-web RPS | gin RPS | pulse/gin | pulse p99 | gin p99 |
 |---|---|---|---|---|---|---|
-| `bare` | 64 | 58562 | 61790 | **0.94x** | 4.63ms | 4.71ms |
-| `bare` | 256 | 64986 | 67915 | **0.97x** | 16.80ms | 20.07ms |
+| `bare` | 64 | 55910 | 62756 | **0.90x** | 4.91ms | 4.56ms |
+| `bare` | 256 | 64423 | 67687 | **0.95x** | 17.74ms | 20.78ms |
+| `obs` | 64 | 47226 | 58620 | **0.81x** | 5.52ms | 5.06ms |
+| `obs` | 256 | 61098 | 66238 | **0.92x** | 18.77ms | 21.04ms |
 
-- **裸档同级**：0.94–0.97×，差 3–6%；并发 256 时 p99 反而更低（16.80ms vs 20.07ms）。对拍档是 `gin.New()` ↔ `web.New(web.Minimal())`——两侧都没有默认中间件。
+- **裸档同级**：0.90–0.95×；并发 256 时 p99 反而更低（17.74ms vs 20.78ms）。对拍档是 `gin.New()` ↔ `web.New(web.Minimal())`——两侧都没有默认中间件。
+- **观测档**（`gin.Default()` ↔ `web.New()`，两侧都开默认中间件）：0.81× / 0.92×。pulse-web 这一档比 gin 多做三件事——TraceID、路由模板（`/users/{id}` 而不是实际路径）、错误分类。
 - **口径的效力在「配对」上，不在绝对值上**：同一格换一次会话能从 49k 变到 78k，所以只认同轮配对比值（供电状态这类整机漂移被配对抵消）。
-- 观测档（`gin.Default()` ↔ `web.New()`）用的是**旧默认出口**（`SlogSink`，现已换成 `ConsoleSink`），不代表现状，因此不在本页展开；它留在设计文档里，作为「默认出口为什么换」的记录。
+- 上一轮（2026-09-14）观测档是 **0.65× / 0.88×**——那轮用的是**当时的**默认出口 `SlogSink`；默认换成 `ConsoleSink` 后按同一口径重跑，就是上面这两个数。绝对值跨轮不可比，这里只比同轮配对出来的比值。
 
 复现：
 
 ```bash
-git worktree add --detach ../pulse-web-gin-compare origin/bench/gin-compare
-cd ../pulse-web-gin-compare/loadtest
-go run ./cmd/compare -probe -passes 4 -d 8s -warmup 2s   # 记录进文档的那次
+git worktree add ../pulse-web-loadtest main                      # 被测代码 = 当前主干
+git -C ../pulse-web-loadtest checkout bench/gin-compare -- loadtest
+cd ../pulse-web-loadtest/loadtest
+go run ./cmd/compare -probe -passes 4 -d 8s -warmup 2s           # 记录进文档的那次
 ```
 
 对照工程是独立 module：核心模块零第三方依赖，**不为「跟 gin 比一次」破例**，gin 只出现在那个 module 里。
