@@ -1,5 +1,5 @@
 <div align="center">
-  <img alt="Pulse-Web" src="assets/banner.svg" width="353">
+  <a href="https://luo-root.github.io/pulse-web/"><img alt="Pulse-Web" src="assets/banner.svg" width="353"></a>
 </div>
 
 <div align="center">
