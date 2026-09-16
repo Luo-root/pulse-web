@@ -56,7 +56,7 @@ What you pay is **ownership**, and both halves need handling:
 2. **The lifecycle is yours.** An async sink changes how "no residues after the tree is disposed" is achieved: you must `Flush(ctx)` or `Close(ctx)` before shutdown, or the queued records leave with the process. The engine's shutdown sequence flushes what has already been produced, but it does not `Close` for you — if you hand ownership to the framework, background tasks you detached get silently truncated.
 
 ::: tip Where the numbers are
-The measurements behind "how much does the sink cost" (real-load comparison, micro-benchmarks, allocation counts) live in the design document's performance section. This site's performance page is the public version of it, landing shortly.
+The measurements behind "how much does the sink cost" (real-load comparison, micro-benchmarks, allocation counts) are on the [performance page](/en/performance) — the public version of the three tables, with reproduction commands and protocols; the full protocols and derivations live in the design document's measured-data section.
 :::
 
 ## What every request gets
