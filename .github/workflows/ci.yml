@@ -63,8 +63,12 @@ jobs:
       # （ns 跨轮会漂 2–4×，做阈值等于把机器状态引进 CI）。
       # 必须**不带** -race：race 检测器会把 B/op 抬高（实测默认路径 6314 → 6342），
       # 所以那个文件用 `//go:build !race` 排除在 race 构建外，由本步骤执行。
+      #
+      # `-v` 不能省：预算常量是按开发机（windows/amd64）实测收紧的，门禁却跑在
+      # ubuntu runner 上——日志里必须留下 runner **自己测到的值**，否则「常量是否跨平台
+      # 成立」只能靠本地复现来猜，刷新常量时看不到依据（#56）。
       - name: Alloc budget
-        run: go test -run TestRequestPathAllocBudget ./bench/
+        run: go test -run TestRequestPathAllocBudget ./bench/ -v
 
       - name: Bench compile check
         run: go test -run '^$' -bench '^$' ./bench/
