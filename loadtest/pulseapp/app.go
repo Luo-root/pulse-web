@@ -7,7 +7,6 @@ package pulseapp
 
 import (
 	"io"
-	"log/slog"
 	"net/http"
 
 	web "github.com/Luo-root/pulse-web"
@@ -30,14 +29,16 @@ const (
 	ModeBare Mode = "bare"
 
 	// ModeObs 对拍 gin.Default()（Logger + Recovery）：默认装配
-	// （Bootstrap + Trace + 访问日志）+ **默认出口形态**（SlogSink → slog 文本 handler）。
+	// （Bootstrap + Trace + 访问日志）+ **默认出口形态**（`ConsoleSink`，
+	// 给人读的列式单行；见 engine.go 的 newDefaultSink）。
 	//
-	// 出口目的地是空设备而不是 stderr：保留每请求的**格式化成本**，排除磁盘 I/O。
-	// 真实部署里它是 stderr（然后落到采集器），那时磁盘/采集成本两边都要付。
+	// 出口目的地是空设备而不是 stdout：保留每请求的**格式化成本**，同时排除终端 /
+	// 管道 I/O——写管道要付系统调用，父进程还得起读取协程，那笔账会把两侧都拖进对比。
+	// 真实部署里它是 stdout（然后落到采集器），那时磁盘/采集成本两边都要付。
 	ModeObs Mode = "obs"
 
 	// ModeObsLine 诊断：把出口换成 observability.NewLineSink（行式缓冲出口）。
-	// **它不是默认出口**——上一版对比误把它当默认形态用了，这一档用来量出
+	// **它不是默认出口**——上一版对比误把当时的默认形态当成了唯一形态，这一档用来量出
 	// 「换出口」本身值多少。
 	ModeObsLine Mode = "obs-line"
 
@@ -56,10 +57,14 @@ const (
 	ModeObsNoLog Mode = "obs-nolog"
 )
 
-// discardSlog 是「默认出口形态 + 空目的地」：SlogSink 不指定 Logger 时走
-// slog.Default()（→ stderr），这里给一个写空设备的文本 handler。
-func discardSlog() observability.Sink {
-	return observability.SlogSink{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+// discardConsole 是「默认出口形态 + 空目的地」：框架默认出口是
+// `NewConsoleSink(os.Stdout)`（engine.go 的 newDefaultSink），这里给一个写空设备的
+// ConsoleSink——同一条渲染路径，只把目的地换掉。
+//
+// 跟着默认走、不要写死具体出口类型：本轮就是因为写死了当时的默认（`SlogSink`），
+// 默认换成 ConsoleSink 之后这一档量到的已经不是「默认开箱配置」了（#68）。
+func discardConsole() observability.Sink {
+	return web.NewConsoleSink(io.Discard)
 }
 
 // New 按档位构造压测用 handler。
@@ -69,7 +74,7 @@ func New(mode Mode) http.Handler {
 	case ModeBare:
 		app = web.New(web.Minimal())
 	case ModeObs:
-		app = web.New(web.WithSink(discardSlog()))
+		app = web.New(web.WithSink(discardConsole()))
 	case ModeObsLine:
 		app = web.New(web.WithSink(observability.NewLineSink(io.Discard)))
 	case ModeObsAsync:
@@ -77,7 +82,7 @@ func New(mode Mode) http.Handler {
 	case ModeObsFast:
 		app = web.New(web.WithSink(fastsink.New(io.Discard)))
 	case ModeObsNoLog:
-		app = web.New(web.WithSink(discardSlog()), web.WithoutAccessLog())
+		app = web.New(web.WithSink(discardConsole()), web.WithoutAccessLog())
 	default:
 		panic("pulseapp: 未知档位 " + string(mode))
 	}
