@@ -72,3 +72,14 @@ jobs:
 
       - name: Bench compile check
         run: go test -run '^$' -bench '^$' ./bench/
+
+      # loadtest 是仓库里的**独立 module**（自带 go.mod、带 gin 依赖），根 module 的 `./...`
+      # 盖不到它——这正是它以前待在侧分支上时能静默过期的原因：默认出口从 SlogSink 换成
+      # ConsoleSink 之后，那一档继续按「默认出口」的名义量旧默认，没人报错（#73）。
+      # 这里只跑 build / vet / test 防腐烂；**不跑压测与基准**：CI 上的计时是噪声。
+      - name: Loadtest module
+        run: |
+          cd loadtest
+          go build ./...
+          go vet ./...
+          go test ./...
