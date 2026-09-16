@@ -208,8 +208,11 @@ web.WithSink(observability.MultiSink{a, b})                     // 同时送多�
 - `c.TraceID()`——handler、访问日志与下游调用拿到的是同一个 id
 - `c.Observe("order.paid", func(a *observability.Attrs) { a.Set("order_id", id) })`——你自己的事件与框架的进同一个出口
 - `web.WithCollector()`——需要请求级 fiber 可见性时，把 kernel collector 挂到请求作用域
+- `web.WithSpanHook(hook)`——让你的追踪栈拥有请求的 span；官方 OpenTelemetry 适配是嵌套 module [`otel/`](otel/)
 - `web.WithRoot(root)`——接入既有 kernel 树；注意 `Run` / `Serve` 返回时会级联销毁它，之后不要再使用
 - `app.Debug("/debug/assembly")`——装配状态的 JSON 视图（快照、fiber、插件）
+
+span 出口让请求在你的追踪后端里成为**一条真实 span**。框架**不编造 span-id**：id 由你的 tracer 分配、框架采用它，于是 `Server-Timing`、访问记录里的 `span.id`、下游客户端发出去的 `traceparent` 三处指向同一条真实 span。注意 `Server-Timing` 与 **`X-Trace-Id` 是两个不同的头**：后者是本框架自己的既有契约、只有 trace-id；前者是 W3C 定义的**响应侧**绑定、带**本请求的 span-id**（有 span 才写）。
 
 记录的值域只有标量（`~string | ~int64 | ~float64 | ~bool`），没有 `map[string]any` 逃生舱，所以请求体、请求头、query 在类型上就进不了日志。默认出口写 stdout，它**不是持久化层**——轮转与保留归你的平台（容器、journald，或你自己给的 writer）。
 

@@ -24,12 +24,12 @@ import (
 // build tag 临时翻成 `race` 跑的同一套 harness）：
 //
 //	档                     !race        race
-//	default              22 / 6298   22 / 6326
-//	collector            34 / 6787   34 / 6830
-//	minimal              17 / 5841   17 / 5861
-//	default+console-sink 22 / 6298   22 / 6326
-//	default+json         25 / 6437   26 / 6569  ← 连分配计数都多一次
-//	default+body-limit   23 / 6362   23 / 6390
+//	default              22 / 6306   22 / 6334
+//	collector            34 / 6793   34 / 6837
+//	minimal              17 / 5849   17 / 5868
+//	default+console-sink 22 / 6305   22 / 6333
+//	default+json         25 / 6435   26 / 6565  ← 连分配计数都多一次
+//	default+body-limit   23 / 6369   23 / 6397
 //
 // 所以排除在 race 构建外不只是「B/op 会被抬高 +20 … +43」：`c.JSON` 档在 race 下
 // **分配计数也会多一次**（25 → 26），拿 race 数字当基线等于把检测器自身的开销钉进去。
@@ -51,14 +51,14 @@ import (
 // B/op 里有一项按**每次 benchmark 调用**摊开的常数（拟合约 10 KB / N），所以它随 N 漂。
 // 实测（同一份二进制、同机 i9-14900HX，windows/amd64 与 linux/amd64 都验过）：
 //
-//	-benchtime=2000x     6303 B/op
-//	-benchtime=20000x    6299 B/op
-//	-benchtime=400000x   6298 B/op
-//	默认 1 s 窗口        6289 B/op   ← N 由机器快慢决定，同一份代码能落在 6289…6303
+//	-benchtime=2000x     6316 B/op
+//	-benchtime=20000x    6314 B/op
+//	-benchtime=400000x   6314 B/op
+//	默认 1 s 窗口        6314 B/op   ← 这一档的 N（本机 60 万级）与 400000x 同量级
 //
-// 也就是说：**跨环境差的不是平台，是 N**。「按 GOOS/GOARCH 记两份基线」是把环境差
+// 也就是说：**跨环境差的不是平台，是 N 与 P**。「按 GOOS/GOARCH 记两份基线」是把环境差
 // 误认成平台差——同一个二进制在 windows 与 linux 上只要 N 固定就逐项相同，而 1 s
-// 窗口下两边都能给出 6289 或 6298，取决于当时的 N（#71 的定位结论）。
+// 窗口下两边都能给出不同的数，取决于当时落到的 N 与 P（#71 的定位结论）。
 // 把 N 钉死后基线收敛成一份，8 字节 slack 在每个环境都保住灵敏度。
 const (
 	budgetDefaultAllocs   = 22
@@ -96,6 +96,8 @@ const (
 //	Windows amd64，固定 N=20000x          6298     5841   6437
 //	默认 1 s 窗口（两平台都可能落在）      6289     5833   6418
 //
+// 上表是 #71 那一轮（span 缝之前）的数；#76 之后每档 +16，当前值见 budgetBytes。
+//
 // 换成反过来的说法：会变的是 **N**，不是 OS（机制见文件头）。门禁自己把 N 钉在
 // fixedIterations 上，所以这里只需要一份基线。
 type budgetBytesPerCase struct {
@@ -115,20 +117,30 @@ const fixedIterations = 20000
 
 // fixedProcs 是门禁量分配时钉住的 GOMAXPROCS。
 //
-// B/op 的第二个自变量就是 P 数（实测同一份二进制、同一台机器：32 P → 6302、
-// 8 P → 6292、4 P → 6290、2 P → 6289）。同一个 P 下 windows/amd64 与 linux/amd64
-// 逐项相同（4 P：两边都是 6290 / 6777 / 5833 / 6289 / 6418 / 6353）——所以
-// 「平台差」从来不存在，存在的是「N 差 + P 差」，而这两样都能钉。
+// B/op 的第二个自变量是 P 数，杠杆比 N 大（同一份二进制、同一台机器、固定
+// N=20000x；#76 之后重测：2 P → 6304、4 P → 6305、8 P → 6306、32 P → 6314，
+// 即 2 P 换到 32 P 差 10 字节，而 N 在 2000x…400000x 之间只差 2 字节）。同一个 P 下
+// windows/amd64 与 linux/amd64 逐项相同（#71 轮 4 P：两边都是
+// 6290 / 6777 / 5833 / 6289 / 6418 / 6353）——所以「平台差」从来不存在，存在的是
+// 「N 差 + P 差」，而这两样都能钉。
 //
 // 取 4：与 CI runner（ubuntu-latest 4 vCPU）同档，于是本地与 CI 报同一个数。
 const fixedProcs = 4
 
+// 2026-09-16（#76，span 缝）：五个档位 B/op 一律 +16 —— `Ctx` 多了一个存 span
+// 身份的指针字段，结构体从 96 涨到 112 字节（尺寸类跳档），于是每请求的 Ctx
+// 分配多 16 字节，与档位无关。这是**有意**的取舍，不是漂移：
+//
+//   - 分配**计数**逐档不变（指针为 nil 时不产生分配）——门禁的第一判据没动；
+//   - 换来的是「span 数据随请求走」的单一存放点，而不是把身份拆到 context 值里
+//     （那会在 404 这类没走到注册处理器的路径上丢数据，见 context.go 注释）；
+//   - 不装 WithSpanHook 的宿主同样付这 16 字节（Ctx 定长）——已同步进设计文档表 B。
 var budgetBytes = budgetBytesPerCase{
-	def:         6290,
-	collector:   6777,
-	minimal:     5833,
-	consoleSink: 6289,
-	json:        6419,
+	def:         6306,
+	collector:   6793,
+	minimal:     5849,
+	consoleSink: 6305,
+	json:        6435,
 }
 
 // measureFixed 在固定迭代数下量每个 op 的分配。
@@ -165,7 +177,7 @@ func TestRequestPathAllocBudget(t *testing.T) {
 		{"default", func(tb testing.TB) (*web.Engine, func()) { return enginePathApp(tb, 0) },
 			budgetDefaultAllocs, int64(budgetBytes.def)},
 		// 解耦对照：插件树规模不改变分配计数（红线：默认路径零全局 Provide）。
-		// B/op 不断言——实测 50 插件比空树多 1 字节（本机 6298 → 6299），常量级差异，
+		// B/op 不断言——实测 50 插件比空树多 1 字节（本机 6314 → 6315），常量级差异，
 		// 卡它只会带来假红。
 		{"plugins=50", func(tb testing.TB) (*web.Engine, func()) { return enginePathApp(tb, 50) },
 			budgetDefaultAllocs, 0},

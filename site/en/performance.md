@@ -23,6 +23,8 @@ For absolute values, run the commands below on a quiet machine and compare again
 
 Protocol: `-benchtime=20000x -count=5`, median, one round, one protocol. **Any Δ you subtract must use two rows of this table.**
 
+> Every `Engine` row's B/op includes **16 bytes** for the `Ctx` field holding the span identity (2026-09-17 · [#76](https://github.com/Luo-root/pulse-web/issues/76)): `Ctx` is fixed-size, so a host that never installs a span hook still pays it. **Alloc counts are unchanged in every row.** The ns column is still the round from before that field existed (ns is not gated and drifts across rounds; alloc counts and B/op are the deterministic criteria).
+
 | Scenario | ns/op | allocs | B/op |
 |---|---|---|---|
 | stdlib ServeMux route match (**control**, framework-independent) | 198 | 5 | 224 |
@@ -31,20 +33,20 @@ Protocol: `-benchtime=20000x -count=5`, median, one round, one protocol. **Any �
 | + `observability.AttachCollector` | 342 | 14 | 681 |
 | same · 10 / 50 / 100 plugin tree | 345 / 361 / 370 | 14 | 681 |
 | same · 50 plugins, parallel | 566 | 14 | 681 |
-| `Engine` request path (`New()`, 0 / 10 / 50 plugins) | 1774 / 1819 / 1937 | 22 | 6298 |
-| `Engine` request path + `WithCollector()` | 2123 | **34** | 6787 |
-| `Engine` request path (`Minimal()`) | 1443 | 17 | 5841 |
-| `Engine` request path + `BodyLimit` route | 1877 | **23** | 6362 |
-| `Engine` request path + `c.JSON` | see below | **25** | 6437 |
+| `Engine` request path (`New()`, 0 / 10 / 50 plugins) | 1774 / 1819 / 1937 | 22 | 6314 |
+| `Engine` request path + `WithCollector()` | 2123 | **34** | 6803 |
+| `Engine` request path (`Minimal()`) | 1443 | 17 | 5858 |
+| `Engine` request path + `BodyLimit` route | 1877 | **23** | 6379 |
+| `Engine` request path + `c.JSON` | see below | **25** | 6453 |
 
 Δ derived from two rows of this table (same round, so subtracting is valid):
 
 - **Per-request cost of `WithCollector()`** = 2123 − 1774 = **+349 ns / +12 allocs** (end to end)
 - **What `Minimal()` saves** = 1774 − 1443 = **−331 ns / −5 allocs** (Trace / AccessLog / Sink switched off)
 - **Per-request cost of `BodyLimit`** = 1877 − 1774 = **+103 ns / +1 alloc** — the extra allocation is the wrapper `http.MaxBytesReader` returns (bound to the request, not reusable); that 103 ns still sits inside the noise (the five runs of that cell landed between 1839 and 2177).
-- **Assembly size does not reach the request path**: the `Engine` request path at 0 / 10 / 50 plugins is 1774 / 1819 / 1937 ns with **allocs constant at 22 and B/op constant at 6298**; at the kernel level the 10 / 50 / 100 plugin trees hold **allocs constant at 14**. Plugin-tree size does not change per-request cost — that is the premise the assembly story rests on.
+- **Assembly size does not reach the request path**: the `Engine` request path at 0 / 10 / 50 plugins is 1774 / 1819 / 1937 ns with **allocs constant at 22 and B/op constant at 6314**; at the kernel level the 10 / 50 / 100 plugin trees hold **allocs constant at 14**. Plugin-tree size does not change per-request cost — that is the premise the assembly story rests on.
 - **Containment self-check (against inverted conclusions)**: `AttachCollector` = bare binding + one Collector struct, so the criterion is **B/op** (681 > 649). Both report 14 allocs; their ns happen to agree in direction this round (342 > 327) but are only 4% apart, inside the noise band — **do not draw this conclusion from ns**.
-- **Encoding to a buffer in `c.JSON`**: **+2 allocs** per response (22 → 25, a deterministic criterion covered by the allocation gate), bought "an encoding failure no longer sends an empty 200". The B/op figure of 6437 comes from the **same-round probe** in the design document (6341 → 6437, i.e. +96 B) — it is *not* from the same round as this table's `Engine` row of 6298, so **do not subtract them**. For the time, run the control in the same round.
+- **Encoding to a buffer in `c.JSON`**: **+2 allocs** per response (22 → 25, a deterministic criterion covered by the allocation gate), bought "an encoding failure no longer sends an empty 200". The B/op figure of 6453 comes from the **same-round probe** in the design document (6341 → 6453, i.e. +112 B) — it is *not* from the same round as this table's `Engine` row of 6314, so **do not subtract them**. For the time, run the control in the same round.
 
 Reproduce:
 

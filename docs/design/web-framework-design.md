@@ -16,7 +16,7 @@
 3. **错误模型**——`HTTPError` + `StatusCoder` 接口 + 默认 mapper（脱敏）
 4. **请求体绑定**——`Ctx.Bind` 按 Content-Type 分派（JSON / XML / form-urlencoded / multipart，全 stdlib 实现），`BindQuery` 显式 query；可选 `WithMaxBodyBytes` 全局上限（见 [#32](https://github.com/Luo-root/pulse-web/issues/32)）；`BodyLimit(n)` 中间件按路由 / 分组收紧（见 [#38](https://github.com/Luo-root/pulse-web/issues/38)）
 5. **请求作用域**——每请求派生 kernel scope，handler 返回即 `Dispose`（在写响应之前）
-6. **一等观测**——装配期 `Bootstrap` + 请求期 `Trace` + `AccessLog`；32hex TraceID；`X-Trace-Id` 回写
+6. **一等观测**——装配期 `Bootstrap` + 请求期 `Trace` + `AccessLog`；32hex TraceID；`X-Trace-Id` 回写；可选 **span 出口**（`WithSpanHook`，把请求接进 W3C / OTel 追踪体系，见 [#76](https://github.com/Luo-root/pulse-web/issues/76)）
 7. **进程级装配面**——`app.Root()` / `web.WithRoot(k)`；其余用 kernel 原生 API（`Provide` / `Use` / `Loader`）
 8. **生命周期**——`Run`（信号 → `Server.Shutdown` → `OnShutdown` → `root.Dispose` → Sink flush）、`Serve`、`Handler`
 9. **stdlib 互操作**——`Wrap(http.Handler) Handler`，`Handler()` 反向导出
@@ -26,7 +26,7 @@
 
 ## 不做什么（v1 明确排除）
 
-前端界面 / ORM / 策略中间件（认证 / 限流 / 熔断）/ 微服务治理 / 第三方路由库 / `HoldScope` / `RunTLS` / `Recover()` 中间件 / 内部 Router 抽象 / TTFB / 流式双记录 / 假 span-id。
+前端界面 / ORM / 策略中间件（认证 / 限流 / 熔断）/ 微服务治理 / 第三方路由库 / `HoldScope` / `RunTLS` / `Recover()` 中间件 / 内部 Router 抽象 / TTFB / 流式双记录 / **框架自己编造 span-id**。
 
 **后续计划：WebSocket**——stdlib 没有 WebSocket 实现（`net/http` 只提供 Hijack / Upgrade 机制，帧协议需自实现），引入它必然带第三方依赖（社区域主流是 `coder/websocket`）。因此作为**可选子包**（`pulse-web/ws`）后续加入，核心保持零依赖。
 
@@ -110,6 +110,10 @@ g2.GET("/users", h, mw3)
 
 ### 表 B：当前版本的成本分解（**同轮同口径**，2026-09-16，插电，`-benchtime=20000x -count=5`）
 
+> **2026-09-17 · [#76](https://github.com/Luo-root/pulse-web/issues/76) 的 +16 字节**：`Ctx` 多了一个存 span 身份的字段（96 → 112 字节，跨尺寸类），于是**凡请求路径上带 `Ctx` 的档，B/op 一律 +16**——下表 B/op 列已按这条规则更新（6298 → **6314**、6299 → **6315**、6787 → **6803**、5841 → **5858**、6362 → **6379**、6437 → **6453**），**分配计数逐档不变**（字段为 nil 不产生分配；与档位、插件树规模都无关）。本文档其他位置写作这些数的行同样适用这条规则。代价是有意的：换来「span 数据随请求走」的单一存放点，而不是把身份拆进 context 值（那会在 404 这类没走到注册 handler 的路径上丢数据，见 `context.go`）。复采口径同上表头（`-benchtime=20000x -count=5`，32 P）。
+>
+> **ns 列没有跟着重采，仍是 2026-09-16 那一轮。** 本轮复采时 `LocalBinding` 与 `AttachCollector` 这对**有包含关系**的行出现了倒挂（中位数 376.1 vs 346.7，n=10；上一轮 326.7 vs 341.9，方向相反）——后者 = 前者 + 1 个 Collector 结构，倒挂只能说明这台机器这一轮的 ns 不可跨行比。按本表规矩（ns 只与同轮对照行比）不发布新 ns 列；B/op 与 allocs 是确定性判据，不受影响。
+
 **凡要相减得出 Δ 的，必须取本表内的两行。** 跨轮相减会得到倒挂的结论——本项目踩过一次：拿跨轮的「裸 `Local` 绑定」（325 ns）与「`AttachCollector`」（227 ns）相减，写出「后者更便宜」，而后者 = 前者 + 1 个 Collector 结构，逻辑上不可能。
 
 | 场景 | ns/op | allocs | B/op |
@@ -120,18 +124,18 @@ g2.GET("/users", h, mw3)
 | + `observability.AttachCollector` | 341.9 | 14 | 681 |
 | 同上 · 10 / 50 / 100 插件树 | 345 / 361 / 370 | 14 | 681 |
 | 同上 · 50 插件并行 | 566 | 14 | 681 |
-| Engine 请求路径（`New()`，0 / 10 / 50 插件） | 1774 / 1819 / 1937 | 22 | 6298 |
-| Engine 请求路径 + `WithCollector()` | 2123 | **34** | 6787 |
-| Engine 请求路径（`Minimal()`） | 1443 | 17 | 5841 |
-| Engine 请求路径 + `BodyLimit` 路由 | 1877 | **23** | 6362 |
-| Engine 请求路径 + `c.JSON`（JSON 响应档） | —（探针口径不同，见下） | **25** | 6437 |
+| Engine 请求路径（`New()`，0 / 10 / 50 插件） | 1774 / 1819 / 1937 | 22 | 6314 |
+| Engine 请求路径 + `WithCollector()` | 2123 | **34** | 6803 |
+| Engine 请求路径（`Minimal()`） | 1443 | 17 | 5858 |
+| Engine 请求路径 + `BodyLimit` 路由 | 1877 | **23** | 6379 |
+| Engine 请求路径 + `c.JSON`（JSON 响应档） | —（探针口径不同，见下） | **25** | 6453 |
 
 由表内两行推出的 Δ：
 
 - **`WithCollector()` 的每请求成本** = 2123 − 1774 = **+349 ns / +12 allocs**（端到端）
 - **kernel 层 `AttachCollector` 相对基线** = 341.9 − 80.9 = **+261 ns / +12 allocs**
 - **包含关系自检（防倒挂）**：`AttachCollector` = 裸绑定 + 1 个 Collector 结构，**B/op 严格更大（681 > 649）**，这是确定性判据。两者 allocs 同为 14——**alloc 单值区分不了这两者**（一次局部绑定写入本身就占十来个分配）。ns 本轮与逻辑同向（341.9 > 326.7）但只差 4.6%，落在噪声带里（裸绑定档 5 次 322.8–330.2、Collector 档 328.3–355.4 有重叠），**别拿 ns 下这个结论**。
-- **与插件树规模解耦**：kernel 层 10 / 50 / 100 插件 345 / 361 / 370 ns、allocs 恒为 14；Engine 侧 0 / 10 / 50 插件 1774 / 1819 / 1937 ns、allocs 恒为 22、B/op 6298（50 插件档 6299）。插件树大小不改变每请求成本——这是「装配能力」能当卖点的前提。
+- **与插件树规模解耦**：kernel 层 10 / 50 / 100 插件 345 / 361 / 370 ns、allocs 恒为 14；Engine 侧 0 / 10 / 50 插件 1774 / 1819 / 1937 ns、allocs 恒为 22、B/op 6314（50 插件档 6315）。插件树大小不改变每请求成本——这是「装配能力」能当卖点的前提。
 - **`c.JSON` 先编码到 buffer 的代价**（两棵树同一探针，`-benchtime=20000x -count=3`）：main 23 → 本版 **25 allocs/op**、B/op 6341 → **6437**，即 **+2 allocs / +96 B 每响应**——换来「编码失败不再发 200 空体」（#33）。这笔账起初没进描述、门禁也覆盖不到（其余档 handler 都是 `c.Text`，压根不经过 `c.JSON`），现已单列 JSON 档纳入基线。**该行的 ns 留空**：那台探针与本表不同轮，按「凡要相减必须取本表内两行」的规矩不混用。
 - **挂了 `BodyLimit` 的路由 +1 alloc**：default 档 22 → body-limit 档 **23 allocs/op**，多出来的就是 `http.MaxBytesReader` 返回的包装器本身（绑在请求上，无法复用）。这笔账同样起初没进描述、门禁也覆盖不到（其余档都不挂 `BodyLimit`），现已单列一档纳入基线（review 提出，PR #45）。ns 本轮 +103（1877 vs 1774），仍落在噪声里（该档 5 次 1839–2177）——**分配是确定性判据，ns 不是**。
 
@@ -147,7 +151,7 @@ g2.GET("/users", h, mw3)
 >
 > 两条判据：**同一个 P 下两个 OS 逐项相同**（4 P 时 windows 与 linux 都是 `6290 / 6777 / 5833 / 6289 / 6419 / 6353`）；**同一个 OS 换 P 就变**（32 → 8 → 4 → 2：6302 → 6292 → 6290 → 6289）。1 s 窗口里 N 还会跟着机器快慢漂，于是同一份代码能落在 **6289…6303**——上一轮那张「平台差 8–19 字节」的表就是这么来的：网侧的两个数（6298 / 6289）差的其实是 32 P 与 4 P，外加一档 N。
 >
-> 所以门禁**把两个自变量都钉住**：迭代数固定 20000、`GOMAXPROCS` 固定 4（与 CI runner 同档）。基线随之收敛成**一份**（`6290 / 6777 / 5833 / 6289 / 6419`）：本地 windows 与 CI linux 报同一个数，8 字节 slack 在每个环境都还保住灵敏度——不必再靠「按平台记两份」绕开环境差，也不会再出现「按 windows 定就白送 9 字节死余量」那种二选一。定位过程与全部对照见 [#71](https://github.com/Luo-root/pulse-web/issues/71)。
+> 所以门禁**把两个自变量都钉住**：迭代数固定 20000、`GOMAXPROCS` 固定 4（与 CI runner 同档）。基线随之收敛成**一份**（那一轮是 `6290 / 6777 / 5833 / 6289 / 6419`；[#76](https://github.com/Luo-root/pulse-web/issues/76) 之后是 **`6306 / 6793 / 5849 / 6305 / 6435`**——每档 +16，与 N / P 的敏感度无关）：本地 windows 与 CI linux 报同一个数，8 字节 slack 在每个环境都还保住灵敏度——不必再靠「按平台记两份」绕开环境差，也不会再出现「按 windows 定就白送 9 字节死余量」那种二选一。定位过程与全部对照见 [#71](https://github.com/Luo-root/pulse-web/issues/71)。
 >
 > **表 B 的绝对值仍按机器默认 P（本机 32）记**，与门禁钉的那一档不同：两份数字各自在自己的口径里成立，**不要互减**（跨口径相减会得到「门禁比表 B 少 8 字节」这种没有意义的差）。
 
@@ -257,7 +261,7 @@ module 边界，依赖判据不受影响）。
 > （`6341 → 6437 B` 是另一支探针量到的同一个变化）。机制已知，不是漂移。
 >
 > 本表与表 A / 表 B 的 ns **不可互减**：探针不同（这里复用请求与 writer，只量框架层；「默认出口」一节的
-> `2335 ns / 22 allocs / 6298 B/op` 出自另一支探针）。
+> `2335 ns / 22 allocs / 6314 B/op` 出自另一支探针）。
 
 - 逐项拆开（相对 `pulse/bare`）：**记录框架**（`obs-nolog` = TraceID + 记录组装）**+3 allocs / +249 ns**；
   **访问日志与出口渲染**再 **+2 allocs / +484 ns**；把默认出口外面套一层 `AsyncSink` 是 **+6 allocs / +826 ns**。
@@ -552,6 +556,7 @@ app.POST("/jobs", func(c *web.Ctx) error {
 | `Minimal()` | 关 | 关 | 关 | **开** | 无 |
 | `Minimal(), WithSink(s)` | 关 | 关 | 关 | **开** | `s`（仅供 `c.Observe` 与用户自装中间件） |
 | `New(WithCollector())` | 开 | 开 | 开 | 开 | 默认 Sink |
+| `New(WithSpanHook(h))` | 开 | 开 | 开 | 开 | 默认 Sink（**不改观测，只多一份 span 数据**：`h` 拥有 span，框架采用它给的 id） |
 
 **`WithSink` 只换出口，不复活 Trace / AccessLog**——要观测就别用 `Minimal()`。框架**没有**可单独挂载的 `Trace()` / `AccessLog()` 中间件（本文档早期版本写过 `app.Use(web.Trace())`，那个 API 不存在，已删）：默认装配是一体的，`Minimal()` 下要自己写中间件 + `c.Observe()` 打点。
 
@@ -561,7 +566,7 @@ app.POST("/jobs", func(c *web.Ctx) error {
 
 `WithoutAccessLog()` 关闭访问日志（用户已接自己的日志系统时用）——只关 AccessLog，`Trace` 与 panic 兜底（500 响应）不受影响。**关闭后 panic 不再写观测记录**：AccessLog 是访问级记录的唯一人工出口；`PanicError.Stack` 只经 `Record.Err` 抵达 Sink，默认出口不打印栈——需要时由宿主自定义 Sink 用 `errors.As` 从 `Record.Err` 取 `*PanicError`。
 
-v1 选项面：`New()` / `Minimal()` / `WithSink` / `WithoutAccessLog` / `WithRoot` / `WithHostID` / `WithServer` / `WithErrorHandler` / `WithTemplates` / `WithMaxBodyBytes` / `WithTrustedTraceHeader` / `WithCollector` / `OnShutdown`。注意 **`AsyncSink` 不在选项面**——它是**出口实现**，用 `WithSink(observability.NewAsyncSink(...))` 接入，框架不另造缓冲层。**`BodyLimit` 同样不在选项面**——它是**中间件**，按路由 / 分组挂（见「请求体上限」）。
+v1 选项面：`New()` / `Minimal()` / `WithSink` / `WithoutAccessLog` / `WithRoot` / `WithHostID` / `WithServer` / `WithErrorHandler` / `WithTemplates` / `WithMaxBodyBytes` / `WithTrustedTraceHeader` / `WithCollector` / `WithSpanHook` / `OnShutdown`。注意 **`AsyncSink` 不在选项面**——它是**出口实现**，用 `WithSink(observability.NewAsyncSink(...))` 接入，框架不另造缓冲层。**`BodyLimit` 同样不在选项面**——它是**中间件**，按路由 / 分组挂（见「请求体上限」）。
 
 ### 默认出口：给人读的控制台列式（`ConsoleSink`）
 
@@ -579,11 +584,11 @@ PULSE | 2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /us
 
 | | 渲染一条（io.Discard） | 请求路径（同会话配对） |
 |---|---|---|
-| `ConsoleSink`（默认） | 236 ns / **0 allocs** | 2335 ns / **22 allocs** / 6298 B/op |
+| `ConsoleSink`（默认） | 236 ns / **0 allocs** | 2335 ns / **22 allocs** / 6314 B/op |
 | `SlogSink`（旧默认） | 1304 ns / 18 allocs | （观测档，见 #18 的真实负载对比） |
 | `LineSink`（上游缺省版式） | 259 ns / **0 allocs** | — |
 
-口径 `-benchtime=20000x -count=10` 取中位轮（2026-09-16；原表 `~190 ns` / `1531 ns / 19 allocs` / `~262 ns / 1 alloc` 是 v0.2.4 之前的会话，**只能整表替换**，不能只换一格）。请求路径那一列对照的是 `nopSink` 档（1963 ns / 22 allocs / 6299 B/op，`bench/budget_test.go` 的 `default+console-sink` 一档是它的门禁）：**分配计数与 B/op 都逐项相同**——出口渲染既不新增分配、也不改变请求路径的分配形状；ns 上多出的那一段就是渲染（2335 − 1963 = 372 ns）。
+口径 `-benchtime=20000x -count=10` 取中位轮（2026-09-16；原表 `~190 ns` / `1531 ns / 19 allocs` / `~262 ns / 1 alloc` 是 v0.2.4 之前的会话，**只能整表替换**，不能只换一格）。请求路径那一列对照的是 `nopSink` 档（1963 ns / 22 allocs / 6315 B/op，`bench/budget_test.go` 的 `default+console-sink` 一档是它的门禁）：**分配计数与 B/op 都逐项相同**——出口渲染既不新增分配、也不改变请求路径的分配形状；ns 上多出的那一段就是渲染（2335 − 1963 = 372 ns）。
 
 > 站点性能页的「出口值多少」用的是**另一条口径**（默认 benchtime、`-count=5`，单档迭代数到百万级，更接近稳态），所以两处的 ns 会有几十纳秒的差（本轮同一个 benchmark：`ConsoleSink` 236 vs 235、`SlogSink` 1304 vs 1398）——那是口径差异，不是漂移。**分配计数与 B/op 两处逐项相同**，这也正是本仓库拿它们当判据的原因。
 
@@ -690,13 +695,61 @@ PULSE | 2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /us
 
 需要「请求进来那一刻」的记录（而不是收尾那一条）**没有现成开关**：框架的访问日志刻意写在收尾（要 `status` / `duration`），要入口记录就在中间件里 `c.Observe()`——框架**不提供** `Trace()` / `AccessLog()` 这类可单独挂载的中间件，默认装配是一体的（`WithSink` 只换出口，不复活被 `Minimal()` 关掉的观测）。
 
-### TraceID 兼容
+### trace 头兼容与 span 出口
 
 **入站**：优先读 W3C `traceparent` 的 32hex trace-id；其次 B3 `X-B3-TraceId`（**32hex 原样、16hex（Zipkin 64-bit）左垫 0 归一为 32hex**）；**全零按不存在处理**（W3C 明文禁止全零，B3 未禁止但同样按不存在——否则这些请求会在日志里共享同一条 TraceID，比链路断裂更难排查）；都没有则**框架自带生成器产出 32hex**（不用 `observability.NewTraceID()` 的异构格式——`traceid.go:19` 明确"返回值无契约语义、宿主可自带格式"）。
 
-**出站**：只回 `X-Trace-Id`。**不写 `traceparent`、不编造假 span-id**——pulse 模型是平铺记录、没有 span，写一个假的 span-id 会让下游 APM 误认为存在真实 span 父子关系。
+`traceparent` 的字段校验逐条对齐 W3C Trace Context 与官方 otel-go 的 `propagation.TraceContext`（[#76](https://github.com/Luo-root/pulse-web/issues/76)）：**两边的接受集合必须相同**，否则同一个请求在「框架的记录」与「宿主的 OTel 链路」里会拿到不同的 trace 身份。
 
-**APM 拓扑降级声明**：span 树型后端（Jaeger / Zipkin / SkyWalking）里，pulse-web 的记录是该 trace 下的**独立节点**；日志检索型后端（ELK / Loki）不受影响。要补父子边需 pulse 的 `Record` 增加 span 字段——上游决策，本票不做。
+| 字段 | 规则 |
+|---|---|
+| `version` | 2 位**小写** hex；`ff` 非法；更高版本按 `00` 的格式解析（尾部字段忽略） |
+| `trace-id` | 32 位小写 hex，**全零非法** |
+| `parent-id` | 16 位小写 hex，**全零非法** |
+| `trace-flags` | 2 位小写 hex；`00` 版本不允许保留位（`> 3` 非法） |
+| 长度 | `00` 版本必须恰为 55 字符（该版本不允许尾部字段） |
+
+大写 hex 一律非法（规范写的是 `HEXDIGLC`）。**任何一处不合法 → 整条忽略、起新 trace**，不做部分采纳——只认 trace-id 而丢掉非法 parent-id 会让父子关系静默错位。解析失败时**不解析 `tracestate`**（W3C 明文要求），所以 `SpanInfo.TraceState` 只在 traceparent 通过校验时才透传。
+
+B3 是历史兼容路径：单头 `X-B3-TraceId` 里**没有** span-id，因此走这条路的请求只有 trace-id、没有 parent——它不是 W3C 的等价物，span 出口拿到的是 root span。
+
+**出站是两个响应头，别混**（[#76](https://github.com/Luo-root/pulse-web/issues/76)）：
+
+| 头 | 形态 | 什么时候写 |
+|---|---|---|
+| `X-Trace-Id` | 32hex trace-id，**不含 span** | 任何观测开启的模式（`Minimal()` 关掉 trace 时没有）。本框架的**既有契约**，自定义头、非标准 |
+| `Server-Timing: trace;desc=00-<trace-id>-<本请求 span-id>-<flags>` | W3C Trace Context 定义的**响应侧**绑定（规范里 `desc` 就是 `traceparent` 那四个字段） | 只有拿到 span 身份才有：装了 `WithSpanHook` 且 hook 给出了 span-id |
+
+**响应侧不写 `traceparent`**：W3C 只在**请求**侧定义它，客户端也不会去读响应里的这个头——响应侧的标准形态就是 `Server-Timing` 的 `trace` 指标。旧口径「不写 traceparent、不编造假 span-id」的前半句仍然成立，后半句在本票之后收正为**框架不编造 span-id**（理由见下）：框架没有 span 时，两个头里带 span-id 的那个**不写**，而不是填一个假的。
+
+### span 出口：`WithSpanHook`
+
+**谁会用它**：把 pulse-web 接进**既有追踪体系**的宿主装配方——手里已经有一个 OTel `TracerProvider`（或自研 APM 的 span 模型），要的是「这个请求在那套体系里成为一条真实 span」，而框架的 `Record` 只是附带的日志产出。框架自己不引任何追踪 SDK（主模块零第三方依赖是红线），所以这里只留一条**缝**；官方适配在独立 nested module [`otel/`](https://github.com/Luo-root/pulse-web/tree/main/otel)。
+
+```go
+type SpanHook interface {
+    Begin(ctx context.Context, in SpanInfo) (context.Context, SpanRef)
+    End(ctx context.Context, sp Span)
+}
+
+app := web.New(web.WithSpanHook(otelweb.New(tracerProvider)))
+```
+
+`Begin` 做两件事，缺一不可：① 建 span、把它的 context 注入 `ctx` 并返回——下游支持 OTel 的库（出站 HTTP 客户端 / otelsql / otelgrpc…）因此自动接上这条链路；② 把 span 身份回给框架。`End` 拿到的是完整请求事实（状态码 / 耗时 / 路由模板 / 错误分类 / 属性）。
+
+三条契约：
+
+1. **框架不编造 span-id。** SDK 没有「指定 span-id」的入口（id 来自 provider 的 `IDGenerator`），而 `Server-Timing`、记录里的 `span.id`、下游 client 注入的 `traceparent` 三处必须是**同一个真实存在的 id**——框架自己造一个，会让下游把它当成父 span 挂到一条不存在的链路上。所以框架在 `Begin` 里向 hook **索要**身份（`SpanRef`）并采用它；`SpanRef.SpanID` 为空表示本次请求没有 span，框架就不写 `Server-Timing`、不记 `span.id`。
+2. **默认不装。** 不装时请求路径与本选项出现之前逐字节相同（分配门禁量的就是这一档）；装与不装的差别是「请求路径上有没有一份 span 数据」，不是「有没有观测」。传 `nil` 在装配期 panic——装了却没有出口是配置错误，不是静默关闭。
+3. **一个存放点。** span 身份存在 `Ctx` 里（`Ctx.SpanID()`，未装 hook 时是空串），不拆进 context 值——否则 404 这类**没走到注册 handler** 的路径会丢数据（见 `context.go` 注释）。代价是 `Ctx` 定长多 16 字节，见「表 B」的说明。
+
+**代价（可复跑）**：`go test -run '^$' -bench 'BenchmarkEngineRequestPath$|BenchmarkEngineRequestPath_SpanHook' -benchtime=20000x -count=5 ./bench/` —— 同一请求路径装与不装一个「只回身份」的 nop hook 之差是 **+315 ns / +505 B / +4 allocs 每请求**（1838 → 2153 ns、6314 → 6819 B、**22 → 26 allocs**）。这个差里含两次 hook 调用、第二遍属性填充（span 那份不带 `span.id`，记录那份带，见 `emitSpan`）与 `Server-Timing` 的字符串拼装。适配件与 SDK 那一侧的完整代价（含属性转换的 6 次分配）在 `otel/` 的基准里量，两边不要相加——口径不同。
+
+**span 属性与访问日志同源**：两边由同一个 `fillRequestAttrs` 填出，所以不可能各说一套。span 名按 semconv 用 `{method} {http.route}`——**不得退回 URI 路径**（semconv 明文 `MUST NOT`），路由未知时退化为 `{method}`。**4xx 不写 `error.type`**（semconv：成功完成的请求 SHOULD NOT 设该属性），5xx 才写——框架日志侧的 `error_` 分类是另一套词表，两边各有其主。
+
+**`c.Detach()` 的后台任务用 link、不用父子**：后台任务活过请求，做成子节点会让父 span 的时长语义失真（父早已结束、子还在跑）。用 `c.TraceID()` / `c.SpanID()` 建显式 link 指回那条 span。
+
+**APM 拓扑降级声明**（不装 span 出口时）：span 树型后端（Jaeger / Zipkin / SkyWalking）里，pulse-web 的记录是该 trace 下的**独立节点**；日志检索型后端（ELK / Loki）不受影响。装了 span 出口即补上父子边（本服务那条 span 的 parent 来自入站 `traceparent`）。
 
 ### 装配诊断
 
@@ -709,7 +762,7 @@ v1 只做当前视图：`app.Debug("/debug/pulse")` 输出 `kernel.FiberSnapshot
 | `AsyncSink`（队列 / Drop / flushTimeout） | **上游已提供**（`observability.NewAsyncSink`，v0.2.1）——web 不另造缓冲层，`WithSink` 接入即可。注意组合语义：`AsyncSink.Flush` 只排空**它自己的**队列、不级联 inner 的 `Flush`，所以异步化的正确组合是 `NewAsyncSink(SlogSink)`；用 `AsyncSink` 包另一个缓冲出口（如 `LineSink`）会留下未落盘的内层缓冲，框架无从代劳 |
 | `Sink.Close`（停协程） | 不做——出口所有权属装配方：`Detach` 允许进程级后台任务继续写同一 Sink，框架在关闭时 `Close` 它会静默丢弃这些记录。关闭时序只负责 flush 并记错误 |
 | 流式双记录（Flush 启发式） | 不做——普通 handler / 中间件的 `Flush()` 会误判；SSE 的语义已由"handler 不返回 ⇒ AccessLog 晚写"覆盖。需要"流开始"再显式另开票 |
-| 假 span-id / traceparent 回写 | 不做（见上） |
+| 响应侧 `traceparent` 回写 | 不做——W3C 没有给响应定义这个绑定，响应侧用 `Server-Timing`（见上）；框架也**不编造 span-id**，没有 span 就不写带 span-id 的那个头 |
 | TTFB / Content-Type 观测 | 不做（TTFB 依赖包装器状态，与"避免额外分配"冲突），另开票 |
 | `Detached` 的迷你生命周期（锁 / 懒派生 scope / ErrDetachedDisposed） | 不做——值袋子 + 调用方自理 |
 | 内部 `Router` 接口 | 不做（YAGNI）：要换底层时再抽 |
@@ -806,6 +859,8 @@ mark 的走势**直接沿用 pulse**（平段 → 上升 → 峰值 → 深谷 �
   证据：`TestAccessLogRecordFields` 与 `observe_test.go` 里的业务打点断言（同一 Sink、同一 TraceID、Source 为 `SourceAdapter`）。
 - [x] **观测贯穿**：单请求 TraceID 在 router → handler → Sink 一致；后台任务共享同一 TraceID
   证据：`TestTraceIDGeneratedAndSharedAcrossRecord`、`TestDetachSharesTraceAndRootAccess`；入站头采纳另见 `TestTraceparentAdopted` / `TestB3TraceIDAdopted` / `TestB3TraceID16HexNormalized`（16hex 左垫归一）/ `TestZeroTraceIDTreatedAsAbsent`（全零视为不存在）/ `TestMalformedTraceHeadersIgnored`。
+- [x] **span 出口可接**（[#76](https://github.com/Luo-root/pulse-web/issues/76)）：`WithSpanHook` 把请求的 span 身份交给追踪体系（官方适配在 `otel/` nested module）；**框架不编造 span-id**，两个响应头各写各的，入站 `traceparent` 的校验与官方 propagator 同口径
+  证据：`span_test.go` 11 条——请求事实与访问日志同源（`TestSpanHookCarriesRequestFacts`）、注入到达中间件与 handler（`TestSpanHookInjectionReachesHandler`）、**404 也保住注入的 context**（`TestSpanInjectionOnUnmatchedRoute`）、`X-Trace-Id` 与 `Server-Timing` 各写各的（`TestSpanTwoResponseHeaders`）、采用 hook 的身份（`TestSpanAdoptsHookIdentity`）、入站 parent 与 flags（`TestSpanParentFromInboundTraceparent`）、严格解析 4 合法 / 10 非法逐条（`TestTraceparentStrictParsing`）、B3 只给 trace-id（`TestB3GivesTraceIDOnly`）、panic 与映射错误后的状态码（`TestSpanOnPanicAndMappedErrors`）、`nil` 装配期 panic（`TestSpanHookNilPanics`）、handler 读得到 span-id（`TestSpanIDIsReadableInHandler`）；`otel/otelweb_test.go` 6 条——server span 形状（`TestServerSpanFromRequest`）、入站父（`TestServerSpanAdoptsInboundParent`）、状态语义四档（`TestStatusSemantics`）、**下游注入的 parent-id 就是本请求 span-id**（`TestDownstreamPropagationUsesServerSpanID`）、记录里的 `span.id` 与导出 span 一致（`TestAccessRecordCarriesSpanID`）、**与官方 propagator 的差分对照 16 条**（`TestParsingAgreesWithOfficialPropagator`）。
 - [x] **标准库兼容**：挂载 stdlib 中间件无侵入；`Wrap` 双向适配
   证据：`TestWrapStdlibHandler`、`TestEngineUnderStdlibMiddleware`、`TestWrapPanicCaughtByEngine`。
 - [x] **ServerConfig 契约**：6 个默认值 + 「非零覆盖、零值保持默认」+ 配置**真的**落到 `http.Server` 上

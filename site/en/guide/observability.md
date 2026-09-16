@@ -68,6 +68,45 @@ Whatever sink you use, the `New()` assembly gives every request:
 - A **request scope** released the moment the handler returns — before the engine maps the outcome and writes anything further
 - Panic recovery: a panic in a handler becomes a 500, and the panic value and stack stay in the process (attached to the record, never sent to the client)
 
+## Into a tracing backend: the span hook
+
+The framework ships **no tracing SDK** (zero third-party dependencies in the main module is a hard rule). It produces structured data; turning that into real spans is the host's job — the official adapter lives in its own module:
+
+```go
+import (
+	"go.opentelemetry.io/otel/sdk/trace"
+	otelweb "github.com/Luo-root/pulse-web/otel"
+)
+
+tp := trace.NewTracerProvider(trace.WithBatcher(exporter))
+app := web.New(web.WithSpanHook(otelweb.New(tp)))
+```
+
+The two ends of a request are handled by the two methods of `SpanHook`:
+
+| Moment | What the framework hands over | What the adapter does |
+|---|---|---|
+| `Begin` (before routing) | `SpanInfo`: the parsed inbound context (`TraceID` / `ParentID` / `TraceState` / `Sampled` / `Random`) plus method and path | starts a server span and injects it into the request context (downstream `otelhttp` / `otelgrpc` / `otelsql` pick it up), then returns the identity as a `SpanRef` |
+| during the handler | — | the span is recording: `c.SpanID()` gives the id, and any `context.Context` passed down carries it |
+| `End` (after the response is written) | `Span`: route template, the **mapped** status code, the same attribute set as the access log, timestamps, the original error | `trace.SpanFromContext(ctx)` returns the same span; it sets name / attributes / status and ends it |
+
+Semantics follow semconv: the name is `{method} {http.route}` (falling back to `{method}` when there is no route — **never** the URI path); 5xx → `Error`, 4xx/2xx stay unset; `http.response.status_code` uses the mapped status.
+
+### Two response headers, two different things
+
+With the span hook installed, a response carries one more trace-related header — and it is **not** the same thing as `X-Trace-Id`:
+
+| Header | Content | When |
+|---|---|---|
+| `X-Trace-Id` | 32hex trace-id, **no span** | always (`Minimal()` turns tracing off, and then neither is written) |
+| `Server-Timing: trace;desc=…` | `00-<trace-id>-<this request's span-id>-<flags>`, includes the span | only once a span identity is available |
+
+The response side does **not** carry `traceparent`: W3C defines no such response header. Outgoing requests get theirs from the host's client instrumentation, where the parent-id is this request's span-id.
+
+### Background work: a link, not a parent
+
+Work started through `c.Detach()` outlives the request, so making it a child of the request span would distort that span's duration. The recommended shape is an **explicit link**: carry `c.TraceID()` / `c.SpanID()` into the `Detached` values (or your own task record) and create a link in your tracing backend. The framework does not create spans for background work.
+
 ## Your own events: `c.Observe`
 
 ```go

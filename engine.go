@@ -70,6 +70,8 @@ type config struct {
 	templates        *TemplateConfig
 	collector        bool
 	maxBodyBytes     int64
+	spanHook         SpanHook
+	spanHookSet      bool
 }
 
 func defaultConfig() config {
@@ -265,6 +267,7 @@ type Engine struct {
 	templates        *templateSet
 	collector        bool
 	maxBodyBytes     int64
+	spanHook         SpanHook
 
 	prefix string
 	mw     []Middleware
@@ -310,6 +313,12 @@ func New(opts ...Option) *Engine {
 		panic("web: WithCollector requires a Sink (got Minimal() without WithSink)")
 	}
 
+	// 同上：装了 span 出口却没有 hook 是配置错误（写成 WithSpanHook(nil) 多半是
+	// 上游变量没初始化），装配期暴露比运行期静默没 span 好排查。
+	if cfg.spanHook == nil && cfg.spanHookSet {
+		panic("web: WithSpanHook(nil) — span hook must not be nil")
+	}
+
 	e := &Engine{
 		kernel:           root,
 		mux:              http.NewServeMux(),
@@ -323,6 +332,7 @@ func New(opts ...Option) *Engine {
 		errorHandler:     handler,
 		collector:        cfg.collector,
 		maxBodyBytes:     cfg.maxBodyBytes,
+		spanHook:         cfg.spanHook,
 		life:             &lifecycle{},
 	}
 
@@ -475,14 +485,34 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		scope:   scope,
 		started: time.Now(),
 	}
-	if e.trace {
-		if e.trustTraceHeader {
-			c.traceID = e.resolveTraceID(r)
-		} else {
-			// 不信任入站头：客户端无法伪造 trace-id（代价是网关处链路断裂）
-			c.traceID = generateTraceID()
+	// 链路身份：trace-id（沿用入站或新起）；装了 SpanHook 时再向 hook 要 span
+	// 身份——span-id 由追踪体系分配（SDK 没有「指定 span-id」的入口），框架只
+	// 采用它，这样 Server-Timing、记录里的 span.id、下游注入的 traceparent
+	// 用的是同一个真实存在的 id（自己编一个会让下游挂到不存在的父 span 上）。
+	//
+	// 两个响应头分工不同，别混（详见 span.go 里 serverTimingHeader 的注释）：
+	//   X-Trace-Id    既有契约：自定义头，只有 trace-id，任何模式都写。
+	//   Server-Timing W3C 定义的响应侧绑定：带**本请求 span-id**，拿到身份才写。
+	var beginCtx context.Context
+	if e.trace || e.spanHook != nil {
+		in := e.resolveSpanInfo(r)
+		in.Method = r.Method
+		in.Path = r.URL.Path
+		c.traceID = in.TraceID
+		if e.spanHook != nil {
+			ctx, ref := e.spanHook.Begin(r.Context(), in)
+			beginCtx = ctx
+			if ref.TraceID != "" {
+				// 追踪体系是身份的事实源：它可能采纳了别的链路头（宿主配了
+				// B3 / Jaeger propagator 时），记录与响应头跟着它走。
+				c.traceID = ref.TraceID
+			}
+			c.spanID = ref.SpanID
+			if v := serverTimingValue(ref); v != "" {
+				rw.Header().Set(serverTimingHeader, v)
+			}
 		}
-		if e.traceHeader != "" {
+		if e.trace && e.traceHeader != "" {
 			rw.Header().Set(e.traceHeader, c.traceID)
 		}
 	}
@@ -501,7 +531,23 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	req := r.WithContext(context.WithValue(r.Context(), ctxKey{}, c))
+	// span 注入点：hook 在路由与 handler 之前建好 span 并把它注入 ctx，
+	// 这样中间件、handler，以及它们往下传的 context 都能看到——下游支持 OTel
+	// 的库（出站 HTTP 客户端 / SQL / gRPC）因此自动接上这条链路。
+	//
+	// 注入发生在 ServeMux 之前，所以 http.route 这时还不知道；按 semconv，
+	// 路由后拿到再补是允许的（只要在 span 结束前）。
+	base := r.Context()
+	if beginCtx != nil {
+		base = beginCtx
+	}
+
+	req := r.WithContext(context.WithValue(base, ctxKey{}, c))
+	// c.r 也指向 req：没走到注册处理器的请求（ServeMux 直接给 404）不会经过
+	// register，只有在这里换，End 才能顺着 c.r.Context() 取回 hook 注入的
+	// 那条 context 链（span 就挂在那里）。匹配到的请求随后会被 register
+	// 换成同一个 request（ServeMux 只是把 Pattern 写在它上面）。
+	c.r = req
 
 	defer func() {
 		if p := recover(); p != nil {
@@ -540,6 +586,11 @@ func (e *Engine) finish(c *Ctx, rw *responseWriter) {
 
 	// 收尾落码与 Write / Flush 同源（writeHeaderNow）：吃 Status() 提示、缺省 200。
 	rw.writeHeaderNow()
+
+	// span 先于记录：End 落在响应写完这一刻，不被 sink 的写入耗时污染。
+	if e.spanHook != nil {
+		e.emitSpan(c, rw)
+	}
 
 	if e.accessLog && e.sink != nil {
 		e.writeAccessLog(c, rw)
@@ -582,15 +633,56 @@ func (e *Engine) writeAccessLog(c *Ctx, rw *responseWriter) {
 		Duration: time.Since(c.started),
 		Err:      c.err,
 	}
-	observability.Set(&rec.Attrs, attrHTTPMethod, c.r.Method)
-	observability.Set(&rec.Attrs, attrHTTPRoute, routePattern(c.r))
-	observability.Set(&rec.Attrs, attrURLPath, c.r.URL.Path)
-	observability.Set(&rec.Attrs, attrHTTPBodySize, int64(rw.bytes))
-	observability.Set(&rec.Attrs, attrClientAddr, c.r.RemoteAddr)
-	if c.err != nil {
-		observability.Set(&rec.Attrs, attrErrorType, errCategory(c.err))
+	fillRequestAttrs(c, rw, &rec.Attrs)
+	if c.spanID != "" {
+		// 日志 ↔ trace 的关联键：只有拿到 span 身份时才存在（没有 span 就没有
+		// span-id 可指），所以它是**有条件**出现的字段。
+		observability.Set(&rec.Attrs, attrSpanID, c.spanID)
 	}
 	e.sink.Write(rec)
+}
+
+// fillRequestAttrs 填本请求的观测属性。
+//
+// 访问日志与 span **共用这一个来源**：同一批字段写两遍必然漂移，而「日志里
+// 的状态码与 span 里的对不上」是最难发现的那类不一致。
+func fillRequestAttrs(c *Ctx, rw *responseWriter, attrs *observability.Attrs) {
+	observability.Set(attrs, attrHTTPMethod, c.r.Method)
+	observability.Set(attrs, attrHTTPRoute, routePattern(c.r))
+	observability.Set(attrs, attrURLPath, c.r.URL.Path)
+	observability.Set(attrs, attrHTTPBodySize, int64(rw.bytes))
+	observability.Set(attrs, attrClientAddr, c.r.RemoteAddr)
+	if c.err != nil {
+		observability.Set(attrs, attrErrorType, errCategory(c.err))
+	}
+}
+
+// emitSpan 把本次请求的 span 数据交给 SpanHook（只在装了 hook 时调用）。
+//
+// 三个字段要注意来源：Status 是**映射后**的状态码（与访问日志同源，不是
+// handler 里写的那个）、Route 是 ServeMux 写在 request 上的路由模板、
+// Attrs 与访问日志同一份（fillRequestAttrs），不含 span.id。
+//
+// 这里的 Attrs 与 writeAccessLog 里那份是**两次独立填充**（不是共用一块缓冲）：
+// 记录侧要多一个 `span.id` 关联键，共用就得原地改写 span 手里那份。代价实测
+// （同轮、装一个只回身份的 nop hook 与不装对照）22 → 26 allocs/op、
+// 6314 → 6819 B/op——这一段差里既有这一遍填充，也有 Server-Timing 的字符串
+// 拼装；换掉的是「两者谁先读谁后读」这类隐性耦合。
+func (e *Engine) emitSpan(c *Ctx, rw *responseWriter) {
+	var attrs observability.Attrs
+	fillRequestAttrs(c, rw, &attrs)
+	e.spanHook.End(c.r.Context(), Span{
+		TraceID: c.traceID,
+		SpanID:  c.spanID,
+		Method:  c.r.Method,
+		Route:   routePattern(c.r),
+		Path:    c.r.URL.Path,
+		Status:  rw.status,
+		Start:   c.started,
+		End:     time.Now(),
+		Err:     c.err,
+		Attrs:   &attrs,
+	})
 }
 
 // routePattern 去掉 ServeMux Request.Pattern 的方法前缀，

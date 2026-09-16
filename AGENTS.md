@@ -8,7 +8,7 @@
 
 ## 构建与测试
 
-需要 **Go 1.27+**（`go.mod` 写 `go 1.27.0`，工具链缺失会自动下载）。没有 Makefile、没有 linter 配置——下面七条就是全部 CI 门禁（`.github/workflows/ci.yml` 的七个 step，一一对应）：
+需要 **Go 1.27+**（`go.mod` 写 `go 1.27.0`，工具链缺失会自动下载）。没有 Makefile、没有 linter 配置——下面八条就是全部 CI 门禁（`.github/workflows/ci.yml` 的八个 step，一一对应）：
 
 ```bash
 go build ./...                                            # 编译
@@ -18,6 +18,7 @@ go test -race ./...                                       # 全部测试
 go test -run TestRequestPathAllocBudget ./bench/          # 分配预算门禁——必须不带 -race
 go test -run '^$' -bench '^$' ./bench/                    # bench 编译检查
 (cd loadtest && go build ./... && go vet ./... && go test ./...)   # loadtest 独立 module——根 module 的 ./... 盖不到
+(cd otel && go build ./... && go vet ./... && go test ./...)       # otel 适配件同理（带 otel-go 依赖，主模块零依赖靠它保住）
 ```
 
 Windows PowerShell 下格式门禁写成：
@@ -51,6 +52,7 @@ debug.go                # 装配诊断端点（FiberSnapshots 的 JSON 视图）
 assets/                 # 品牌事实源：logo.svg / banner.svg / favicon.svg
 bench/                  # 性能回归基线 + 分配预算门禁；muxprobe/ 是路由选型的一次性实测程序
 loadtest/               # 与 gin 的真实负载对比（**独立 module**，带 gin 依赖；根 module 的 ./... 不过 module 边界）
+otel/                   # 官方 OTel 适配（**独立 module**，带 otel-go 依赖；主模块只产出结构化 span 数据）
 docs/design/            # 设计文档（决策与验收清单的事实源）
 .github/workflows/ci.yml
 ```
