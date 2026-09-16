@@ -39,8 +39,8 @@ if err := sink.Err(); err != nil {
 request arrives
   → middleware chain (global → group → route)
   → handler returns nil or an error
-  → the error mapper decides the status and writes the response
   → request scope Dispose (recursive teardown)
+  → the error mapper decides the status and writes the response
 ```
 
 **`Dispose` happens before the response is written** (a design red line): scope teardown is decoupled from "did the response make it to the network", so an Effect failure never holds up the response and a failed write never skips teardown.
