@@ -79,7 +79,7 @@ docs/design/            # 设计文档（决策与验收清单的事实源）
 - **不直推 `main`**；分支命名 `feat/…` `fix/…` `docs/…` `chore/…` `test/…`。PR 有效改动按 **1000 行左右**控制。
 - **每条验收标准都要有可复跑的佐证**：靠测试的写出测试名；靠实测的指到存数字的那一节。
 - **守卫测试必须附变异探针**——改一处生产代码或资产让它失败，跑一遍确认抓到，再从 git 还原并核对字节一致。没被看着失败过的守卫不算守卫。探针临时文件放 `_scratch/`（已 gitignore），**不要留在仓库里**。
-- **文档同步面**：行为或 API 变化要在同一个 PR 里改 `README.md`（面向使用者）与 `docs/design/web-framework-design.md`（契约、决策、验收清单）。改「N 条 / N 个」这类**计数词**时，先 grep 全部同类措辞再下结论。
+- **文档同步面**：行为或 API 变化要在同一个 PR 里改 `README.md`（面向使用者）、`site/` 指南（同一批读者，中英同步）与 `docs/design/web-framework-design.md`（契约、决策、验收清单）。改「N 条 / N 个」这类**计数词**、或会被别处引用的**成本数字**（`+NNN ns` / `NN allocs`）时，先 grep 全部同类措辞再下结论——两类都出过「换轮时只改了一处」。
 - **合并纪律**：`main` 开了 `required_conversation_resolution` + status checks `strict` + `enforce_admins`。PR 落后 `main` 要 `update-branch`，然后**按新的 head SHA 核对 check-runs**（`gh api repos/<slug>/commits/<sha>/check-runs`）再合——`gh pr checks` 可能返回更新前那一轮的结果。未 resolve 的 review 线程会挡合并（`mergeable_state` 会显示 blocked，别误判成冲突）。
 - **合并动作由维护者做**。agent 的终点是「分支推送 + PR 开好 + CI 绿 + 自审结论 + 回报」。
 - **外部意见（含其他 AI 给的 review）必须逐条探针实测后再采纳**，不要照抄结论。

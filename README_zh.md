@@ -65,7 +65,7 @@ curl -s localhost:8080/users/42
 # {"id":"42"}
 ```
 
-观测不需要任何配置：stdout 已经每请求一行，同一个 TraceID 贯穿 handler、这行日志，以及你之后挂上的任何出口。行首的 `PULSE` 是上游的缺省前缀——pulse 与 pulse-web 同根同源、共用一套版式，两者同处一个进程树时输出保持一致。
+观测不需要任何配置：stdout 已经每请求一行，同一个 TraceID 贯穿 handler、这行日志，以及你之后挂上的任何出口。行首的 `PULSE` 是上游的默认前缀——pulse 与 pulse-web 同根同源、共用一套版式，两者同处一个进程树时输出保持一致。
 
 ```text
 PULSE | 2026/09/15 - 20:27:01 | 200 |   502.0µs | 127.0.0.1:54161 | GET     /users/42 | route=/users/{id} | size=12 | host=pulse-web | trace=a9c8e7496977e0ee6e8971a2b2cfe378
@@ -185,7 +185,7 @@ app := web.New(web.WithTemplates(web.TemplateConfig{
 
 每个请求都有一个 32hex 的 TraceID、一条 `http.request` 记录，以及一个**在 handler 返回时立即回收**的请求作用域——早于引擎做错误映射与任何后续写出。
 
-**不需要配任何东西。** `New()` 已经装好了出口：`ConsoleSink`，每请求一行给人读的列式输出，写 stdout。同一个 TraceID 在 handler、这一行，以及你之后挂上的任何出口里都在。
+`New()` 已经装好了出口：`ConsoleSink`——每请求一行给人读的列式输出，写 stdout。
 
 ```go
 app := web.New(web.WithHostID("orders-api"))   // ConsoleSink → stdout 已经是默认
@@ -200,7 +200,7 @@ web.WithSink(observability.NewAsyncSink(inner))                 // 要吞吐—�
 web.WithSink(observability.MultiSink{a, b})                     // 同时送多个目的地
 ```
 
-**如果瓶颈就在出口上，用 `NewAsyncSink` 把它包起来。** 观测的成本几乎全花在「把记录送出门」这一步，而 kernel 的事件派发是全同步的——出口有多慢，请求路径就有多慢。`AsyncSink` 把写入放到后台协程、前置一个预分配的环形队列，请求 goroutine 立刻返回。代价是**所有权归你**：队列是有界的（缺省回压，`DropOnFull()` 改为丢弃并计数），生命周期也归你——关闭前 `Flush` 或 `Close`，否则队列里的记录随进程一起消失。
+**如果瓶颈就在出口上，用 `NewAsyncSink` 把它包起来。** 观测的成本几乎全花在「把记录送出门」这一步，而 kernel 的事件派发是全同步的——出口有多慢，请求路径就有多慢。`AsyncSink` 把写入放到后台协程、前置一个预分配的环形队列，请求 goroutine 立刻返回。代价是**所有权归你**：队列是有界的（默认回压，`DropOnFull()` 改为丢弃并计数），生命周期也归你——关闭前 `Flush` 或 `Close`，否则队列里的记录随进程一起消失。
 
 `WithoutAccessLog()` 给已经另有日志系统的服务关掉访问记录；Trace 与 panic 兜底不受影响。
 

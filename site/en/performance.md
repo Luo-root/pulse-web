@@ -13,7 +13,7 @@ The numbers fall into two classes, and they are read differently:
 - **The deterministic class**: `allocs/op` and `B/op`. They are frozen as CI assertions (`bench/budget_test.go`), so they hold **across runs and across machines**.
 - **The floating class**: `ns/op`. The same cell drifts 2–4× between sessions, so it is **only comparable within one round** — never to another round or another machine.
 
-So that "one round" is identifiable, every table below carries a **control row** that has nothing to do with the framework (stdlib ServeMux, pure standard library). When the control moves, the machine state moved — the same cell drifts 2–4× between sessions, so **an ns figure without a same-round control row should not be quoted**.
+So that "one round" is identifiable, every table below carries a **control row** that has nothing to do with the framework (stdlib ServeMux, pure standard library). When the control moves, the machine state moved, so **an ns figure without a same-round control row should not be quoted**.
 
 For absolute values, run the commands below on a quiet machine and compare against the control row from **the same round**.
 
@@ -42,7 +42,7 @@ Protocol: `-benchtime=20000x -count=5`, median, one round, one protocol. **Any �
 - **Per-request cost of `WithCollector()`** = 2123 − 1774 = **+349 ns / +12 allocs** (end to end)
 - **What `Minimal()` saves** = 1774 − 1443 = **−331 ns / −5 allocs** (Trace / AccessLog / Sink switched off)
 - **Per-request cost of `BodyLimit`** = 1877 − 1774 = **+103 ns / +1 alloc** — the extra allocation is the wrapper `http.MaxBytesReader` returns (bound to the request, not reusable); that 103 ns still sits inside the noise (the five runs of that cell landed between 1839 and 2177).
-- **Assembly size does not reach the request path**: the `Engine` request path at 0 / 10 / 50 plugins is 1774 / 1819 / 1937 ns with **allocs constant at 22 and B/op constant at 6298**; at the kernel level the 10 / 50 / 100 plugin trees hold **allocs constant at 14**. Plugin-tree size does not change per-request cost, and that is the premise that makes "assembly" a selling point.
+- **Assembly size does not reach the request path**: the `Engine` request path at 0 / 10 / 50 plugins is 1774 / 1819 / 1937 ns with **allocs constant at 22 and B/op constant at 6298**; at the kernel level the 10 / 50 / 100 plugin trees hold **allocs constant at 14**. Plugin-tree size does not change per-request cost — that is the premise the assembly story rests on.
 - **Containment self-check (against inverted conclusions)**: `AttachCollector` = bare binding + one Collector struct, so the criterion is **B/op** (681 > 649). Both report 14 allocs; their ns happen to agree in direction this round (342 > 327) but are only 4% apart, inside the noise band — **do not draw this conclusion from ns**.
 - **Encoding to a buffer in `c.JSON`**: **+2 allocs** per response (22 → 25, a deterministic criterion covered by the allocation gate), bought "an encoding failure no longer sends an empty 200". The B/op figure of 6437 comes from the **same-round probe** in the design document (6341 → 6437, i.e. +96 B) — it is *not* from the same round as this table's `Engine` row of 6298, so **do not subtract them**. For the time, run the control in the same round.
 
@@ -61,7 +61,7 @@ go test -run TestRequestPathAllocBudget ./bench/
 
 ## What a sink costs
 
-Almost all of the observability money goes into getting the record out of the door, and kernel event dispatch is fully synchronous (`Emit` / `EmitLocal` / `Waterfall`, `Parallel` included) — **the sink is as slow as your request path**.
+The sink is where the observability cost sits (the mechanism is in [observability](/en/guide/observability)) — **a slow sink is a slow request path**.
 
 Same `Record`, every sink writing to `io.Discard` (keeps formatting and locking, excludes terminal/disk I/O):
 
@@ -96,7 +96,7 @@ Protocol: two separate processes sharing one `http.ListenAndServe` bootstrap wit
 
 - **The bare pairing is on par**: 0.94–0.97×, a 3–6% gap; at concurrency 256 the p99 is actually lower (16.80ms vs 20.07ms). The pairing is `gin.New()` ↔ `web.New(web.Minimal())` — neither side carries default middleware.
 - **What carries the protocol is the pairing, not the absolute values**: the same cell moved from 49k to 78k between sessions, so only the paired ratio within one round counts (whole-machine drift such as the power state cancels out).
-- At the time an observability pairing (`gin.Default()` ↔ `web.New()`) was also run, but it used the **old default sink** (then `SlogSink`, since replaced by `ConsoleSink`), so that pairing does not describe the current state and was not re-run — it stays in the design document as the record of *why* the default sink changed.
+- An observability pairing (`gin.Default()` ↔ `web.New()`) used the **old default sink** (`SlogSink`, since replaced by `ConsoleSink`), so it does not describe the current state and is not expanded here; it stays in the design document as the record of *why* the default sink changed.
 
 Reproduce:
 

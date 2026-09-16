@@ -68,9 +68,9 @@ app.Use(func(next web.Handler) web.Handler {
 `BodyLimit(n)` is a **middleware**, so it attaches to a group or to a single route:
 
 ```go
-app := web.New(web.WithMaxBodyBytes(2 << 20))                       // global gate
-app.Group("/upload", web.BodyLimit(100<<20)).POST("/avatar", h)     // wider on this branch
-app.POST("/api/export", h, web.BodyLimit(1<<20))                    // tighter on this route
+app := web.New(web.WithMaxBodyBytes(2 << 20))                       // global gate: 2 MiB
+app.Group("/upload", web.BodyLimit(512<<10)).POST("/avatar", h)     // tightened again to 512 KiB on this group
+app.POST("/api/export", h, web.BodyLimit(1<<20))                    // tightened to 1 MiB on this route
 ```
 
 - **It can only tighten, never widen**: the engine wraps the body first, the route wraps it again, and the **smaller** limit wins. `BodyLimit(1<<20)` on a route under `WithMaxBodyBytes(1<<10)` is still capped at 1 KiB.

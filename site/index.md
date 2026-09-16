@@ -10,7 +10,7 @@ sidebar: false
   <p class="pw-badge">Go 1.27+ · 开源 MIT</p>
   <h1 class="pw-hero-title"><img class="pw-mark" src="/logo.svg" alt="" width="44" height="44" /><span class="pw-wordmark">Pulse-Web</span></h1>
   <p class="pw-claim">通用 Go web 框架，<span class="pw-accent">默认就带观测</span></p>
-  <p class="pw-tagline">站在 pulse 的 kernel 与 observability 上：装配可组合，关掉的是真的关掉；stdout 上每请求一行给人读的访问日志，每请求一个贯穿全链路与下游调用的 32hex TraceID。</p>
+  <p class="pw-tagline">站在 pulse 的 kernel 与 observability 上：装配可组合；观测是默认装配的一部分，不是后挂上去的中间件。</p>
   <p class="pw-actions">
     <a class="pw-btn pw-btn-primary" href="/guide/getting-started">快速开始</a>
     <a class="pw-btn" href="/guide/observability">观测怎么用</a>
@@ -22,7 +22,6 @@ sidebar: false
   <span><b>依赖</b>标准库 + 2 个 pulse 包</span>
   <span><b>Go</b>1.27+</span>
   <span><b>许可</b>MIT</span>
-  <span><b>形态</b>库，无前端</span>
 </div>
 
 <section class="pw-section">
@@ -38,7 +37,7 @@ sidebar: false
     <div class="pw-cell">
       <span class="pw-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 12S6 6.5 12 6.5 21.5 12 21.5 12 18 17.5 12 17.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="2.6"/></svg></span>
       <h3>一等观测</h3>
-      <p>默认出口把每条记录渲染成一行给人读的列式输出，列宽固定、写完即落；同一个 32hex TraceID 贯穿 handler、访问日志与下游调用。</p>
+      <p>默认出口把每条记录渲染成一行给人读的列式输出；同一个 32hex TraceID 贯穿 handler、访问日志与下游调用。</p>
       <a class="pw-link" href="/guide/observability">看观测 →</a>
     </div>
     <div class="pw-cell">
@@ -75,7 +74,7 @@ sidebar: false
     <div class="pw-path">
       <h3>安装</h3>
       <pre class="pw-pre">go get github.com/Luo-root/pulse-web</pre>
-      <p>需要 Go 1.27+（<code>go.mod</code> 写 <code>go 1.27.0</code>，工具链缺失会自动下载）。核心模块只编译进标准库与两个 pulse 包。</p>
+      <p>需要 Go 1.27+（<code>go.mod</code> 写 <code>go 1.27.0</code>，工具链缺失会自动下载）。</p>
     </div>
     <div class="pw-path">
       <h3>最小可跑</h3>

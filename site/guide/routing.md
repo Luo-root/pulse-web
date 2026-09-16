@@ -68,9 +68,9 @@ app.Use(func(next web.Handler) web.Handler {
 `BodyLimit(n)` 是一个**中间件**，所以它既能挂分组也能挂单条路由：
 
 ```go
-app := web.New(web.WithMaxBodyBytes(2 << 20))                       // 全局闸
-app.Group("/upload", web.BodyLimit(100<<20)).POST("/avatar", h)     // 这块放宽
-app.POST("/api/export", h, web.BodyLimit(1<<20))                    // 这条收紧
+app := web.New(web.WithMaxBodyBytes(2 << 20))                       // 全局闸：2 MiB
+app.Group("/upload", web.BodyLimit(512<<10)).POST("/avatar", h)     // 分组再收紧到 512 KiB
+app.POST("/api/export", h, web.BodyLimit(1<<20))                    // 路由再收紧到 1 MiB
 ```
 
 - **只能收紧，不能放宽**：引擎级先套一层，路由级再套一层，生效的是**两者中更小的**。挂在 `WithMaxBodyBytes(1<<10)` 的路由上时，`BodyLimit(1<<20)` 仍被 1 KiB 掐住。

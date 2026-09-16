@@ -1,6 +1,6 @@
 # Deployment and runtime contracts
 
-This page has two halves: **how logs land** (the operations half — the framework only writes to stdout), and **the runtime sequence the framework promises** (the invariants you will bump into while writing handlers).
+This page has two halves: **how logs land** (the operations half — the framework only writes to stdout), and **the runtime sequence the framework promises** (the invariants you will encounter while writing handlers).
 
 ## Logs: the default writes to stdout only
 

@@ -185,7 +185,7 @@ Templates are a thin wrapper over `html/template`; there is no template engine o
 
 Every request gets a 32-hex TraceID, one `http.request` record, and a request scope that is disposed as soon as the handler returns — before the engine maps the outcome and writes anything further.
 
-**There is nothing to wire up.** `New()` already installs a sink: `ConsoleSink`, one human-readable column-aligned line per request, written to stdout. The same TraceID shows up in the handler, in that line, and in anything you attach later.
+`New()` already installs a sink: `ConsoleSink` — one human-readable column-aligned line per request, written to stdout.
 
 ```go
 app := web.New(web.WithHostID("orders-api"))   // ConsoleSink → stdout is already the default
