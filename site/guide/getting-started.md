@@ -66,7 +66,7 @@ app.GET("/users/{id}", func(c *web.Ctx) error {
 })
 ```
 
-行首的 `PULSE` 是上游缺省标识（`observability.DefaultLinePrefix`）：pulse 与 pulse-web 同根同源，同一个进程树里两个出口的行首一致，`grep PULSE` 一把捞出全部行。
+行首的 `PULSE` 是上游默认标识（`observability.DefaultLinePrefix`）：pulse 与 pulse-web 同根同源，同一个进程树里两个出口的行首一致，`grep PULSE` 就能拿到全部行。
 
 ## 接下来
 

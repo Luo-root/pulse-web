@@ -230,7 +230,7 @@ module）是为回答「与 gin 同级吗、观测的钱花在哪」做的一次
 ## 设计红线
 
 1. 请求路径一律 `EmitLocal`，禁用全树 `Emit`（v0.2.1 实测 23ns vs 1778ns）
-2. **请求级数据用 `kernel.Local()`，不写全局 `Provide`**——全局命名空间是**装配面**，请求级值写进去会被并发请求互相覆盖。`WithCollector()` 显式开启后才在请求路径上出现局部绑定（实测 +385 ns / +12 allocs 每请求，与插件树规模无关；口径见表 B）
+2. **请求级数据用 `kernel.Local()`，不写全局 `Provide`**——全局命名空间是**装配面**，请求级值写进去会被并发请求互相覆盖。`WithCollector()` 显式开启后才在请求路径上出现局部绑定（实测 +349 ns / +12 allocs 每请求，与插件树规模无关；口径见表 B）
 3. 请求 scope 与"响应是否送达网络"解耦：**`Dispose` 在写响应之前**
 4. `Ctx` 不可跨 goroutine；后台任务用 `Detach`（值 + 进程级 root）
 
@@ -514,7 +514,7 @@ app.POST("/jobs", func(c *web.Ctx) error {
 
 **`WithSink` 只换出口，不复活 Trace / AccessLog**——要观测就别用 `Minimal()`。框架**没有**可单独挂载的 `Trace()` / `AccessLog()` 中间件（本文档早期版本写过 `app.Use(web.Trace())`，那个 API 不存在，已删）：默认装配是一体的，`Minimal()` 下要自己写中间件 + `c.Observe()` 打点。
 
-`WithCollector()` 每请求把 `observability.Collector` 装进请求作用域（上游 v0.2.1 起是 `kernel.Local()` 作用域局部绑定；实测 **+385 ns / +12 allocs 每请求**，**与插件树规模无关**——口径见表 B）。
+`WithCollector()` 每请求把 `observability.Collector` 装进请求作用域（上游 v0.2.1 起是 `kernel.Local()` 作用域局部绑定；实测 **+349 ns / +12 allocs 每请求**，**与插件树规模无关**——口径见表 B）。
 
 **它服务的是「库作者」，不是「应用作者」**：应用作者（自己的 controller / service / dao）把 `c` 或 `c.Observe` 往下传就够；需要它的是那种「想同时活在 web 请求与 CLI / worker 里、因此不能 import pulse-web、只收 `*kernel.Context`」的库对象——**且必须由宿主把请求 scope 显式传进去**。边界见下方两处。无 Sink 时装配期 panic（`Minimal()` 且未 `WithSink` 即此组合）。
 
@@ -530,7 +530,7 @@ v1 选项面：`New()` / `Minimal()` / `WithSink` / `WithoutAccessLog` / `WithRo
 PULSE | 2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /users/42 | route=/users/{id} | size=29 | host=pulse-web | trace=8f2e1a3b4c5d6e7f8a9b0c1d2e3f4a5b
 ```
 
-（行首标识 `PULSE` 是上游缺省值（`observability.DefaultLinePrefix`）——pulse 与 pulse-web 同根同源，同一进程树里两个出口的行首一致，`grep PULSE` 一把捞出全部行。
+（行首标识 `PULSE` 是上游缺省值（`observability.DefaultLinePrefix`）——pulse 与 pulse-web 同根同源，同一进程树里两个出口的行首一致，`grep PULSE` 就能拿到全部行。
 尾段的 `route=` / `size=` / `host=` / 错误 / `trace=` 是各自独立的 ` | ` 字段，有才出现；
 逐字版本由 `console_sink_test.go` 的 `TestConsoleSinkHTTPLine` 钉住——改版式时以那条断言为准。）
 
@@ -561,7 +561,7 @@ PULSE | 2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /us
 
 迁移带来**五处变化**（除这五处外逐字节不变；#27 的 44 组对照 + review 时补的 49 条边界语料）：
 
-1. **行首标识**：无 → 上游缺省 `PULSE`。pulse 与 pulse-web 同根同源，同一进程树里两个出口的行首一致，`grep PULSE` 一把捞出全部行
+1. **行首标识**：无 → 上游缺省 `PULSE`。pulse 与 pulse-web 同根同源，同一进程树里两个出口的行首一致，`grep PULSE` 就能拿到全部行
 2. **耗时列**：浮点四舍五入 → 上游 `AppendDuration` 的整数截断（`585199ns` 旧 `585.2µs` → 新 `585.1µs`）。`TestConsoleSinkDurationColumn` 钉住
 3. **列补齐**：`utf8.RuneCount` → `observability.DisplayWidth`。ASCII 下等价，**全角下是新版才对**——`客户端-甲:1234` 是 10 rune / 14 显示列，旧实现补 5 个空格让该列占 19 列、后续列整体推右 4 格；新版补 1 个、占满 15 列。`TestConsoleSinkPaddingUsesDisplayWidth` 钉住
 4. **兜底组与事件行的键名按需加引号**：新实现走 `AppendAttrs`，键名也过 `AppendTextValue`；旧实现 `appendField` / `appendKeyValue` 裸写键名。（`| weird key=1 k=v=2` → `| "weird key"=1 "k=v"=2`）
@@ -610,7 +610,7 @@ PULSE | 2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /us
 
 **所以：kernel 插件在请求路径上没有「自取」通道。** 这不是缺陷——局部绑定兄弟不可见是上游 `#170` 的有意修复（避免并发串台），`EmitLocal` 只派发本层是它的定义；但两者叠加的结果此前无人文档化，读者要自己画作用域树才能推出来。
 
-已上报上游 [pulse#189](https://github.com/Luo-root/pulse/issues/189)，上游**核销为不改代码**，并把表述收正为「没有**交付通道**」——机制一直都在，缺的是插件在请求路径上如何拿到那份请求身份。**插件要参与，走宿主交付，交付物二选一**：上表那两条——**请求上下文**（同步调用给 `*Ctx`、跨 goroutine 给值袋子 `Detached`；两者都是 `Observe` 直写 Sink、与请求共享 TraceID，零 scope 开销。`Ctx` 不可跨 goroutine，见运行时契约），或**请求 scope**（`WithCollector()` + `kernel.Get(CollectorKey)`，每请求 +385 ns / +12 allocs）。两条都不要求插件自己 lookup，也不用碰 `EmitLocal` 的传播范围。
+已上报上游 [pulse#189](https://github.com/Luo-root/pulse/issues/189)，上游**核销为不改代码**，并把表述收正为「没有**交付通道**」——机制一直都在，缺的是插件在请求路径上如何拿到那份请求身份。**插件要参与，走宿主交付，交付物二选一**：上表那两条——**请求上下文**（同步调用给 `*Ctx`、跨 goroutine 给值袋子 `Detached`；两者都是 `Observe` 直写 Sink、与请求共享 TraceID，零 scope 开销。`Ctx` 不可跨 goroutine，见运行时契约），或**请求 scope**（`WithCollector()` + `kernel.Get(CollectorKey)`，每请求 +349 ns / +12 allocs）。两条都不要求插件自己 lookup，也不用碰 `EmitLocal` 的传播范围。
 
 上游 #189 的探针实测了同形结论：插件只吃一份 per-request cfg（`kernel/flow/observer_record.go:34` 的 `NewRecordObserver(cfg)` 形态）即可参与，且与宿主在请求 scope 上的直写落在**同一个 TraceID** 下。
 

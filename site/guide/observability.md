@@ -1,6 +1,6 @@
 # 观测
 
-这套观测的卖点不是「能接 Sink」，而是**默认就接好了**：`web.New()` 起服务之后，每请求一行访问日志、每请求一个 32hex TraceID、请求作用域按时回收——一行配置都不用写。
+这套观测的重点不是「能接 Sink」，而是**默认就接好了**：`web.New()` 起服务之后，每请求一行访问日志、每请求一个 32hex TraceID、请求作用域按时回收——一行配置都不用写。
 
 ## 默认出口：给人读的控制台列式
 
@@ -27,19 +27,19 @@ web.WithSink(observability.MultiSink{a, b})                     // 同时送多�
 |---|---|---|
 | `web.ConsoleSink`（默认） | 想在终端 / `kubectl logs` 里直接看懂 | 不缓冲；写失败不抛，但 `Err()` 报出首次失败 |
 | `observability.SlogSink` | 已经有一套日志管道、要 JSON、喂采集器 | 默认写 **stderr**；走宿主 logger 的格式与级别 |
-| `observability.LineSink` | 要上游缺省版式的行式输出 + 32 KiB 缓冲 | 引擎在优雅关闭时会替你 `Flush` |
+| `observability.LineSink` | 要上游默认版式的行式输出 + 32 KiB 缓冲 | 引擎在优雅关闭时会替你 `Flush` |
 | `observability.NewAsyncSink(inner)` | 出口是瓶颈（文件 / 网络导出器） | 队列有界、生命周期归你——见下 |
 | `observability.MultiSink` | 要同时给人看又送采集器 | 扇出，nil 成员跳过 |
 
 ::: warning 别把 `SlogSink` 当成默认
-它是**给机器读**的那个出口。默认出口是 `ConsoleSink`——`0.585` 与 `585.1µs` 是同一条耗时，开机第一眼要的是后者。要切回结构化出口用 `WithSink`，不需要改别处。
+它是**给机器读**的那个出口。默认出口是 `ConsoleSink`——`0.585` 与 `585.1µs` 是同一条耗时，开机第一眼要的是后者。
 :::
 
 ## 出口是吞吐所在：什么时候包 `AsyncSink`
 
 观测的钱几乎全花在「把记录送出门」这一步，而 kernel 的事件派发是**全同步**的（`Emit` / `EmitLocal` / `Waterfall`，`Parallel` 也等完成）——**出口有多慢，请求路径就有多慢**。
 
-`NewAsyncSink(inner)` 把手慢的出口从调用方 goroutine 上摘掉：`Write` 只做 `Attrs` 深拷 + 入队就返回，单后台协程按 FIFO 调 `inner.Write`。
+`NewAsyncSink(inner)` 把慢出口从调用方 goroutine 上摘掉：`Write` 只做 `Attrs` 深拷 + 入队就返回，单后台协程按 FIFO 调 `inner.Write`。
 
 ```go
 app := web.New(
@@ -52,7 +52,7 @@ app := web.New(
 
 代价是**所有权归你**，两条都要处理：
 
-1. **队列有界**（缺省 1024）。满时缺省**回压**——不丢记录，把背压留给生产者；`observability.DropOnFull()` 改为丢**新**记录并计入 `Dropped()`。
+1. **队列有界**（默认 1024）。满时默认**回压**——不丢记录，把背压留给生产者；`observability.DropOnFull()` 改为丢**新**记录并计入 `Dropped()`。
 2. **生命周期归创建者**。异步出口改变了「树销毁后 Sink 零残留」的达成方式：关闭前必须 `Flush(ctx)` 或 `Close(ctx)`，否则队列里的记录随进程一起消失。框架的关闭时序会替你 `Flush` 一次已产生的记录，但 `Close` 不代做——把出口的所有权交给框架，`Detach` 出来的后台任务就会被静默截断。
 
 ::: tip 数字在哪
@@ -112,4 +112,4 @@ app.Debug("/debug/assembly")        // 装配状态的 JSON 视图：快照、fi
 
 ## 持久化不归框架
 
-默认出口写 stdout，它**不是持久化层**。落盘、轮转、保留策略属于你的平台——容器运行时、systemd / journald，或你自己 `WithSink` 给的 writer。部署侧的配置与「丢多少由哪一层决定」随后在站点的落地页展开（那部分内容是从 README 移出来的，设计文档的「日志落地」一节已有全文）。
+默认出口写 stdout，它**不是持久化层**。落盘、轮转、保留策略属于你的平台——容器运行时、systemd / journald，或你自己 `WithSink` 给的 writer。部署侧的配置与「丢多少由哪一层决定」见[落地与运行时契约](/guide/ops-contracts)。

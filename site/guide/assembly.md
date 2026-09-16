@@ -15,14 +15,14 @@ err := app.Run(":8080")               // 阻塞至关闭完成；nil = 收到信
 |---|---|
 | `web.New()` | 默认：自建 root、装好观测、默认出口写 stdout |
 | `web.New(web.WithRoot(k))` | 与宿主 / 别的组件**共用同一棵 kernel 树** |
-| `web.New(web.Minimal())` | 只要路由与中间件，**不要** Bootstrap 与默认出口（裸机对照档就是它） |
+| `web.New(web.Minimal())` | 只要路由与中间件，**不要** Bootstrap 与默认出口（loadtest 里的 `bare` 对照档就是它） |
 
 ```go
 app := web.New(web.Minimal())          // 等价于「不装观测」的引擎
 ```
 
 ::: warning `Minimal()` 与 `WithCollector()` 不能单独配
-`WithCollector()` 要把请求级 Collector 绑到作用域上，需要一个 Sink 来落盘——**`Minimal()` + `WithCollector()` 而不给 `WithSink` 会在装配期 panic**（这是装配错误，不该拖到第一个请求才炸）。
+`WithCollector()` 要把请求级 Collector 绑到作用域上，需要一个 Sink 承接记录——**`Minimal()` + `WithCollector()` 而不给 `WithSink` 会在装配期 panic**（这是装配错误，不该拖到第一个请求才 panic）。
 :::
 
 ## 装配面：`Root()`
@@ -44,7 +44,7 @@ kernel.Use(root, myPlugin)
 | `WithRoot(k)` | 接入已有 kernel root（默认自建） |
 | `WithHostID(id)` | 写进每条观测记录的 `host` 字段 |
 | `WithSink(sink)` | 换观测出口（默认 `NewConsoleSink(os.Stdout)`） |
-| `WithCollector()` | 每请求挂一个 Collector（`+385 ns / +12 allocs`，见[性能](/performance)） |
+| `WithCollector()` | 每请求挂一个 Collector（**+12 allocs**，见[性能](/performance)） |
 | `WithTrustedTraceHeader(false)` | **默认 `true`**：采纳入站 `traceparent` / B3 链路头 |
 | `WithoutAccessLog()` | 关掉访问日志（Trace 与 panic 兜底还在） |
 | `WithServer(ServerConfig)` | 覆盖 HTTP server 参数（见下） |
@@ -108,7 +108,7 @@ app.OnShutdown(func(ctx context.Context) error {
 4. `root.Dispose()` —— 终局：级联截断（**不等待在途工作**；未注册等待的后台任务会在这里被截断）
 5. **出口 flush** —— 独立 3s 预算，**不计入 `ShutdownTimeout`**
 
-所以关闭总时长上限 = `ShutdownTimeout` + 3s；①②③ 共享同一个 deadline（与 k8s 的 `terminationGracePeriodSeconds` 对齐）。第 5 步**只 flush、不 Close**：出口的所有权归装配方，`Close` 会静默丢掉 `Detach` 出来的后台任务还在写的记录。
+关闭总时长上限 = `ShutdownTimeout` + 3s；deadline 如何分摊、flush 预算与出口所有权归谁，见[落地与运行时契约](/guide/ops-contracts)。
 
 ## 装配诊断：`Debug`
 

@@ -10,7 +10,7 @@ sidebar: false
   <p class="pw-badge">Go 1.27+ · MIT</p>
   <h1 class="pw-hero-title"><img class="pw-mark" src="/logo.svg" alt="" width="44" height="44" /><span class="pw-wordmark">Pulse-Web</span></h1>
   <p class="pw-claim">A general-purpose Go web framework that <span class="pw-accent">ships observability</span></p>
-  <p class="pw-tagline">Built on pulse's kernel and observability: assembly composes and what you switch off is really off; stdout carries one human-readable access-log line per request, and every request gets a 32-hex TraceID that reaches downstream calls.</p>
+  <p class="pw-tagline">Built on pulse's kernel and observability: assembly composes, and observability is part of the default assembly rather than a middleware you bolt on.</p>
   <p class="pw-actions">
     <a class="pw-btn pw-btn-primary" href="/en/guide/getting-started">Get started</a>
     <a class="pw-btn" href="/en/guide/observability">Using observability</a>
@@ -22,7 +22,6 @@ sidebar: false
   <span><b>Dependencies</b>standard library + 2 pulse packages</span>
   <span><b>Go</b>1.27+</span>
   <span><b>License</b>MIT</span>
-  <span><b>Shape</b>a library, no frontend</span>
 </div>
 
 <section class="pw-section">
@@ -38,7 +37,7 @@ sidebar: false
     <div class="pw-cell">
       <span class="pw-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 12S6 6.5 12 6.5 21.5 12 21.5 12 18 17.5 12 17.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="2.6"/></svg></span>
       <h3>Observability as a first-class citizen</h3>
-      <p>The default sink renders each record as one human-readable, column-aligned line, written straight through; the same 32-hex TraceID reaches the handler, the access log and downstream calls.</p>
+      <p>The default sink renders each record as one human-readable, column-aligned line; the same 32-hex TraceID reaches the handler, the access log and downstream calls.</p>
       <a class="pw-link" href="/en/guide/observability">Observability →</a>
     </div>
     <div class="pw-cell">
@@ -75,7 +74,7 @@ sidebar: false
     <div class="pw-path">
       <h3>Install</h3>
       <pre class="pw-pre">go get github.com/Luo-root/pulse-web</pre>
-      <p>Requires Go 1.27+ (<code>go.mod</code> pins <code>go 1.27.0</code>; the toolchain downloads itself when missing). The core module compiles in the standard library and two pulse packages, nothing else.</p>
+      <p>Requires Go 1.27+ (<code>go.mod</code> pins <code>go 1.27.0</code>; the toolchain downloads itself when missing).</p>
     </div>
     <div class="pw-path">
       <h3>Smallest runnable app</h3>

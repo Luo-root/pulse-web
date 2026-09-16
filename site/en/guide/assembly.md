@@ -22,7 +22,7 @@ app := web.New(web.Minimal())          // an engine with observability switched 
 ```
 
 ::: warning `Minimal()` and `WithCollector()` cannot be combined alone
-`WithCollector()` binds a per-request Collector to the scope, and that needs a sink to write into. **`Minimal()` + `WithCollector()` without `WithSink` panics at assembly time** — an assembly error should not wait for the first request to explode.
+`WithCollector()` binds a per-request Collector to the scope, and that needs a sink to write into. **`Minimal()` + `WithCollector()` without `WithSink` panics at assembly time** — an assembly error should not wait for the first request to panic.
 :::
 
 ## The assembly surface: `Root()`
@@ -44,7 +44,7 @@ The framework **does not wrap** the rest of kernel's assembly API: `Provide` / `
 | `WithRoot(k)` | adopt an existing kernel root (default: build one) |
 | `WithHostID(id)` | value written into the `host` field of every record |
 | `WithSink(sink)` | replace the observability sink (default `NewConsoleSink(os.Stdout)`) |
-| `WithCollector()` | attach a Collector per request (`+385 ns / +12 allocs`, see [performance](/en/performance)) |
+| `WithCollector()` | attach a Collector per request (**+12 allocs**, see [performance](/en/performance)) |
 | `WithTrustedTraceHeader(false)` | **defaults to `true`**: accept inbound `traceparent` / B3 headers |
 | `WithoutAccessLog()` | turn the access log off (tracing and panic recovery stay) |
 | `WithServer(ServerConfig)` | override HTTP server parameters (below) |
@@ -108,7 +108,7 @@ The shutdown sequence (both `Run` and `Serve` walk it):
 4. `root.Dispose()` — the endgame: cascade teardown (**in-flight work is not awaited**; background tasks that registered no wait are cut off here)
 5. **sink flush** — its own 3s budget, **not counted in `ShutdownTimeout`**
 
-So the total shutdown ceiling is `ShutdownTimeout` + 3s, and steps 1–3 share one deadline (aligned with k8s `terminationGracePeriodSeconds`). Step 5 **flushes without closing**: the sink belongs to whoever assembled it, and closing it would silently drop records that `Detach`ed background tasks are still writing.
+The total shutdown ceiling is `ShutdownTimeout` + 3s; how the deadline is split, what the flush budget covers and who owns the sink are specified in [operations & runtime contracts](/en/guide/ops-contracts).
 
 ## Assembly diagnostics: `Debug`
 

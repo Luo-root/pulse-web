@@ -220,7 +220,7 @@
 /* 规格条：mono 小字 + hairline 分列 */
 .pw-spec {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   border-bottom: 1px solid var(--vp-c-divider);
 }
 .pw-spec span {

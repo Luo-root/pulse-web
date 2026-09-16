@@ -32,7 +32,7 @@ web.WithSink(observability.MultiSink{a, b})                     // several desti
 | `observability.MultiSink` | Human and machine destinations at once | Fan-out; nil members are skipped |
 
 ::: warning `SlogSink` is not the default
-It is the **machine-readable** sink. The default is `ConsoleSink` — `0.585` and `585.1µs` are the same duration, and the first thing you want at boot is the second one. Switch back to a structured sink with `WithSink`; nothing else in the assembly changes.
+It is the **machine-readable** sink. The default is `ConsoleSink` — `0.585` and `585.1µs` are the same duration, and the first thing you want at boot is the second one.
 :::
 
 ## The sink is where your throughput goes: when to wrap `AsyncSink`
@@ -112,4 +112,4 @@ No field is missing from the `Record`; only the rendering layer is. Switch to `S
 
 ## Persistence is not the framework's job
 
-The default sink writes to stdout and is **not a persistence layer**. Rotation and retention belong to your platform — the container runtime, systemd / journald, or a writer you pass in via `WithSink`. The deployment side of that, including which layer decides what gets dropped, lands on this site's operations page (it was moved out of the README; the design document's section on log destinations already has the full text).
+The default sink writes to stdout and is **not a persistence layer**. Rotation and retention belong to your platform — the container runtime, systemd / journald, or a writer you pass in via `WithSink`. The deployment side of that, including which layer decides what gets dropped, is covered in [operations & runtime contracts](/en/guide/ops-contracts).

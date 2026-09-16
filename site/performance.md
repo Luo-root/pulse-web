@@ -13,7 +13,7 @@
 - **确定性的一类**：`allocs/op` 与 `B/op`。它们已经固化成 CI 断言（`bench/budget_test.go`），**跨轮、跨机器都稳定**。
 - **浮动的一类**：`ns/op`。同一格换一次会话就能漂 2–4×，所以**只在本轮内可比**，不能跟别的轮次、别的机器比。
 
-为了让「本轮」可辨识，下面每张表都带一条**与框架无关的对照行**（stdlib ServeMux，纯标准库）。对照行变了，说明机器状态变了——同一格换一次会话就能漂 2–4×，所以**没有同轮对照行的 ns 不要引用**。
+为了让「本轮」可辨识，下面每张表都带一条**与框架无关的对照行**（stdlib ServeMux，纯标准库）。对照行变了说明机器状态变了，**没有同轮对照行的 ns 不要引用**。
 
 要绝对值就在安静机器上按下面的命令自己跑一轮，并与**同一轮**的对照行比。
 
@@ -42,7 +42,7 @@
 - **`WithCollector()` 的每请求成本** = 2123 − 1774 = **+349 ns / +12 allocs**（端到端）
 - **`Minimal()` 省下的** = 1774 − 1443 = **−331 ns / −5 allocs**（关掉 Trace / AccessLog / Sink）
 - **`BodyLimit` 的每请求成本** = 1877 − 1774 = **+103 ns / +1 alloc**——多出来的分配就是 `http.MaxBytesReader` 返回的包装器本身（绑在请求上，无法复用），ns 那 103 仍然落在噪声里（同档 5 次落在 1839–2177）。
-- **装配规模与请求路径无关**：`Engine` 请求路径在 0 / 10 / 50 插件下是 1774 / 1819 / 1937 ns、**allocs 恒为 22、B/op 恒为 6298**；kernel 层 10 / 50 / 100 插件树 **allocs 恒为 14**。插件树大小不改变每请求成本，这是「装配能力」能当卖点的前提。
+- **装配规模与请求路径无关**：`Engine` 请求路径在 0 / 10 / 50 插件下是 1774 / 1819 / 1937 ns、**allocs 恒为 22、B/op 恒为 6298**；kernel 层 10 / 50 / 100 插件树 **allocs 恒为 14**。插件树大小不改变每请求成本——这正是装配能力能成立的前提。
 - **包含关系自检（防倒挂）**：`AttachCollector` = 裸绑定 + 1 个 Collector 结构，判据看 **B/op**（681 > 649）。两者 allocs 同为 14；本轮 ns 同向（342 > 327）但只差 4%，仍在噪声带内——**别拿 ns 下这个结论**。
 - **`c.JSON` 先编码到 buffer**：每响应 **+2 allocs**（22 → 25，确定性判据，由分配门禁覆盖），换来「编码失败不再发 200 空体」。表中 B/op 6437 取自设计文档表 B 的**同轮探针**（6341 → 6437，即 +96 B）——它与本表 `Engine` 行的 6298 不是同一轮，**不要相减**。ns 请自己在同轮里跑对照。
 
@@ -61,7 +61,7 @@ go test -run TestRequestPathAllocBudget ./bench/
 
 ## 出口（Sink）值多少
 
-观测的钱几乎全花在「把记录送进出口」这一步，而 kernel 的事件派发是全同步的（`Emit` / `EmitLocal` / `Waterfall`，`Parallel` 也等完成）——**出口有多慢，请求路径就有多慢**。
+出口是观测成本的所在（机制见[观测](/guide/observability)）——**出口有多慢，请求路径就有多慢**。
 
 同一个 `Record`、出口都写 `io.Discard`（保留格式化与锁的成本，排除终端/磁盘 I/O）：
 
@@ -81,7 +81,7 @@ go test -run TestRequestPathAllocBudget ./bench/
 go test -run '^$' -bench 'BenchmarkSinkWrite_ConsoleVsUpstream|BenchmarkRequestPath_DefaultSink' -benchmem -count=5 ./bench/
 ```
 
-出口怎么选见[观测](/guide/observability)；要吞吐就把手慢的出口包进 `observability.NewAsyncSink`。
+出口怎么选见[观测](/guide/observability)；要吞吐就把慢出口包进 `observability.NewAsyncSink`。
 
 ## 与 gin 的真实负载对比（一次性验证，2026-09-14）
 
@@ -96,7 +96,7 @@ go test -run '^$' -bench 'BenchmarkSinkWrite_ConsoleVsUpstream|BenchmarkRequestP
 
 - **裸档同级**：0.94–0.97×，差 3–6%；并发 256 时 p99 反而更低（16.80ms vs 20.07ms）。对拍档是 `gin.New()` ↔ `web.New(web.Minimal())`——两侧都没有默认中间件。
 - **口径的效力在「配对」上，不在绝对值上**：同一格换一次会话能从 49k 变到 78k，所以只认同轮配对比值（供电状态这类整机漂移被配对抵消）。
-- 当时还跑了 `gin.Default()` ↔ `web.New()` 的观测档，但它用的是**旧默认出口**（当时是 `SlogSink`，现已换成 `ConsoleSink`），所以那一档不代表现状，也没有重跑——它留在设计文档里作为「默认出口为什么换」的记录。
+- 观测档（`gin.Default()` ↔ `web.New()`）用的是**旧默认出口**（`SlogSink`，现已换成 `ConsoleSink`），不代表现状，因此不在本页展开；它留在设计文档里，作为「默认出口为什么换」的记录。
 
 复现：
 
