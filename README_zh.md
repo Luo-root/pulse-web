@@ -5,6 +5,7 @@
 <div align="center">
   <a href="https://go.dev/"><img alt="Go 1.27.0" src="https://img.shields.io/badge/Go-1.27.0-blue.svg"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-green.svg"></a>
+  <a href="https://github.com/Luo-root/pulse-web/releases/latest"><img alt="Release: v0.1.0" src="https://img.shields.io/github/v/release/Luo-root/pulse-web?label=release&amp;color=2563eb&amp;sort=semver"></a>
   <a href="https://github.com/Luo-root/pulse-web/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Luo-root/pulse-web/actions/workflows/ci.yml/badge.svg"></a>
   <a href="#安装"><img alt="依赖：标准库 + 两个 pulse 包" src="https://img.shields.io/badge/deps-stdlib%20%2B%202%20packages-2563eb.svg"></a>
   <a href="https://luo-root.github.io/pulse-web/"><img alt="文档：English | 中文" src="https://img.shields.io/badge/docs-English%20%7C%20%E4%B8%AD%E6%96%87-2563eb.svg"></a>
