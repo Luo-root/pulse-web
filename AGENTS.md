@@ -8,7 +8,7 @@
 
 ## 构建与测试
 
-需要 **Go 1.27+**（`go.mod` 写 `go 1.27.0`，工具链缺失会自动下载）。没有 Makefile、没有 linter 配置——下面六条就是全部 CI 门禁（`.github/workflows/ci.yml` 的六个 step，一一对应）：
+需要 **Go 1.27+**（`go.mod` 写 `go 1.27.0`，工具链缺失会自动下载）。没有 Makefile、没有 linter 配置——下面七条就是全部 CI 门禁（`.github/workflows/ci.yml` 的七个 step，一一对应）：
 
 ```bash
 go build ./...                                            # 编译
@@ -17,6 +17,7 @@ go vet ./...                                              # 静态检查
 go test -race ./...                                       # 全部测试
 go test -run TestRequestPathAllocBudget ./bench/          # 分配预算门禁——必须不带 -race
 go test -run '^$' -bench '^$' ./bench/                    # bench 编译检查
+(cd loadtest && go build ./... && go vet ./... && go test ./...)   # loadtest 独立 module——根 module 的 ./... 盖不到
 ```
 
 Windows PowerShell 下格式门禁写成：
@@ -49,6 +50,7 @@ debug.go                # 装配诊断端点（FiberSnapshots 的 JSON 视图）
 *_test.go               # 与源文件同包（无独立 xxx_test 包），黑盒走 Engine 入口
 assets/                 # 品牌事实源：logo.svg / banner.svg / favicon.svg
 bench/                  # 性能回归基线 + 分配预算门禁；muxprobe/ 是路由选型的一次性实测程序
+loadtest/               # 与 gin 的真实负载对比（**独立 module**，带 gin 依赖；根 module 的 ./... 不过 module 边界）
 docs/design/            # 设计文档（决策与验收清单的事实源）
 .github/workflows/ci.yml
 ```
@@ -80,10 +82,11 @@ docs/design/            # 设计文档（决策与验收清单的事实源）
 - **每条验收标准都要有可复跑的佐证**：靠测试的写出测试名；靠实测的指到存数字的那一节。
 - **守卫测试必须附变异探针**——改一处生产代码或资产让它失败，跑一遍确认抓到，再从 git 还原并核对字节一致。没被看着失败过的守卫不算守卫。探针临时文件放 `_scratch/`（已 gitignore），**不要留在仓库里**。
 - **文档同步面**：行为或 API 变化要在同一个 PR 里改 `README.md`（面向使用者）、`site/` 指南（同一批读者，中英同步）与 `docs/design/web-framework-design.md`（契约、决策、验收清单）。改「N 条 / N 个」这类**计数词**、或会被别处引用的**成本数字**（`+NNN ns` / `NN allocs`）时，先 grep 全部同类措辞再下结论——两类都出过「换轮时只改了一处」。
+- **换默认出口 / 动请求路径的 PR，同一个 PR 里重跑 `loadtest/`**：`cd loadtest && go run ./cmd/compare -probe -passes 4 -d 8s -warmup 2s`，并把设计文档表 C 与站点性能页（中英）一起更新。当场跑不了就在 PR 描述里写明「这一轮的负载数字不代表现状」——`SlogSink` → `ConsoleSink` 那次就是没人重跑，数字安静地错了一轮（#68 / #73）。
 - **合并纪律**：`main` 开了 `required_conversation_resolution` + status checks `strict` + `enforce_admins`。PR 落后 `main` 要 `update-branch`，然后**按新的 head SHA 核对 check-runs**（`gh api repos/<slug>/commits/<sha>/check-runs`）再合——`gh pr checks` 可能返回更新前那一轮的结果。未 resolve 的 review 线程会挡合并（`mergeable_state` 会显示 blocked，别误判成冲突）。
 - **合并动作由维护者做**。agent 的终点是「分支推送 + PR 开好 + CI 绿 + 自审结论 + 回报」。
 - **外部意见（含其他 AI 给的 review）必须逐条探针实测后再采纳**，不要照抄结论。
-- **`bench/gin-compare` 分支要保留**（历史对比数据），别清理。
+- **`bench/gin-compare` 分支要保留**（历史对比数据），别清理；但**采集工程的现状在 `loadtest/`**——分支上是它挪进仓库之前的样子，别从那上面取数。
 
 ## 本机环境坑（Windows）
 
