@@ -2,7 +2,9 @@
 
 This page answers two questions: **what does a request path cost**, and **where does the observability money go**. Every table comes with a command to reproduce it.
 
-**Version**: pulse-web v0.1.0 (current `main`; depends on pulse v0.2.4). This section is re-measured at tag time.
+**Version**: pulse-web v0.1.0 (current `main`, first tag not yet released; depends on pulse v0.2.4). This section is re-measured at tag time.
+
+**This round**: 2026-09-16 · i9-14900HX / 32 logical cores / Go 1.27 / Windows amd64 · **on AC power**.
 
 ## How to read this page
 
@@ -11,16 +13,11 @@ The numbers fall into two classes, and they are read differently:
 - **The deterministic class**: `allocs/op` and `B/op`. They are frozen as CI assertions (`bench/budget_test.go`), so they hold **across runs and across machines**.
 - **The floating class**: `ns/op`. The same cell drifts 2–4× between sessions, so it is **only comparable within one round** — never to another round or another machine.
 
-So that "one round" is identifiable, every table below carries a **control row** that has nothing to do with the framework (stdlib ServeMux, pure standard library). When the control moves, the machine state moved.
+So that "one round" is identifiable, every table below carries a **control row** that has nothing to do with the framework (stdlib ServeMux, pure standard library). When the control moves, the machine state moved — the same cell drifts 2–4× between sessions, so **an ns figure without a same-round control row should not be quoted**.
 
-In the current round (2026-09-15) that control row tells the whole story:
+For absolute values, run the commands below on a quiet machine and compare against the control row from **the same round**.
 
-| Round | Machine state | stdlib control | Same-round `Engine` request path | Allocations |
-|---|---|---|---|---|
-| 2026-09-13 (the round recorded in the design doc) | on AC power | 174 ns | 1790 ns | 22 allocs |
-| 2026-09-15 (current round) | **on battery** (turbo limited) | **750 ns** | **6592 ns** | **22 allocs** |
-
-Same machine, same code: **the ns differ by 4.3×, the allocation count is identical**. That is why this page treats allocation counts as the criterion and ns as structure only. For absolute values, run the commands below on a quiet machine and compare against the control row from **the same round**.
+> This machine has one harder limit on top: `time.Now()` advances in quanta of about **0.3 ms** (2 million consecutive samples contained only 34 distinct non-zero deltas), so any interval shorter than that is read as zero or as a quantised value. ns here is not even precise to the microsecond. Method and raw data are in the measured-data section of the [design document](https://github.com/Luo-root/pulse-web/blob/main/docs/design/web-framework-design.md).
 
 ## Cost breakdown of a request path
 
@@ -28,25 +25,26 @@ Protocol: `-benchtime=20000x -count=5`, median, one round, one protocol. **Any �
 
 | Scenario | ns/op | allocs | B/op |
 |---|---|---|---|
-| stdlib ServeMux route match (**control**, framework-independent) | 750 | 5 | 224 |
-| scope derive + dispose (`Derive + Dispose` baseline) | 213 | **2** | 192 |
-| + bare scope-local binding | 1271 | 14 | 649 |
-| + `observability.AttachCollector` | 1197 | 14 | 681 |
-| same · 10 / 50 / 100 plugin tree | 1301 / 1300 / 1428 | 14 | 681 |
-| same · 50 plugins, parallel | 1888 | 14 | 681 |
-| `Engine` request path (`New()`, 0 / 10 / 50 plugins) | 6592 / 6806 / 7132 | 22 | 6298 |
-| `Engine` request path + `WithCollector()` | 7746 | **34** | 6787 |
-| `Engine` request path (`Minimal()`) | 4689 | 17 | 5842 |
-| `Engine` request path + `BodyLimit` route | 6584 | **23** | 6362 |
-| `Engine` request path + `c.JSON` | see below | **25** | 6438 |
+| stdlib ServeMux route match (**control**, framework-independent) | 198 | 5 | 224 |
+| scope derive + dispose (`Derive + Dispose` baseline) | 81 | **2** | 192 |
+| + bare scope-local binding | 327 | 14 | 649 |
+| + `observability.AttachCollector` | 342 | 14 | 681 |
+| same · 10 / 50 / 100 plugin tree | 345 / 361 / 370 | 14 | 681 |
+| same · 50 plugins, parallel | 566 | 14 | 681 |
+| `Engine` request path (`New()`, 0 / 10 / 50 plugins) | 1774 / 1819 / 1937 | 22 | 6298 |
+| `Engine` request path + `WithCollector()` | 2123 | **34** | 6787 |
+| `Engine` request path (`Minimal()`) | 1443 | 17 | 5841 |
+| `Engine` request path + `BodyLimit` route | 1877 | **23** | 6362 |
+| `Engine` request path + `c.JSON` | see below | **25** | 6437 |
 
 Δ derived from two rows of this table (same round, so subtracting is valid):
 
-- **Per-request cost of `WithCollector()`** = 7746 − 6592 = **+1154 ns / +12 allocs** (end to end)
-- **Per-request cost of `BodyLimit`** = 6584 − 6592 ≈ **0 ns / +1 alloc** — the extra allocation is the wrapper `http.MaxBytesReader` returns (bound to the request, not reusable); the ns sits inside the noise.
-- **Assembly size does not reach the request path**: the `Engine` request path at 0 / 10 / 50 plugins is 6592 / 6806 / 7132 ns with **allocs constant at 22 and B/op constant at 6298**; at the kernel level the 10 / 50 / 100 plugin trees hold **allocs constant at 14**. Plugin-tree size does not change per-request cost, and that is the premise that makes "assembly" a selling point.
-- **Containment self-check (against inverted conclusions)**: `AttachCollector` = bare binding + one Collector struct, so the criterion is **B/op** (681 > 649). Both report 14 allocs and their ns land in the same noise band this round (1197 vs 1271, order flipped) — **neither a single alloc value nor ns can tell these two apart**, which is precisely what "read structure, not absolute values" means.
-- **Encoding to a buffer in `c.JSON`**: **+2 allocs / +97 B per response** (25 vs 22, 6438 vs 6298), bought "an encoding failure no longer sends an empty 200". Its ns is not listed separately — the allocation side is covered by the gate, and if you want the time, run the control in the same round.
+- **Per-request cost of `WithCollector()`** = 2123 − 1774 = **+349 ns / +12 allocs** (end to end)
+- **What `Minimal()` saves** = 1774 − 1443 = **−331 ns / −5 allocs** (Trace / AccessLog / Sink switched off)
+- **Per-request cost of `BodyLimit`** = 1877 − 1774 = **+103 ns / +1 alloc** — the extra allocation is the wrapper `http.MaxBytesReader` returns (bound to the request, not reusable); that 103 ns still sits inside the noise (the five runs of that cell landed between 1839 and 2177).
+- **Assembly size does not reach the request path**: the `Engine` request path at 0 / 10 / 50 plugins is 1774 / 1819 / 1937 ns with **allocs constant at 22 and B/op constant at 6298**; at the kernel level the 10 / 50 / 100 plugin trees hold **allocs constant at 14**. Plugin-tree size does not change per-request cost, and that is the premise that makes "assembly" a selling point.
+- **Containment self-check (against inverted conclusions)**: `AttachCollector` = bare binding + one Collector struct, so the criterion is **B/op** (681 > 649). Both report 14 allocs; their ns happen to agree in direction this round (342 > 327) but are only 4% apart, inside the noise band — **do not draw this conclusion from ns**.
+- **Encoding to a buffer in `c.JSON`**: **+2 allocs** per response (22 → 25, a deterministic criterion covered by the allocation gate), bought "an encoding failure no longer sends an empty 200". The B/op figure of 6437 comes from the **same-round probe** in the design document (6341 → 6437, i.e. +96 B) — it is *not* from the same round as this table's `Engine` row of 6298, so **do not subtract them**. For the time, run the control in the same round.
 
 Reproduce:
 
@@ -69,11 +67,11 @@ Same `Record`, every sink writing to `io.Discard` (keeps formatting and locking,
 
 | Sink | ns/op | allocs | B/op |
 |---|---|---|---|
-| `web.ConsoleSink` (**the default**) | 865 | **0** | **0** |
-| `observability.LineSink` (upstream line sink) | 945 | **0** | **0** |
-| `observability.SlogSink` (structured) | 4730 | **18** | 1127 |
+| `web.ConsoleSink` (**the default**) | 235 | **0** | **0** |
+| `observability.LineSink` (upstream line sink) | 274 | **0** | **0** |
+| `observability.SlogSink` (structured) | 1398 | **18** | 1127 |
 
-End to end (one request path, only the sink changes): default sink **8134 ns** vs nop sink **7255 ns** = **+0.9 µs and +0 allocs per request**.
+End to end (one request path, only the sink changes): default sink **2471 ns** vs nop sink **2240 ns** = **+0.23 µs and +0 allocs per request**. That cell is noisy (the nop side landed between 2131 and 2920 over five runs), so it was run a second time independently: 2628 vs 2433 = **+0.20 µs**, same direction.
 
 Two things to read out of it: the default sink allocates **nothing** (rendering happens inside the line sink's critical section, on a single buffer); and `SlogSink` costs 18 allocations and 5× the time per record — it is the **machine-readable** path, and that is both its cost and its purpose.
 
@@ -97,7 +95,7 @@ Protocol: two separate processes sharing one `http.ListenAndServe` bootstrap wit
 | `bare` | 256 | 64986 | 67915 | **0.97x** | 16.80ms | 20.07ms |
 
 - **The bare pairing is on par**: 0.94–0.97×, a 3–6% gap; at concurrency 256 the p99 is actually lower (16.80ms vs 20.07ms). The pairing is `gin.New()` ↔ `web.New(web.Minimal())` — neither side carries default middleware.
-- **Absolute values are magnitude references only**: the same cell moved from 49k to 78k between sessions, so only the paired ratio within one round counts.
+- **What carries the protocol is the pairing, not the absolute values**: the same cell moved from 49k to 78k between sessions, so only the paired ratio within one round counts (whole-machine drift such as the power state cancels out).
 - At the time an observability pairing (`gin.Default()` ↔ `web.New()`) was also run, but it used the **old default sink** (then `SlogSink`, since replaced by `ConsoleSink`), so that pairing does not describe the current state and was not re-run — it stays in the design document as the record of *why* the default sink changed.
 
 Reproduce:

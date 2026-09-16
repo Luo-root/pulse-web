@@ -466,6 +466,36 @@ func heroNameRule(t *testing.T, css string) map[string]string {
 	return decl
 }
 
+// pwRuleRe 抓「选择器里带 .pw-* 的规则」的行首选择器部分。
+//
+// 不按注释切「落地页一节」：那一节内部还有自己的分节注释，按注释切会切歪；
+// 而 `.pw-*` 就是落地页的类名前缀，直接按它筛更稳，也不依赖注释怎么写。
+var pwRuleRe = regexp.MustCompile(`(?m)^([^{}\n]*\.pw-[^{}\n]*)\{`)
+
+// TestSiteLandingStylesTargetRealDOM 钉住落地页的规则挂在**真实存在**的选择器上。
+//
+// 事实（本用例的由来）：首页 frontmatter 是 `layout: page`，构建产物里那棵树**没有
+// `.vp-doc` 祖先**——`site/.vitepress/dist/index.html` 里 `vp-doc` 出现 0 次。所以落地页
+// 里凡是 `.vp-doc …` 前缀的规则都是**死规则**：不报错、不警告，只是静默不生效。上一版
+// 就死在这里（`.vp-doc:has(.pw-landing) { max-width }` 与 `.vp-doc .pw-pre { … }` 一条都
+// 没进渲染，版式全靠浏览器默认值兜着，直到拿截图量出来才发现）。
+//
+// 变异探针：往 `custom.css` 里加一行 `.vp-doc .pw-probe { color: red }`，本用例必须红。
+func TestSiteLandingStylesTargetRealDOM(t *testing.T) {
+	css := readDocFile(t, siteThemePath)
+	rules := pwRuleRe.FindAllStringSubmatch(css, -1)
+	if len(rules) < 20 {
+		t.Fatalf("只扫到 %d 条 `.pw-*` 规则——选择器或文件路径不对（守卫不能因为没查到所以通过）", len(rules))
+	}
+	for _, m := range rules {
+		if sel := strings.TrimSpace(m[1]); strings.Contains(sel, ".vp-doc") {
+			t.Errorf("落地页选择器 %q 挂了 `.vp-doc`——首页是 `layout: page`，"+
+				"构建产物里没有 `.vp-doc` 祖先，这条规则不会生效", sel)
+		}
+	}
+	t.Logf("落地页 %d 条 `.pw-*` 规则，均未挂 `.vp-doc`", len(rules))
+}
+
 // TestSiteBaseMatchesRepoName 钉住站点部署口径：`base` 取仓库名（GitHub Pages 项目页的
 // 路径就是仓库名），两语言都声明，且英文版挂在 `/en/` 下。
 //

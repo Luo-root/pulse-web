@@ -214,9 +214,9 @@ func Minimal() Option {
 //	跨 goroutine    `Detached`（`c.Detach()` 拷贝的值袋子，见 detach.go；`Ctx` 不可跨 goroutine）
 //	要 scope 查找   本选项（宿主交付请求 scope，接收方 `kernel.Get(CollectorKey)`，成本见下）
 //
-// 成本（实测，表 B 口径）：约 **+385 ns / +12 allocs 每请求**（端到端；kernel 层
-// `AttachCollector` 相对基线 +270 ns / +12 allocs），且与插件树规模解耦
-// （100 插件下 407 ns）。默认关。
+// 成本（实测，表 B 口径）：约 **+349 ns / +12 allocs 每请求**（端到端；kernel 层
+// `AttachCollector` 相对基线 +261 ns / +12 allocs），且与插件树规模解耦
+// （100 插件下 370 ns）。默认关。
 //
 // 无 Sink 时装配期 panic——`Minimal()` 且未 `WithSink` 就是这个组合。
 func WithCollector() Option {
