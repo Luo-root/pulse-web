@@ -15,7 +15,7 @@
 
 **English** | [中文](README_zh.md)
 
-A general-purpose Go web framework built on the **kernel** and **observability** packages of [pulse](https://github.com/Luo-root/pulse).
+A general-purpose Go web framework built on the **kernel** and **observability** packages of [pulse](https://github.com/Luo-root/pulse) — a **service substrate with an IoC lifecycle and first-class observability**, for services where assembling the thing is the hard part: many components, parts of the tree reloaded without a restart, one uniform view of what is running.
 
 - **Assembly kernel** — IoC, reversible lifecycle, request scope and an event bus, from pulse's kernel
 - **Observability as a first-class citizen** — a per-request 32-hex TraceID, structured records and assembly diagnostics, wired in by default; the default sink renders each record as one human-readable, column-aligned line
