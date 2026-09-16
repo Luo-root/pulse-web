@@ -42,13 +42,24 @@ import (
 // 本次实测补的。断言是 `<=`——分配数下降不该让 CI 红，但**若下降请同步刷新常量与
 // 表 B**，否则预算会慢慢失真。有意抬高分配时同理：改常量 + 表 B，并在 PR 里说明代价。
 //
-// B/op 基线**按平台记**（见下方 budgetBytes）。留 `budgetSlackBytes` 余量：实测同一
+// B/op 是一份**单份**基线（见 budgetBytes）。留 `budgetSlackBytes` 余量：实测同一
 // commit 重复跑会差 ±1 字节（`plugins=50` 与 `minimal` 都出现过相邻两字节的跳动）。
 // 8 字节的余量仍远小于任何结构性变化——多一次分配至少 16 字节起。
 //
-// B/op 也**不随 N 漂**：`testing.Benchmark` 默认跑满 1 s（本机 N 约 5×10⁵），换成
-// `-benchtime=20000x`（N 小约 30 倍）后逐项相同——没有摊到每个 op 上的启动开销，
-// 所以 B/op 是可比判据，而与「与表 B 口径不同」无关。
+// # 为什么迭代数必须钉死
+//
+// B/op 里有一项按**每次 benchmark 调用**摊开的常数（拟合约 10 KB / N），所以它随 N 漂。
+// 实测（同一份二进制、同机 i9-14900HX，windows/amd64 与 linux/amd64 都验过）：
+//
+//	-benchtime=2000x     6303 B/op
+//	-benchtime=20000x    6299 B/op
+//	-benchtime=400000x   6298 B/op
+//	默认 1 s 窗口        6289 B/op   ← N 由机器快慢决定，同一份代码能落在 6289…6303
+//
+// 也就是说：**跨环境差的不是平台，是 N**。「按 GOOS/GOARCH 记两份基线」是把环境差
+// 误认成平台差——同一个二进制在 windows 与 linux 上只要 N 固定就逐项相同，而 1 s
+// 窗口下两边都能给出 6289 或 6298，取决于当时的 N（#71 的定位结论）。
+// 把 N 钉死后基线收敛成一份，8 字节 slack 在每个环境都保住灵敏度。
 const (
 	budgetDefaultAllocs   = 22
 	budgetCollectorAllocs = 34
@@ -75,6 +86,18 @@ const (
 )
 
 // budgetBytesPerCase 是五个断言档的 B/op 基线。
+//
+// **单份，不按平台分。** 曾经的模型是「windows/amd64 比 linux/amd64 高 8–19 字节」，
+// 并为此按平台记了两份；#71 用交叉编译出来的 linux/amd64 二进制在本机 WSL 复现后
+// 证伪了它：
+//
+//	跑法                                default  minimal  json
+//	WSL linux/amd64，固定 N=20000x        6298     5841    —
+//	Windows amd64，固定 N=20000x          6298     5841   6437
+//	默认 1 s 窗口（两平台都可能落在）      6289     5833   6418
+//
+// 换成反过来的说法：会变的是 **N**，不是 OS（机制见文件头）。门禁自己把 N 钉在
+// fixedIterations 上，所以这里只需要一份基线。
 type budgetBytesPerCase struct {
 	def         int
 	collector   int
@@ -83,60 +106,55 @@ type budgetBytesPerCase struct {
 	json        int
 }
 
-// B/op 基线**按平台记**。
+// fixedIterations 是门禁量分配时用的固定迭代数，与设计文档表 B 的口径
+// （`-benchtime=20000x -count=5`）同量级——门禁断的与文档写的因此是同一档 N。
 //
-// 分配计数是跨平台确定值——同一 commit、同一工具链（go1.27.0），windows/amd64 与
-// linux/amd64 实测逐项相同（22 / 34 / 17 / 22 / 25）。B/op 不是：
+// 取 20000：足够让「按每次调用摊开的那约 10 KB」摊到 0.5 B/op 以下（不影响 8 字节
+// 余量的判断），又不至于让 CI 的这一步跑成分钟级。
+const fixedIterations = 20000
+
+// fixedProcs 是门禁量分配时钉住的 GOMAXPROCS。
 //
-//	档                     windows/amd64   linux/amd64   差
-//	default                        6298          6289    −9
-//	collector                      6787          6777   −10
-//	minimal                        5841          5833    −8
-//	default+console-sink           6298          6289    −9
-//	default+json                   6437          6418   −19
+// B/op 的第二个自变量就是 P 数（实测同一份二进制、同一台机器：32 P → 6302、
+// 8 P → 6292、4 P → 6290、2 P → 6289）。同一个 P 下 windows/amd64 与 linux/amd64
+// 逐项相同（4 P：两边都是 6290 / 6777 / 5833 / 6289 / 6418 / 6353）——所以
+// 「平台差」从来不存在，存在的是「N 差 + P 差」，而这两样都能钉。
 //
-// windows 值 = 本机（表 B 口径与门禁默认 1 s 两口径逐项相同）；linux 值 = CI run
-// 35067192791 的 `Alloc budget` 步骤日志（ubuntu-latest / go1.27.0）。
-//
-// 拿单一常量卡两头会二选一地失灵：按 windows 定，ubuntu 上会多出 9 字节死余量，
-// 「多一次 16 字节分配」正好从缝里溜过；按 linux 定，本机跑本地门禁直接假红
-// （6298 > 6289 + 8）。各记一份，两边都保住 8 字节余量的灵敏度。
-//
-// 平台差的**成因尚未定位**（分配计数相同、只有字节不同，且 json 档的差比其他档大一倍）
-// ——定位它是独立的一件事。在定位之前不要把它当余量，也不要为此放宽 slack。
-var budgetBytes = map[string]budgetBytesPerCase{
-	"windows/amd64": {6298, 6787, 5841, 6298, 6437},
-	"linux/amd64":   {6289, 6777, 5833, 6289, 6418},
+// 取 4：与 CI runner（ubuntu-latest 4 vCPU）同档，于是本地与 CI 报同一个数。
+const fixedProcs = 4
+
+var budgetBytes = budgetBytesPerCase{
+	def:         6290,
+	collector:   6777,
+	minimal:     5833,
+	consoleSink: 6289,
+	json:        6419,
 }
 
-// platformBudgetBytes 取本平台的 B/op 基线。
+// measureFixed 在固定迭代数下量每个 op 的分配。
 //
-// 未实测的平台退回**已知平台里最宽的那一组**：宁可松，也不要让门禁在新平台上按一个
-// 偏低的基线假红。known=false 时测试会打日志提示把本平台实测值补进来；本地想看到
-// 自己测到的值，跑 `go test -run TestRequestPathAllocBudget ./bench/ -v`。
-func platformBudgetBytes() (b budgetBytesPerCase, known bool) {
-	if v, ok := budgetBytes[runtime.GOOS+"/"+runtime.GOARCH]; ok {
-		return v, true
-	}
-	for _, v := range budgetBytes {
-		if v.def > b.def {
-			b = v
-		}
-	}
-	return b, false
+// 与 `testing.B` 同一套口径（前后两次 `runtime.MemStats` 的差除以 N），只是把 N
+// 钉死——`testing.Benchmark` 的 N 由 `-benchtime` 决定，默认 1 s 窗口会随机器快慢变，
+// 那正是这份门禁以前报出两份「平台基线」的原因（见文件头）。
+func measureFixed(t *testing.T, iterations int, app *web.Engine) (allocsPerOp, bytesPerOp int64) {
+	t.Helper()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	iterateRequestPath(app, iterations)
+	runtime.ReadMemStats(&after)
+	n := uint64(iterations)
+	return int64((after.Mallocs - before.Mallocs) / n),
+		int64((after.TotalAlloc - before.TotalAlloc) / n)
 }
 
 // TestRequestPathAllocBudget 把表 B 的分配计数固化成断言。
 //
-// 与 benchmark 共用同一套 harness（enginePathApp* + runRequestPath），所以预算数字
-// 与 `-bench` 报出来的是同一个口径，不会出现「门禁测的和文档写的不是一条路」。
+// 与 benchmark 共用**同一个循环体**（`iterateRequestPath`），所以门禁测的与文档写的是
+// 同一条路；但**迭代数由本文件钉死**（`fixedIterations`），不受 `-benchtime` 影响——
+// 那正是这份门禁以前报出两份「平台基线」的原因（见文件头）。
 func TestRequestPathAllocBudget(t *testing.T) {
-	bb, known := platformBudgetBytes()
-	if !known {
-		t.Logf("平台 %s/%s 没有实测的 B/op 基线，退回已知平台里最宽的一组"+
-			"（default 档 %d B/op）。首次在此平台运行请把实测值补进 budgetBytes，"+
-			"并同步设计文档表 B", runtime.GOOS, runtime.GOARCH, bb.def)
-	}
+	prev := runtime.GOMAXPROCS(fixedProcs)
+	defer runtime.GOMAXPROCS(prev)
 
 	cases := []struct {
 		name   string
@@ -145,20 +163,20 @@ func TestRequestPathAllocBudget(t *testing.T) {
 		bytes  int64 // 0 = 不断言
 	}{
 		{"default", func(tb testing.TB) (*web.Engine, func()) { return enginePathApp(tb, 0) },
-			budgetDefaultAllocs, int64(bb.def)},
+			budgetDefaultAllocs, int64(budgetBytes.def)},
 		// 解耦对照：插件树规模不改变分配计数（红线：默认路径零全局 Provide）。
 		// B/op 不断言——实测 50 插件比空树多 1 字节（本机 6298 → 6299），常量级差异，
 		// 卡它只会带来假红。
 		{"plugins=50", func(tb testing.TB) (*web.Engine, func()) { return enginePathApp(tb, 50) },
 			budgetDefaultAllocs, 0},
-		{"collector", enginePathAppCollector, budgetCollectorAllocs, int64(bb.collector)},
-		{"minimal", enginePathAppMinimal, budgetMinimalAllocs, int64(bb.minimal)},
+		{"collector", enginePathAppCollector, budgetCollectorAllocs, int64(budgetBytes.collector)},
+		{"minimal", enginePathAppMinimal, budgetMinimalAllocs, int64(budgetBytes.minimal)},
 		// 默认出口那一档：上面的用例都用 nopSink（把「框架请求路径」与「出口
 		// 成本」分开量），这一档把默认装配实际用的 ConsoleSink 接回来——出口
 		// 是 0 分配，所以它与 nopSink 档的分配计数应当相同，差在这里就是回归。
-		{"default+console-sink", enginePathAppConsoleSink, budgetConsoleSinkAllocs, int64(bb.consoleSink)},
+		{"default+console-sink", enginePathAppConsoleSink, budgetConsoleSinkAllocs, int64(budgetBytes.consoleSink)},
 		// JSON 响应那一档：把「先编码到 buffer、成功才写头」这条路径也钉住。
-		{"default+json", enginePathAppJSON, budgetJSONAllocs, int64(bb.json)},
+		{"default+json", enginePathAppJSON, budgetJSONAllocs, int64(budgetBytes.json)},
 		// 路由级闸门那一档：挂 BodyLimit 的路由每请求多一次分配（MaxBytesReader
 		// 包装器），把这条路径也钉住。
 		{"default+body-limit", enginePathAppBodyLimit, budgetBodyLimitAllocs, 0},
@@ -166,26 +184,22 @@ func TestRequestPathAllocBudget(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			res := testing.Benchmark(func(b *testing.B) {
-				app, cleanup := c.setup(b)
-				defer cleanup()
-				runRequestPath(b, app)
-			})
+			app, cleanup := c.setup(t)
+			defer cleanup()
 
-			if got := res.AllocsPerOp(); got > c.allocs {
+			allocs, bytes := measureFixed(t, fixedIterations, app)
+
+			if allocs > c.allocs {
 				t.Errorf("分配计数劣化：%d > 预算 %d allocs/op"+
-					"（若为有意变更，请同步更新本文件的常量与设计文档表 B）", got, c.allocs)
+					"（若为有意变更，请同步更新本文件的常量与设计文档表 B）", allocs, c.allocs)
 			}
-			if c.bytes > 0 {
-				if got := res.AllocedBytesPerOp(); got > c.bytes+budgetSlackBytes {
-					t.Errorf("分配字节劣化：%d > 预算 %d B/op（含 %d 字节抖动余量；平台 %s/%s）"+
-						"（若为有意变更，请同步更新本文件的常量与设计文档表 B）",
-						got, c.bytes, budgetSlackBytes, runtime.GOOS, runtime.GOARCH)
-				}
+			if c.bytes > 0 && bytes > c.bytes+budgetSlackBytes {
+				t.Errorf("分配字节劣化：%d > 预算 %d B/op（含 %d 字节抖动余量，N=%d）"+
+					"（若为有意变更，请同步更新本文件的常量与设计文档表 B）",
+					bytes, c.bytes, budgetSlackBytes, fixedIterations)
 			}
-			t.Logf("allocs/op=%d B/op=%d（预算 %d / %d，平台 %s/%s）",
-				res.AllocsPerOp(), res.AllocedBytesPerOp(), c.allocs, c.bytes,
-				runtime.GOOS, runtime.GOARCH)
+			t.Logf("allocs/op=%d B/op=%d（预算 %d / %d，N=%d）",
+				allocs, bytes, c.allocs, c.bytes, fixedIterations)
 		})
 	}
 }

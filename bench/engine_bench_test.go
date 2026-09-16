@@ -90,17 +90,26 @@ func enginePathAppBodyLimit(tb testing.TB) (*web.Engine, func()) {
 	return app, func() { app.Root().Dispose() }
 }
 
-// runRequestPath 是「一次请求」的循环体：benchmark 与分配预算门禁共用。
+// iterateRequestPath 是「一次请求」的循环体本身：benchmark 与分配预算门禁共用。
+//
+// 循环体单独抽出来，是因为两边的迭代数来源不同——benchmark 用 `b.N`（由
+// `-benchtime` 决定），分配预算门禁用**固定的** `fixedIterations`（理由见
+// budget_test.go）。两处量的必须是同一段代码，否则门禁断的与文档写的不是一条路。
 //
 // 每轮在循环内重建请求：`httptest.NewRequest` 的开销同时计入 ns/op 与 allocs/op
 // （复用同一个 *http.Request 会让其 body reader 首轮被读空，之后每轮走不同路径）。
-func runRequestPath(b *testing.B, app *web.Engine) {
+func iterateRequestPath(app *web.Engine, n int) {
 	w := &nopWriter{}
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for i := 0; i < n; i++ {
 		app.ServeHTTP(w, httptest.NewRequest("GET", "/ping", nil))
 	}
+}
+
+// runRequestPath 是 benchmark 的入口：把循环体接到 b.N 上。
+func runRequestPath(b *testing.B, app *web.Engine) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	iterateRequestPath(app, b.N)
 }
 
 // BenchmarkEngineRequestPath 验证设计红线：默认请求路径零 Provide，
