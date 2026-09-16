@@ -85,32 +85,31 @@ For choosing a sink see [observability](/en/guide/observability); when throughpu
 
 ## Real load against gin (2026-09-16, on AC power)
 
-This section answers "**is it on par with gin**". The measurement code (`loadtest/`, a separate module carrying the gin dependency) **never entered the repository**; it lives on branch `bench/gin-compare`. Only the protocol and conclusions are kept here.
+This section answers "**is it on par with gin**". The measurement code is `loadtest/` **in this repository** — a separate module carrying the gin dependency (the core module keeps zero third-party dependencies and makes no exception just to be compared against gin). Only the protocol and conclusions are kept here.
 
 Protocol: two separate processes sharing one `http.ListenAndServe` bootstrap with **only the handler varying**; within a cell the two sides run adjacent and swap order on odd/even rounds, with **only even rounds counting**; each cell takes the whole set of percentiles from the round whose RPS is the median, and the ratio takes the **median of the per-round paired ratios**. The load generator is hand-written (fixed concurrency, full connection reuse, every request inside the timing window entering the percentiles, no sampling). Machine: i9-14900HX / 32 logical cores / `GOMAXPROCS=32` / Go 1.27 / Windows amd64, **on AC power**. Both sides point their log sink at a null device — the per-request formatting cost is kept, terminal and pipe I/O are excluded.
 
 | Pairing | Concurrency | pulse-web RPS | gin RPS | pulse/gin | pulse p99 | gin p99 |
 |---|---|---|---|---|---|---|
-| `bare` | 64 | 55910 | 62756 | **0.90x** | 4.91ms | 4.56ms |
-| `bare` | 256 | 64423 | 67687 | **0.95x** | 17.74ms | 20.78ms |
-| `obs` | 64 | 47226 | 58620 | **0.81x** | 5.52ms | 5.06ms |
-| `obs` | 256 | 61098 | 66238 | **0.92x** | 18.77ms | 21.04ms |
+| `bare` | 64 | 55426 | 61290 | **0.91x** | 4.86ms | 4.63ms |
+| `bare` | 256 | 63881 | 67156 | **0.95x** | 17.43ms | 21.30ms |
+| `obs` | 64 | 47946 | 59636 | **0.82x** | 5.33ms | 4.82ms |
+| `obs` | 256 | 61107 | 65097 | **0.93x** | 17.51ms | 20.92ms |
 
-- **The bare pairing is on par**: 0.90–0.95×; at concurrency 256 the p99 is actually lower (17.74ms vs 20.78ms). The pairing is `gin.New()` ↔ `web.New(web.Minimal())` — neither side carries default middleware.
-- **The observability pairing** (`gin.Default()` ↔ `web.New()`, both sides with their default middleware): 0.81× / 0.92×. On this pairing pulse-web additionally does three things gin does not — a TraceID, the route template (`/users/{id}` rather than the concrete path), and error classification.
-- **What carries the protocol is the pairing, not the absolute values**: the same cell moved from 49k to 78k between sessions, so only the paired ratio within one round counts (whole-machine drift such as the power state cancels out).
+- **The bare pairing is on par**: 0.91–0.95×; at concurrency 256 the p99 is actually lower (17.43ms vs 21.30ms). The pairing is `gin.New()` ↔ `web.New(web.Minimal())` — neither side carries default middleware.
+- **The observability pairing** (`gin.Default()` ↔ `web.New()`, both sides with their default middleware): 0.82× / 0.93×. On this pairing pulse-web additionally does three things gin does not — a TraceID, the route template (`/users/{id}` rather than the concrete path), and error classification; for reference, gin's own default middleware costs 2.7% / 3.1% between these two pairings.
+- **What carries the protocol is the pairing, not the absolute values**: the same cell moved from 49k to 78k between sessions, so only the paired ratio within one round counts (whole-machine drift such as the power state cancels out). **Two independent sessions agree item by item** (0.90/0.91, 0.95/0.95, 0.81/0.82, 0.92/0.93) — that is what makes this more trustworthy than the absolute values.
 - The previous round (2026-09-14) had the observability pairing at **0.65× / 0.88×** — that round used the **then-current** default sink `SlogSink`. With the default now `ConsoleSink` and the same protocol re-run, the numbers above are what you get. Absolute values are not comparable across rounds; only the paired ratio from the same round is.
+- The measurement code used to live on a side branch, so when the default sink changed it **kept silently measuring the old default** — no error, no warning. It now follows the main branch, and CI covers its build / vet / test separately so it cannot rot unnoticed.
 
 Reproduce:
 
 ```bash
-git worktree add ../pulse-web-loadtest main                      # the code under test is main
-git -C ../pulse-web-loadtest checkout bench/gin-compare -- loadtest
-cd ../pulse-web-loadtest/loadtest
+cd loadtest
 go run ./cmd/compare -probe -passes 4 -d 8s -warmup 2s           # the run recorded in the docs
 ```
 
-The comparison project is its own module: the core module has zero third-party dependencies, and **it does not make an exception to compare itself against gin** — gin appears only inside that module.
+`loadtest`'s `replace` points at the repository root, so it measures the **current working copy**; CI only runs its build / vet / test and **never the load run or the micro-benchmarks** — timings on CI are noise.
 
 ## How this page and the design document divide the work
 
