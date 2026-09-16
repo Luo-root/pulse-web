@@ -137,7 +137,20 @@ g2.GET("/users", h, mw3)
 
 **回归门禁**：本表的**分配计数与 B/op** 已固化成断言（`bench/budget_test.go`，由 CI 的 `Alloc budget` 步骤执行，不带 `-race` 跑）。**ns 不设阈值**——跨轮会漂 2–4×，拿它做门禁等于把机器状态引进 CI；ns 对比仍走人工 benchstat，口径见表 A / 表 B 各自的说明。断言失败时按提示同步刷新常量与本表。
 
-> 常量目前**比本表实测值宽 16–17 字节**：default / collector / minimal / console-sink 四档的预算是 6314 / 6803 / 5858 / 6314，而同机同口径实测是 6298 / 6787 / 5841 / 6298（`testing.Benchmark` 的 `res.AllocedBytesPerOp()` 与 `-benchmem` 逐项吻合）。也就是说这笔余量正好够藏下一次 16 字节的分配——收紧预算是独立的一件事，别顺手改常量（会牵动 CI 门槛），留给单独的票。
+> **B/op 基线按平台记**（`bench/budget_test.go` 的 `budgetBytes`，2026-09-16 · [#56](https://github.com/Luo-root/pulse-web/issues/56)）。分配计数是跨平台确定值——同一 commit、同一工具链（go1.27.0），windows/amd64 与 linux/amd64 实测**逐项相同**（22 / 34 / 17 / 22 / 25）；B/op 不是，两平台各自稳定但差 8–19 字节：
+>
+> | 档 | windows/amd64（本机） | linux/amd64（ubuntu-latest） | 差 |
+> |---|---|---|---|
+> | default | 6298 | 6289 | −9 |
+> | collector | 6787 | 6777 | −10 |
+> | minimal | 5841 | 5833 | −8 |
+> | default+console-sink | 6298 | 6289 | −9 |
+> | default+json | 6437 | 6418 | −19 |
+> | default+body-limit | 6362 | 6353 | −9 |
+>
+> windows 值 = 本机实测，且**默认 1 s 与 `-benchtime=20000x` 两口径逐项相同**——B/op 不随 N 漂，说明没有摊在单个 op 上的启动开销，它才是可比判据；linux 值 = CI run `35067192791` 的 `Alloc budget` 步骤日志。
+>
+> 所以**不把跨平台差当余量**：拿单一常量卡两头会二选一地失灵——按 windows 定，ubuntu 上会多出 9 字节死余量，「多一次 16 字节分配」正好从缝里溜过；按 linux 定，本机跑本地门禁直接假红（6298 > 6289 + 8）。各记一份，两边都保住 8 字节余量的灵敏度。平台差的**成因尚未定位**（分配计数相同、只有字节不同，json 档的差还大一倍）——定位它是独立的一件事，见 [#71](https://github.com/Luo-root/pulse-web/issues/71)。
 
 ### 测量口径：本机时钟量子（2026-09-16 实测）
 
