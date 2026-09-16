@@ -722,6 +722,8 @@ B3 是历史兼容路径：单头 `X-B3-TraceId` 里**没有** span-id，因此�
 
 **响应侧不写 `traceparent`**：W3C 只在**请求**侧定义它，客户端也不会去读响应里的这个头——响应侧的标准形态就是 `Server-Timing` 的 `trace` 指标。旧口径「不写 traceparent、不编造假 span-id」的前半句仍然成立，后半句在本票之后收正为**框架不编造 span-id**（理由见下）：框架没有 span 时，两个头里带 span-id 的那个**不写**，而不是填一个假的。
 
+**被代理剥离时的排查顺序**：`Server-Timing` 是标准头，但 WAF / CDN / 老网关对不认得的响应头并不都原样透传；`X-Trace-Id` 是自带头，被剥掉的概率低得多。所以文档里给的排查顺序是**访问日志的 `trace=` 与 `span.id` → `X-Trace-Id` → 最后才怀疑 `Server-Timing`**——这也是保留 `X-Trace-Id` 这条既有契约的现实理由之一（不只是兼容）。
+
 ### span 出口：`WithSpanHook`
 
 **谁会用它**：把 pulse-web 接进**既有追踪体系**的宿主装配方——手里已经有一个 OTel `TracerProvider`（或自研 APM 的 span 模型），要的是「这个请求在那套体系里成为一条真实 span」，而框架的 `Record` 只是附带的日志产出。框架自己不引任何追踪 SDK（主模块零第三方依赖是红线），所以这里只留一条**缝**；官方适配在独立 nested module [`otel/`](https://github.com/Luo-root/pulse-web/tree/main/otel)。
@@ -745,7 +747,11 @@ app := web.New(web.WithSpanHook(otelweb.New(tracerProvider)))
 
 **代价（可复跑）**：`go test -run '^$' -bench 'BenchmarkEngineRequestPath$|BenchmarkEngineRequestPath_SpanHook' -benchtime=20000x -count=5 ./bench/` —— 同一请求路径装与不装一个「只回身份」的 nop hook 之差是 **+315 ns / +505 B / +4 allocs 每请求**（1838 → 2153 ns、6314 → 6819 B、**22 → 26 allocs**）。这个差里含两次 hook 调用、第二遍属性填充（span 那份不带 `span.id`，记录那份带，见 `emitSpan`）与 `Server-Timing` 的字符串拼装。适配件与 SDK 那一侧的完整代价（含属性转换的 6 次分配）在 `otel/` 的基准里量，两边不要相加——口径不同。
 
-**span 属性与访问日志同源**：两边由同一个 `fillRequestAttrs` 填出，所以不可能各说一套。span 名按 semconv 用 `{method} {http.route}`——**不得退回 URI 路径**（semconv 明文 `MUST NOT`），路由未知时退化为 `{method}`。**4xx 不写 `error.type`**（semconv：成功完成的请求 SHOULD NOT 设该属性），5xx 才写——框架日志侧的 `error_` 分类是另一套词表，两边各有其主。
+**span 属性与访问日志同源**：两边由同一个 `fillRequestAttrs` 填出，所以不可能各说一套。span 名按 semconv 用 `{method} {http.route}`——**不得退回 URI 路径**（semconv 明文 `MUST NOT`，404 场景下每个打错的路径都会变成独立的 span 名，APM 索引基数会爆），路由未知时退化为 `{method}`。
+
+**方法值归一只在 span 侧做**（口径与官方 otelhttp 的 `standardizeHTTPMethod` / `HTTPServer.method` 逐条对齐）：已知方法规范化成大写（`get` → `GET`），**不认识的写 `_OTHER`**（原始值另放 `http.request.method_original`），未知方法在 span 名里退化为 `HTTP`（不是 `HTTP GET` 那种拼法）。框架的**记录侧保留原始方法不归一**——日志给人读，`purge` 就该写成 `purge`。两边属性名相同、取值口径这一处不同是**有意的**，所以钉了 `TestRecordKeepsRawMethod` 守着，免得日后被当成 bug 修掉。
+
+**4xx 不写 `error.type`**（semconv：成功完成的请求 SHOULD NOT 设该属性），5xx 才写——框架日志侧的 `error_` 分类是另一套词表，两边各有其主。
 
 **`c.Detach()` 的后台任务用 link、不用父子**：后台任务活过请求，做成子节点会让父 span 的时长语义失真（父早已结束、子还在跑）。用 `c.TraceID()` / `c.SpanID()` 建显式 link 指回那条 span。
 
@@ -860,7 +866,7 @@ mark 的走势**直接沿用 pulse**（平段 → 上升 → 峰值 → 深谷 �
 - [x] **观测贯穿**：单请求 TraceID 在 router → handler → Sink 一致；后台任务共享同一 TraceID
   证据：`TestTraceIDGeneratedAndSharedAcrossRecord`、`TestDetachSharesTraceAndRootAccess`；入站头采纳另见 `TestTraceparentAdopted` / `TestB3TraceIDAdopted` / `TestB3TraceID16HexNormalized`（16hex 左垫归一）/ `TestZeroTraceIDTreatedAsAbsent`（全零视为不存在）/ `TestMalformedTraceHeadersIgnored`。
 - [x] **span 出口可接**（[#76](https://github.com/Luo-root/pulse-web/issues/76)）：`WithSpanHook` 把请求的 span 身份交给追踪体系（官方适配在 `otel/` nested module）；**框架不编造 span-id**，两个响应头各写各的，入站 `traceparent` 的校验与官方 propagator 同口径
-  证据：`span_test.go` 11 条——请求事实与访问日志同源（`TestSpanHookCarriesRequestFacts`）、注入到达中间件与 handler（`TestSpanHookInjectionReachesHandler`）、**404 也保住注入的 context**（`TestSpanInjectionOnUnmatchedRoute`）、`X-Trace-Id` 与 `Server-Timing` 各写各的（`TestSpanTwoResponseHeaders`）、采用 hook 的身份（`TestSpanAdoptsHookIdentity`）、入站 parent 与 flags（`TestSpanParentFromInboundTraceparent`）、严格解析 4 合法 / 10 非法逐条（`TestTraceparentStrictParsing`）、B3 只给 trace-id（`TestB3GivesTraceIDOnly`）、panic 与映射错误后的状态码（`TestSpanOnPanicAndMappedErrors`）、`nil` 装配期 panic（`TestSpanHookNilPanics`）、handler 读得到 span-id（`TestSpanIDIsReadableInHandler`）；`otel/otelweb_test.go` 6 条——server span 形状（`TestServerSpanFromRequest`）、入站父（`TestServerSpanAdoptsInboundParent`）、状态语义四档（`TestStatusSemantics`）、**下游注入的 parent-id 就是本请求 span-id**（`TestDownstreamPropagationUsesServerSpanID`）、记录里的 `span.id` 与导出 span 一致（`TestAccessRecordCarriesSpanID`）、**与官方 propagator 的差分对照 16 条**（`TestParsingAgreesWithOfficialPropagator`）。
+  证据：`span_test.go` 11 条——请求事实与访问日志同源（`TestSpanHookCarriesRequestFacts`）、注入到达中间件与 handler（`TestSpanHookInjectionReachesHandler`）、**404 也保住注入的 context**（`TestSpanInjectionOnUnmatchedRoute`）、`X-Trace-Id` 与 `Server-Timing` 各写各的（`TestSpanTwoResponseHeaders`）、采用 hook 的身份（`TestSpanAdoptsHookIdentity`）、入站 parent 与 flags（`TestSpanParentFromInboundTraceparent`）、严格解析 4 合法 / 10 非法逐条（`TestTraceparentStrictParsing`）、B3 只给 trace-id（`TestB3GivesTraceIDOnly`）、panic 与映射错误后的状态码（`TestSpanOnPanicAndMappedErrors`）、`nil` 装配期 panic（`TestSpanHookNilPanics`）、handler 读得到 span-id（`TestSpanIDIsReadableInHandler`）；`otel/otelweb_test.go` 11 条——server span 形状（`TestServerSpanFromRequest`）、入站父（`TestServerSpanAdoptsInboundParent`）、状态语义四档（`TestStatusSemantics`）、**下游注入的 parent-id 就是本请求 span-id**（`TestDownstreamPropagationUsesServerSpanID`）、记录里的 `span.id` 与导出 span 一致（`TestAccessRecordCarriesSpanID`）、**与官方 propagator 的差分对照 16 条**（`TestParsingAgreesWithOfficialPropagator`）、**span 名永不使用 URI 路径**（`TestSpanNameNeverUsesURIPath`，含 404 的几种形态）、**方法归一三档**（`TestMethodNormalizedPerSemconv`）、**注入的 context 走完边角路径**（`TestContextChainSurvivesEdgePaths`：未匹配路由 / panic / 映射错误 / `Wrap` / 中间件，判据是 span 被正常结束并导出）、**并发不串台**（`TestConcurrentRequestsDoNotCrosstalk`，64 并发 + `-race`），外加钉住「记录侧保留原始方法」的 `TestRecordKeepsRawMethod`。
 - [x] **标准库兼容**：挂载 stdlib 中间件无侵入；`Wrap` 双向适配
   证据：`TestWrapStdlibHandler`、`TestEngineUnderStdlibMiddleware`、`TestWrapPanicCaughtByEngine`。
 - [x] **ServerConfig 契约**：6 个默认值 + 「非零覆盖、零值保持默认」+ 配置**真的**落到 `http.Server` 上

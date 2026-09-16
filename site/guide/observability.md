@@ -90,7 +90,9 @@ app := web.New(web.WithSpanHook(otelweb.New(tp)))
 | handler 期间 | —— | span 正在记录：`c.SpanID()` 拿得到 id，往下传的 `context.Context` 带着它 |
 | `End`（响应写完后） | `Span`：路由模板、**映射后**的状态码、与访问日志同一份属性、起止时间、原始错误 | `trace.SpanFromContext(ctx)` 取回同一个 span，补名称 / 属性 / 状态后结束 |
 
-口径按 semconv：span 名用 `{method} {http.route}`（路由拿不到时退化为 `{method}`，**不**退回 URI 路径）；5xx → `Error`、4xx/2xx → 保持 unset；`http.response.status_code` 用映射后的状态码。
+口径按 semconv：span 名用 `{method} {http.route}`（路由拿不到时退化为 `{method}`，**不**退回 URI 路径）；未知方法在名字里退化为 `HTTP`、属性侧写 `_OTHER` 并附 `http.request.method_original`；5xx → `Error`、4xx/2xx → 保持 unset；`http.response.status_code` 用映射后的状态码。
+
+访问日志里那个方法**不归一**（`purge` 就写 `purge`）——日志给人读，span 给 APM，两边属性名相同、取值口径这一处不同是有意的。
 
 ### 两个响应头，各管各的
 
@@ -102,6 +104,8 @@ app := web.New(web.WithSpanHook(otelweb.New(tp)))
 | `Server-Timing: trace;desc=…` | `00-<trace-id>-<本请求 span-id>-<flags>`，含 span | 只有拿到 span 身份才有 |
 
 响应侧**不写 `traceparent`**：W3C 没有给响应定义这个头。出站请求侧的 `traceparent` 由宿主下游客户端的插桩注入，parent-id 就是本请求的 span-id。
+
+**在多层代理后面时，`Server-Timing` 可能被中间设备改写或剥掉**——WAF、CDN、老网关对不认得的响应头并不都原样透传；`X-Trace-Id` 是自带头，被剥掉的概率低得多。排查「链路信息怎么没了」时按这个顺序看：访问日志里的 `trace=` 与 `span.id` → `X-Trace-Id` → 最后才怀疑 `Server-Timing`。
 
 ### 后台任务：link，不是父子
 

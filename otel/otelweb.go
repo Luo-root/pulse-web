@@ -24,7 +24,11 @@
 // # 各字段的取值口径
 //
 //   - span 名：`{method} {http.route}`（semconv 的规则）；路由拿不到时退化为
-//     `{method}`。**不会**退回 URI 路径——semconv 明文禁止用 URI 路径当名称。
+//     `{method}`。**不会**退回 URI 路径——semconv 明文禁止用 URI 路径当名称，
+//     那是 404 场景下 APM 基数爆炸的源头。未知方法在名字里退化为 `HTTP`。
+//   - 方法：`http.request.method` 归一成 semconv 允许的值（已知方法大写；
+//     不认识的写 `_OTHER`），原始值另放 `http.request.method_original`。
+//     框架的**记录**侧保留原始方法不归一——见 normalizeMethodAttr 的说明。
 //   - 状态：HTTP 5xx → `codes.Error`（描述留空，原因可由 http.response.status_code
 //     推出）；4xx / 3xx / 2xx → 保持 Unset（server span 的 4xx 规范要求 MUST unset）。
 //   - `http.response.status_code`：由框架映射后的状态码写入（与访问日志同源）。
@@ -41,6 +45,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -52,6 +57,63 @@ import (
 
 // instrumentationName 是 tracer 名（出现在 instrumentation scope 里）。
 const instrumentationName = "github.com/Luo-root/pulse-web/otel"
+
+// methodOther 是 semconv 给「不认识的方法」留的值。
+const methodOther = "_OTHER"
+
+// knownMethod 报方法是不是 semconv 认的「已知方法」。
+//
+// 集合取官方 otelhttp 的 methodLookup：RFC9110 的九个 + PATCH。QUERY（spec 引的
+// httpbis-safe-method-w-body）官方实现尚未收录，这里与官方实现保持一致——宁可跟
+// 实现同口径，也不自作主张多认一个，否则同一个请求在两套插桩下会得到不同的值。
+func knownMethod(m string) bool {
+	switch m {
+	case "CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE":
+		return true
+	}
+	return false
+}
+
+// methodAttrs 按 semconv 归一请求方法，返回（写进 http.request.method 的值,
+// 原始值）。原始值非空时调用方另写 http.request.method_original。
+//
+// 三条分支与官方 otelhttp 的 HTTPServer.method 逐条对齐：
+//
+//	大写已知方法（"GET"）  → 原样，不写 original
+//	大小写不同但认识（"get"）→ 规范值 "GET" + original "get"
+//	完全不认识（"FOO"）    → "_OTHER" + original "FOO"
+//
+// 空方法按 `_OTHER` 处理，且不写 original（没有什么可记的）。
+func methodAttrs(m string) (value, original string) {
+	if m == "" {
+		return methodOther, ""
+	}
+	if knownMethod(m) {
+		return m, ""
+	}
+	if up := strings.ToUpper(m); knownMethod(up) {
+		return up, m
+	}
+	return methodOther, m
+}
+
+// spanName 按 semconv 定 span 名：有路由用 `{method} {http.route}`，没有路由
+// 只留 `{method}`。
+//
+// 两个「不得」：**不得**退回 URI 路径（semconv 明文：instrumentation MUST NOT
+// default to using URI path），**不得**编出 `HTTP GET` 这种拼法——未知方法时
+// `{method}` 就退化为 `HTTP` 这一个词（semconv 原文）。这两条是 404 场景下
+// APM 基数爆炸的源头，所以钉在用例里。
+func spanName(method, route string) string {
+	m := strings.ToUpper(method)
+	if !knownMethod(m) {
+		m = "HTTP"
+	}
+	if route == "" {
+		return m
+	}
+	return m + " " + route
+}
 
 // Hook 实现 web.SpanHook。
 type Hook struct {
@@ -78,8 +140,8 @@ type Option func(*Hook)
 
 // Begin 建 span、注入 context，并把身份回给框架。
 func (h *Hook) Begin(ctx context.Context, in web.SpanInfo) (context.Context, web.SpanRef) {
-	name := in.Method
-	ctx, span := h.tracer.Start(withRemoteParent(ctx, in), name,
+	// 此刻还不知道路由，名字先只放方法——路由到 End 时再补全（semconv 允许）。
+	ctx, span := h.tracer.Start(withRemoteParent(ctx, in), spanName(in.Method, ""),
 		trace.WithSpanKind(trace.SpanKindServer),
 	)
 	sc := span.SpanContext()
@@ -100,14 +162,12 @@ func (h *Hook) End(ctx context.Context, sp web.Span) {
 		return
 	}
 
-	// 名称：路由这时才知道（semconv 允许在 span 结束前补）。
-	if sp.Route != "" {
-		span.SetName(sp.Method + " " + sp.Route)
-	} else if sp.Method != "" {
-		span.SetName(sp.Method)
-	}
+	// 名称：路由这时才知道（semconv 允许在 span 结束前补）。未知方法在这里
+	// 退化为 `HTTP`，404 这类没有路由的请求只留方法——不含任何路径成分。
+	span.SetName(spanName(sp.Method, sp.Route))
 
 	attrs, hasErrorType := convertAttrs(sp.Attrs, sp.Status >= 500)
+	attrs = normalizeMethodAttr(attrs)
 	if sp.Status > 0 {
 		attrs = append(attrs, attribute.Int("http.response.status_code", sp.Status))
 	}
@@ -168,6 +228,30 @@ func flags(sampled, random bool) trace.TraceFlags {
 		f |= trace.FlagsRandom
 	}
 	return f
+}
+
+// normalizeMethodAttr 把框架给的**原始**方法归一成 semconv 允许的值，必要时
+// 补一条 http.request.method_original（与官方 otelhttp 的 HTTPServer.method
+// 同口径，见 methodAttrs）。
+//
+// 为什么要在这里归一、而不是在框架侧：框架的记录是**给人读的日志流**，它保留
+// 原始方法（`PURGE` / `FOO` 这类直接可读）；span 是给 APM 的、有允许值集合。
+// 两边属性名相同、取值口径不同，这一条差异是有意的——同一个人在记录里看到的
+// 永远是原始值，在追踪后端不会因为一个冷门方法多出一堆值。框架没带方法属性时
+// 这里什么都不做（span 名仍有方法）。
+func normalizeMethodAttr(attrs []attribute.KeyValue) []attribute.KeyValue {
+	for i := range attrs {
+		if attrs[i].Key != "http.request.method" {
+			continue
+		}
+		value, original := methodAttrs(attrs[i].Value.AsString())
+		attrs[i] = attribute.String("http.request.method", value)
+		if original != "" {
+			attrs = append(attrs, attribute.String("http.request.method_original", original))
+		}
+		return attrs
+	}
+	return attrs
 }
 
 // convertAttrs 把框架的观测属性翻成 OTel 属性。

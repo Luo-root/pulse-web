@@ -29,13 +29,16 @@ app := web.New(web.WithSpanHook(otelweb.New(tp)))
 
 | 项 | 取值 |
 |---|---|
-| span 名 | `{method} {http.route}`；无路由时退化为 `{method}`（**不得**用 URI 路径） |
+| span 名 | `{method} {http.route}`；无路由时退化为 `{method}`（**不得**用 URI 路径——404 下每个打错的路径都会变成独立 span 名，APM 基数会爆）；未知方法退化为 `HTTP` |
+| `http.request.method` | 归一到 semconv 允许值：已知方法大写（`get` → `GET`），**不认识的写 `_OTHER`**，原始值另放 `http.request.method_original`（口径与官方 otelhttp 的 `standardizeHTTPMethod` 逐条对齐） |
 | span kind | `Server` |
 | 状态 | 5xx → `Error`（描述留空）；4xx / 3xx / 2xx → 保持 unset |
 | `http.response.status_code` | 框架**映射后**的状态码（与访问日志同源） |
 | `error.type` | 5xx 时：框架给了就用（`panic` / `http_5xx` / `internal`），没给则写状态码字符串；4xx 及以下**不带**（semconv：成功完成的请求不应设该属性） |
 | 属性 | 与访问日志同一份来源（`http.request.method` / `http.route` / `url.path` / `http.response.body.size` / `client.address`） |
 | 异常 | 不调 `span.RecordError`——错误原文留在进程内的观测记录里，不随 span 出到追踪后端 |
+
+**唯一一处「同名不同值」**：访问日志里的 `http.request.method` 保留原始方法（`purge` 就是 `purge`），不归一——日志给人读、span 给 APM。这是有意的，别顺手统一（`TestRecordKeepsRawMethod` 守着）。
 
 采样完全归宿主的 `TracerProvider`：入站 `sampled=0` 的请求在 `ParentBased` 采样器下不会导出 span，这是 OTel 的既定语义，不是缺陷。
 
@@ -62,4 +65,4 @@ app := web.New(web.WithSpanHook(otelweb.New(tp)))
 cd otel && go test ./...
 ```
 
-用例覆盖：span 形状与属性、状态语义（5xx / 4xx / 2xx 与 `error.type` 的两个分支）、下游注入（注入出的 `traceparent` 的 parent-id 必须是本请求 span 的 id）、日志关联（访问记录里的 `span.id` 与导出 span 一致），以及**与官方 propagator 的差分对照**（同一批 `traceparent` 逐条比对「采纳与否」与 trace/parent id）。
+用例覆盖：span 形状与属性、状态语义（5xx / 4xx / 2xx 与 `error.type` 的两个分支）、**span 名永不使用 URI 路径**（含 404 的几种形态）、**方法归一**（`get` / `FOO` / `PURGE` 三档）、**注入的 context 走完各类边角路径**（未匹配路由的 404 / panic / 映射错误 / stdlib 包装 / 中间件，判据是 span 被正常结束并导出）、**并发不串台**（64 并发 + `-race`）、下游注入（注入出的 `traceparent` 的 parent-id 必须是本请求 span 的 id）、日志关联（访问记录里的 `span.id` 与导出 span 一致），以及**与官方 propagator 的差分对照**（同一批 `traceparent` 逐条比对「采纳与否」与 trace/parent id）。

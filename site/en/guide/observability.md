@@ -90,7 +90,9 @@ The two ends of a request are handled by the two methods of `SpanHook`:
 | during the handler | — | the span is recording: `c.SpanID()` gives the id, and any `context.Context` passed down carries it |
 | `End` (after the response is written) | `Span`: route template, the **mapped** status code, the same attribute set as the access log, timestamps, the original error | `trace.SpanFromContext(ctx)` returns the same span; it sets name / attributes / status and ends it |
 
-Semantics follow semconv: the name is `{method} {http.route}` (falling back to `{method}` when there is no route — **never** the URI path); 5xx → `Error`, 4xx/2xx stay unset; `http.response.status_code` uses the mapped status.
+Semantics follow semconv: the name is `{method} {http.route}` (falling back to `{method}` when there is no route — **never** the URI path); an unknown method degrades to `HTTP` in the name and becomes `_OTHER` in the attributes, with the original kept in `http.request.method_original`; 5xx → `Error`, 4xx/2xx stay unset; `http.response.status_code` uses the mapped status.
+
+The method in the **access log** is not normalized (`purge` stays `purge`) — the log is read by people, the span is read by an APM; same attribute name, deliberately different value discipline in that one spot.
 
 ### Two response headers, two different things
 
@@ -102,6 +104,8 @@ With the span hook installed, a response carries one more trace-related header �
 | `Server-Timing: trace;desc=…` | `00-<trace-id>-<this request's span-id>-<flags>`, includes the span | only once a span identity is available |
 
 The response side does **not** carry `traceparent`: W3C defines no such response header. Outgoing requests get theirs from the host's client instrumentation, where the parent-id is this request's span-id.
+
+**Behind multiple proxies, `Server-Timing` may be rewritten or stripped** — WAFs, CDNs and older gateways do not all pass unrecognized response headers through untouched, while `X-Trace-Id` is a custom header and is far less likely to be dropped. When trace information seems to be missing, look in this order: `trace=` / `span.id` in the access log → `X-Trace-Id` → and only then `Server-Timing`.
 
 ### Background work: a link, not a parent
 
