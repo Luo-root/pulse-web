@@ -1,6 +1,6 @@
 # 测试：不启 server 也能测 handler
 
-框架提供两个入口，让 handler 单测走的**装配与收尾与真实请求同源**——同一份代码（`Engine.begin` + `finish`）。所以状态码落定、错误映射、访问日志、`X-Trace-Id`，都是线上那一套产出的。
+框架提供两个入口，让 handler 单测走的**装配与收尾与真实请求同源**——同一份代码（`Engine.begin` + `Engine.end`）。所以状态码落定、错误映射、访问日志、`X-Trace-Id`，都是线上那一套产出的。
 
 与真路径相差的只有 `ServeMux`：路由匹配、分组前缀、路由级 `BodyLimit` 不参与，路径参数与路由模板要自己补在 request 上。
 

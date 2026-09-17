@@ -807,6 +807,7 @@ v1 只做当前视图：`app.Debug("/debug/pulse")` 输出 `kernel.FiberSnapshot
 | `WithRoute` / `WithPathParam`（测试入口的便捷参数） | 不做——路径参数与路由模板用标准库导出面自己补（`Request.SetPathValue` / `Request.Pattern`），不造测试特供的词汇表（#63） |
 | 请求级数据对 kernel 插件**通用**可见 | 不做——上游 v0.2.1 已给出 `kernel.Local()`（这条"属上游改动"的阻塞已解除），但把整个请求 KV 袋挂进 scope 是每条绑定 ≈ +250 ns / +12 allocs（同轮实测，表 B），且语义上把"通用容器"当成"语义性绑定"。只做 `WithCollector()` 这一处显式、边界清楚的用例 |
 | 内置 agent / LLM 相关的观测与装配接线 | 不做——pulse-web **只依赖 kernel 与 observability**，与 pulse 其余组件（llm / loop / host / toolset…）无耦合；需要时由调用方在自己的装配代码里显式接入 |
+| DB / ORM 的抽象层（`WithDatabase`、`Repository` 接口、`Tx` 中间件） | 不做——DB 不是这个框架的领域，而它的两件事本就有归处：**连接池是进程级资源**（装配面 `Provide`，关池进 `OnShutdown`）、**事务是请求级资源**（`kernel.Local()` 绑进请求作用域）。框架只提供装配与生命周期，模式 / 判据 / 失败模式与三栈示例见站点「数据库集成」页（#64） |
 
 ## 仓库结构
 
