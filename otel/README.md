@@ -40,6 +40,8 @@ app := web.New(web.WithSpanHook(otelweb.New(tp)))
 
 **唯一一处「同名不同值」**：访问日志里的 `http.request.method` 保留原始方法（`purge` 就是 `purge`），不归一——日志给人读、span 给 APM。这是有意的，别顺手统一（`TestRecordKeepsRawMethod` 守着）。
 
+**对 semconv 的显式偏差（不是漏记）**：`url.scheme` / `server.address` / `network.protocol.version` 三个 Recommended 属性**不产出**——它们记的是「本服务的监听信息」而不是请求事实（反代后面 `url.scheme` 是内网值），要它们请在边缘那层记。理由与出处见主仓 `engine.go` 的 `fillRequestAttrs` 注释与设计文档。
+
 采样完全归宿主的 `TracerProvider`：入站 `sampled=0` 的请求在 `ParentBased` 采样器下不会导出 span，这是 OTel 的既定语义，不是缺陷。
 
 ## 开销（实测）

@@ -10,10 +10,13 @@ import (
 
 // nopSpanHook 只回一个身份、什么都不做：把「框架侧 span 开销」从适配件与 SDK
 // 的代价里隔离出来。适配件那一侧的实测在 `otel/`（那边才带 SDK 依赖）。
+//
+// Begin 原样返回传入的 ctx（而不是新起一个）：与真实 hook 的行为一致——真实 hook
+// 会把 span 注入 ctx 往下传，返回别的 ctx 等于把这个基准变成「一个会断链的 hook」。
 type nopSpanHook struct{}
 
-func (nopSpanHook) Begin(_ context.Context, in web.SpanInfo) (context.Context, web.SpanRef) {
-	return context.Background(), web.SpanRef{TraceID: in.TraceID, SpanID: "0123456789abcdef"}
+func (nopSpanHook) Begin(ctx context.Context, in web.SpanInfo) (context.Context, web.SpanRef) {
+	return ctx, web.SpanRef{TraceID: in.TraceID, SpanID: "0123456789abcdef"}
 }
 
 func (nopSpanHook) End(context.Context, web.Span) {}

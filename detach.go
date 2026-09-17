@@ -12,9 +12,16 @@ import (
 // （直写 Sink，与请求共享 TraceID）。因此 Detached 不存在共享状态的竞态。
 type Detached struct {
 	TraceID string
-	HostID  string
-	Sink    observability.Sink
-	Root    *kernel.Context // 进程级 root（非请求 scope）
+	// SpanID 是**发起这次请求的那个 span**的 id（装了 SpanHook 且 hook 给了身份
+	// 时非空）。它存在的唯一理由是 span link：后台任务活过请求，做成子节点会让
+	// 父 span 的时长语义失真，所以规范做法是拿这条身份在追踪体系里建一条**显式
+	// link**（框架不替后台任务建 span，也不能跨 goroutine 带着 span 走）。
+	//
+	// 没装 span 出口时为空串——那时没有 span 可指，别拿它当 trace-id 用。
+	SpanID string
+	HostID string
+	Sink   observability.Sink
+	Root   *kernel.Context // 进程级 root（非请求 scope）
 }
 
 // Detach 返回当前请求的值袋子，供后台 goroutine 使用。
@@ -24,6 +31,7 @@ type Detached struct {
 func (c *Ctx) Detach() Detached {
 	return Detached{
 		TraceID: c.traceID,
+		SpanID:  c.spanID,
 		HostID:  c.engine.hostID,
 		Sink:    c.engine.sink,
 		Root:    c.engine.kernel,

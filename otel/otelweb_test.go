@@ -30,6 +30,7 @@ type harness struct {
 	app  *web.Engine
 	exp  *tracetest.InMemoryExporter
 	sink *observability.MemorySink
+	tp   *sdktrace.TracerProvider
 }
 
 // newHarness 起一个装了本适配件的真引擎（内存 exporter，同步导出）。
@@ -48,7 +49,7 @@ func newHarness(t *testing.T, opts ...web.Option) *harness {
 		web.WithHostID("otel-test"),
 		web.WithSpanHook(New(tp)),
 	}, opts...)
-	return &harness{app: web.New(all...), exp: exp, sink: sink}
+	return &harness{app: web.New(all...), exp: exp, sink: sink, tp: tp}
 }
 
 func (h *harness) do(t *testing.T, method, target string, hdr ...string) *httptest.ResponseRecorder {
@@ -569,6 +570,68 @@ func TestConcurrentRequestsDoNotCrosstalk(t *testing.T) {
 	}
 	if records != n {
 		t.Errorf("http.request 记录数 = %d，want %d", records, n)
+	}
+}
+
+// TestDetachedWorkLinksToRequestSpan：后台任务的 span 规则（#76 定案：用 **link**、
+// 不用父子）在真 SDK 上走一遍——请求内 `c.Detach()` 带走身份，请求结束后在另一个
+// goroutine 里建后台 span，带一条指向请求 span 的显式 link。
+//
+// 三条断言缺一条这个规则就不成立：
+//
+//  1. link 指的就是那条请求 span（同 trace-id、同 span-id）——Detached 交出的
+//     身份是**真实存在**的 span，不是框架编的；
+//  2. 后台 span **没有 parent**——活了更久的子节点会把父 span 的时长语义搞坏；
+//  3. 框架不替后台工作建 span：导出里只有「请求 + 后台」两条，没有第三条。
+func TestDetachedWorkLinksToRequestSpan(t *testing.T) {
+	h := newHarness(t)
+	var bg web.Detached
+	h.app.GET("/bg", func(c *web.Ctx) error {
+		bg = c.Detach()
+		return c.Text(http.StatusOK, "ok")
+	})
+
+	h.do(t, "GET", "/bg")
+	reqSpan := h.span(t)
+
+	if bg.TraceID != reqSpan.SpanContext.TraceID().String() {
+		t.Fatalf("Detached.TraceID = %q，请求 span 的是 %s", bg.TraceID, reqSpan.SpanContext.TraceID())
+	}
+	if bg.SpanID != reqSpan.SpanContext.SpanID().String() {
+		t.Fatalf("Detached.SpanID = %q，请求 span 的是 %s", bg.SpanID, reqSpan.SpanContext.SpanID())
+	}
+
+	// 后台侧的动作由宿主做（框架只交身份，不代劳建 span）。
+	tid, err := trace.TraceIDFromHex(bg.TraceID)
+	if err != nil {
+		t.Fatalf("TraceIDFromHex: %v", err)
+	}
+	sid, err := trace.SpanIDFromHex(bg.SpanID)
+	if err != nil {
+		t.Fatalf("SpanIDFromHex: %v", err)
+	}
+	linked := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: tid, SpanID: sid, TraceFlags: trace.FlagsSampled,
+	})
+
+	_, span := h.tp.Tracer("test/background").Start(context.Background(), "background-job",
+		trace.WithLinks(trace.Link{SpanContext: linked}))
+	span.End()
+
+	stubs := h.exp.GetSpans()
+	if len(stubs) != 2 {
+		t.Fatalf("导出 span 数 = %d，want 2（请求 + 后台；框架不该替后台建 span）", len(stubs))
+	}
+	bgSpan := stubs[1]
+	if len(bgSpan.Links) != 1 {
+		t.Fatalf("后台 span 的 link 数 = %d，want 1", len(bgSpan.Links))
+	}
+	if got := bgSpan.Links[0].SpanContext.SpanID(); got != reqSpan.SpanContext.SpanID() {
+		t.Errorf("link 指向 %s，want 请求 span %s", got, reqSpan.SpanContext.SpanID())
+	}
+	if bgSpan.Parent.IsValid() {
+		t.Errorf("后台 span 不该有 parent（父子会让父 span 时长语义失真），got parent span-id %s",
+			bgSpan.Parent.SpanID())
 	}
 }
 

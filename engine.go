@@ -497,7 +497,6 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if e.trace || e.spanHook != nil {
 		in := e.resolveSpanInfo(r)
 		in.Method = r.Method
-		in.Path = r.URL.Path
 		c.traceID = in.TraceID
 		if e.spanHook != nil {
 			ctx, ref := e.spanHook.Begin(r.Context(), in)
@@ -587,13 +586,18 @@ func (e *Engine) finish(c *Ctx, rw *responseWriter) {
 	// 收尾落码与 Write / Flush 同源（writeHeaderNow）：吃 Status() 提示、缺省 200。
 	rw.writeHeaderNow()
 
+	// 路由模板只算一次，喂给 span 与访问记录两边——`Span.Route` 与 `http.route`
+	// 属性是同一个值，各算一遍迟早会漂（routePattern 现在只是切字符串，但那是
+	// 实现细节，不是契约）。
+	route := routePattern(c.r)
+
 	// span 先于记录：End 落在响应写完这一刻，不被 sink 的写入耗时污染。
 	if e.spanHook != nil {
-		e.emitSpan(c, rw)
+		e.emitSpan(c, rw, route)
 	}
 
 	if e.accessLog && e.sink != nil {
-		e.writeAccessLog(c, rw)
+		e.writeAccessLog(c, rw, route)
 	}
 }
 
@@ -623,7 +627,7 @@ func writeErrorPayload(w *responseWriter, status int, code, message string) {
 	_, _ = w.Write(body)
 }
 
-func (e *Engine) writeAccessLog(c *Ctx, rw *responseWriter) {
+func (e *Engine) writeAccessLog(c *Ctx, rw *responseWriter, route string) {
 	rec := observability.Record{
 		HostID:   e.hostID,
 		TraceID:  c.traceID,
@@ -633,7 +637,7 @@ func (e *Engine) writeAccessLog(c *Ctx, rw *responseWriter) {
 		Duration: time.Since(c.started),
 		Err:      c.err,
 	}
-	fillRequestAttrs(c, rw, &rec.Attrs)
+	fillRequestAttrs(c, rw, route, &rec.Attrs)
 	if c.spanID != "" {
 		// 日志 ↔ trace 的关联键：只有拿到 span 身份时才存在（没有 span 就没有
 		// span-id 可指），所以它是**有条件**出现的字段。
@@ -645,10 +649,25 @@ func (e *Engine) writeAccessLog(c *Ctx, rw *responseWriter) {
 // fillRequestAttrs 填本请求的观测属性。
 //
 // 访问日志与 span **共用这一个来源**：同一批字段写两遍必然漂移，而「日志里
-// 的状态码与 span 里的对不上」是最难发现的那类不一致。
-func fillRequestAttrs(c *Ctx, rw *responseWriter, attrs *observability.Attrs) {
+// 的状态码与 span 里的对不上」是最难发现的那类不一致。route 由调用方算好传进来
+// ——Span.Route 与 `http.route` 属性是同一个值，两处各算一遍迟早会漂。
+//
+// # 有意不记的三个 semconv 属性（对规范的**显式偏差**）
+//
+// `url.scheme` / `server.address` / `network.protocol.version` 在 semconv 里是
+// Recommended（不是 Required），本框架**不记**，理由是它们记录的是「我这台服务
+// 自己的监听信息」而不是请求事实：
+//
+//	url.scheme               反代后面拿到的是内网 scheme（http），照记等于写错；
+//	                         真要它，宿主在边缘那层记才是对的
+//	server.address           同源：监听地址 / Host，不是调用方看到的地址
+//	network.protocol.version 只对 HTTP/1.1 与 HTTP/2 有意义，且与业务无关
+//
+// 这是一条**声明过的偏差**（设计文档「trace 头兼容与 span 出口」一节同一句话），
+// 不是漏记——补记任何一个之前先想清楚「谁才是这个事实的事实源」。
+func fillRequestAttrs(c *Ctx, rw *responseWriter, route string, attrs *observability.Attrs) {
 	observability.Set(attrs, attrHTTPMethod, c.r.Method)
-	observability.Set(attrs, attrHTTPRoute, routePattern(c.r))
+	observability.Set(attrs, attrHTTPRoute, route)
 	observability.Set(attrs, attrURLPath, c.r.URL.Path)
 	observability.Set(attrs, attrHTTPBodySize, int64(rw.bytes))
 	observability.Set(attrs, attrClientAddr, c.r.RemoteAddr)
@@ -668,14 +687,14 @@ func fillRequestAttrs(c *Ctx, rw *responseWriter, attrs *observability.Attrs) {
 // （同轮、装一个只回身份的 nop hook 与不装对照）22 → 26 allocs/op、
 // 6314 → 6819 B/op——这一段差里既有这一遍填充，也有 Server-Timing 的字符串
 // 拼装；换掉的是「两者谁先读谁后读」这类隐性耦合。
-func (e *Engine) emitSpan(c *Ctx, rw *responseWriter) {
+func (e *Engine) emitSpan(c *Ctx, rw *responseWriter, route string) {
 	var attrs observability.Attrs
-	fillRequestAttrs(c, rw, &attrs)
+	fillRequestAttrs(c, rw, route, &attrs)
 	e.spanHook.End(c.r.Context(), Span{
 		TraceID: c.traceID,
 		SpanID:  c.spanID,
 		Method:  c.r.Method,
-		Route:   routePattern(c.r),
+		Route:   route,
 		Path:    c.r.URL.Path,
 		Status:  rw.status,
 		Start:   c.started,

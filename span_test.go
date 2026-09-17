@@ -456,3 +456,153 @@ func TestSpanIDIsReadableInHandler(t *testing.T) {
 		t.Errorf("handler 读到的 span-id = %q，hook 给的是 %q", inHandler, h.refs[0].SpanID)
 	}
 }
+
+// noIdentityHook 模拟「hook 在、但这次请求没有 span」：给 trace-id、不给 span-id。
+type noIdentityHook struct {
+	began, ended int
+}
+
+func (h *noIdentityHook) Begin(ctx context.Context, in SpanInfo) (context.Context, SpanRef) {
+	h.began++
+	return ctx, SpanRef{TraceID: in.TraceID}
+}
+
+func (h *noIdentityHook) End(context.Context, Span) { h.ended++ }
+
+// TestSpanNoIdentityWritesNoSpanID：hook 在、但没给 span 身份时，框架**不编造**
+// ——不写 Server-Timing、记录里没有 span.id；X-Trace-Id 照旧（它是 trace 层的
+// 既有契约，与有没有 span 无关）。
+func TestSpanNoIdentityWritesNoSpanID(t *testing.T) {
+	h := &noIdentityHook{}
+	e, sink := newTestEngine(t, WithSpanHook(h))
+	e.GET("/t", func(c *Ctx) error { return c.Text(http.StatusOK, "ok") })
+
+	rec := doReq(e, "GET", "/t", nil)
+	if h.began != 1 || h.ended != 1 {
+		t.Fatalf("hook 调用次数 = %d/%d，want 1/1", h.began, h.ended)
+	}
+	if got := rec.Header().Get(serverTimingHeader); got != "" {
+		t.Errorf("没有 span 身份却写了 %s = %q（编造 span-id）", serverTimingHeader, got)
+	}
+	if got := rec.Header().Get("X-Trace-Id"); !isHexLowerN(got, 32) {
+		t.Errorf("X-Trace-Id = %q，want 32hex（它与 span 无关，照旧要写）", got)
+	}
+	logRec, ok := findRecord(sink, eventHTTPReq)
+	if !ok {
+		t.Fatal("缺访问记录")
+	}
+	if _, has := attrsOf(logRec)[attrSpanID]; has {
+		t.Error("没有 span 身份时记录里不该出现 span.id")
+	}
+}
+
+// TestMinimalWithSpanHook：`Minimal()` 关掉的是框架自己的 trace 与访问日志，
+// **不管 span 出口**——装了 hook 就要走 Begin/End。两者分工钉在这里：X-Trace-Id
+// 不写（trace 关了），Server-Timing 照写（span 出口给的）。
+func TestMinimalWithSpanHook(t *testing.T) {
+	h := &recordingHook{}
+	e, sink := newTestEngine(t, Minimal(), WithSpanHook(h))
+	e.GET("/m", func(c *Ctx) error { return c.Text(http.StatusOK, "ok") })
+
+	rec := doReq(e, "GET", "/m", nil)
+	if len(h.spans) != 1 {
+		t.Fatalf("End 调用次数 = %d，want 1（Minimal 不关 span 出口）", len(h.spans))
+	}
+	if in := h.begin(t); !isHexLowerN(in.TraceID, 32) {
+		t.Errorf("hook 应拿到一个自启的 trace-id，got %q", in.TraceID)
+	}
+	if got := rec.Header().Get("X-Trace-Id"); got != "" {
+		t.Errorf("Minimal() 关了 trace，不该写 X-Trace-Id，got %q", got)
+	}
+	if got := rec.Header().Get(serverTimingHeader); !strings.Contains(got, testSpanID) {
+		t.Errorf("%s = %q，应带 hook 给的 span-id", serverTimingHeader, got)
+	}
+	if _, ok := findRecord(sink, eventHTTPReq); ok {
+		t.Error("Minimal() 关了访问日志，不该有 http.request 记录")
+	}
+}
+
+// TestDetachCarriesSpanIdentity：后台任务的 span link 靠 `Detached` 带走身份
+// ——它必须带上**发起这次请求的 span**的 id，且请求结束后仍可读（值袋子，不是
+// Ctx 的引用）。这是「后台任务用 link、不用父子」这条规则的可执行部分：框架
+// 不替后台建 span，但得把建 link 需要的东西交出去。
+func TestDetachCarriesSpanIdentity(t *testing.T) {
+	h := &recordingHook{}
+	e, _ := newTestEngine(t, WithSpanHook(h))
+
+	var bg Detached
+	e.GET("/bg", func(c *Ctx) error {
+		bg = c.Detach()
+		return c.Text(http.StatusOK, "ok")
+	})
+	doReq(e, "GET", "/bg", nil)
+
+	sp := h.last(t)
+	if bg.TraceID != sp.TraceID {
+		t.Errorf("Detached.TraceID = %q，want %q", bg.TraceID, sp.TraceID)
+	}
+	if bg.SpanID != sp.SpanID || bg.SpanID != testSpanID {
+		t.Errorf("Detached.SpanID = %q，want %q（发起请求的那个 span）", bg.SpanID, sp.SpanID)
+	}
+}
+
+// TestDetachWithoutSpanHook：不装 span 出口时 SpanID 是空串——没有 span 可指，
+// 别拿它当 trace-id 用（那种场景用 TraceID）。
+func TestDetachWithoutSpanHook(t *testing.T) {
+	e, _ := newTestEngine(t)
+
+	var bg Detached
+	e.GET("/bg", func(c *Ctx) error {
+		bg = c.Detach()
+		return c.Text(http.StatusOK, "ok")
+	})
+	doReq(e, "GET", "/bg", nil)
+
+	if !isHexLowerN(bg.TraceID, 32) {
+		t.Errorf("Detached.TraceID = %q，want 32hex", bg.TraceID)
+	}
+	if bg.SpanID != "" {
+		t.Errorf("没装 span 出口时 Detached.SpanID = %q，want 空串", bg.SpanID)
+	}
+}
+
+// TestUntrustedTraceHeaderSkipsInboundForSpan：关掉入站头信任后，span 侧同样
+// 一律新起 trace——不采纳入站 trace-id，也不把它的 span-id 当父（信任开关是
+// 安全边界，不能只在 X-Trace-Id 那条路上生效）。
+func TestUntrustedTraceHeaderSkipsInboundForSpan(t *testing.T) {
+	const inbound = "4bf92f3577b34da6a3ce929d0e0e4736"
+	const tp = "00-" + inbound + "-00f067aa0ba902b7-01"
+
+	h := &recordingHook{}
+	e, _ := newTestEngine(t, WithSpanHook(h), WithTrustedTraceHeader(false))
+	e.GET("/t", func(c *Ctx) error { return c.Text(http.StatusOK, "ok") })
+
+	doReq(e, "GET", "/t", nil, "Traceparent", tp)
+	in := h.begin(t)
+	if in.TraceID == inbound {
+		t.Error("关掉信任后不得采纳入站 trace-id")
+	}
+	if !isHexLowerN(in.TraceID, 32) {
+		t.Errorf("TraceID = %q，want 自启的 32hex", in.TraceID)
+	}
+	if in.ParentID != "" {
+		t.Errorf("关掉信任后不应有 parent，got %q", in.ParentID)
+	}
+}
+
+// TestTraceStatePassedThroughVerbatim：tracestate 的内容框架不解析（W3C 允许
+// vendor 段随意），所以畸形值也原样透传——只做外层空白 trim。它不参与
+// traceparent 的合法性判定（那条另有用例：traceparent 非法时整条不解析）。
+func TestTraceStatePassedThroughVerbatim(t *testing.T) {
+	const tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	const weird = ",,vendor===x,foo bar"
+
+	h := &recordingHook{}
+	e, _ := newTestEngine(t, WithSpanHook(h))
+	e.GET("/t", func(c *Ctx) error { return c.Text(http.StatusOK, "ok") })
+
+	doReq(e, "GET", "/t", nil, "Traceparent", tp, "Tracestate", "  "+weird+"  ")
+	if got := h.begin(t).TraceState; got != weird {
+		t.Errorf("TraceState = %q，want %q（原样透传，只 trim 外层空白）", got, weird)
+	}
+}

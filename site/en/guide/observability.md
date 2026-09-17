@@ -68,6 +68,8 @@ Whatever sink you use, the `New()` assembly gives every request:
 - A **request scope** released the moment the handler returns — before the engine maps the outcome and writes anything further
 - Panic recovery: a panic in a handler becomes a 500, and the panic value and stack stay in the process (attached to the record, never sent to the client)
 
+Inbound identity is parsed from the W3C `traceparent` first (field-level strict validation: one illegal field and the whole header is ignored and a new trace starts). B3's `X-B3-TraceId` is a **legacy compatibility path**: it carries a trace id only and no span id, so a request that arrives with B3 is a **root span** (no parent) — it is not a W3C equivalent.
+
 ## Into a tracing backend: the span hook
 
 The framework ships **no tracing SDK** (zero third-party dependencies in the main module is a hard rule). It produces structured data; turning that into real spans is the host's job — the official adapter lives in its own module:
@@ -93,6 +95,8 @@ The two ends of a request are handled by the two methods of `SpanHook`:
 Semantics follow semconv: the name is `{method} {http.route}` (falling back to `{method}` when there is no route — **never** the URI path); an unknown method degrades to `HTTP` in the name and becomes `_OTHER` in the attributes, with the original kept in `http.request.method_original`; 5xx → `Error`, 4xx/2xx stay unset; `http.response.status_code` uses the mapped status.
 
 The method in the **access log** is not normalized (`purge` stays `purge`) — the log is read by people, the span is read by an APM; same attribute name, deliberately different value discipline in that one spot.
+
+**Three Recommended attributes are deliberately not recorded**: `url.scheme` / `server.address` / `network.protocol.version`. They describe this service's own listening setup rather than the request (behind a reverse proxy `url.scheme` would be the *internal* value), so record them where the request actually enters — at the edge. This is a **declared** deviation from semconv, not an oversight.
 
 ### Two response headers, two different things
 

@@ -38,11 +38,12 @@ type SpanInfo struct {
 	Sampled bool
 	Random  bool
 
-	// Method / Path 是请求方法与实际路径：span 名在路由已知前只能退化为
-	// `{method}`，而这两个值在请求开始时就可用（semconv：没有低基数目标时，
-	// 名称用 `{method}`）。
+	// Method 是请求方法：span 名在路由已知前只能退化为 `{method}`，而这个值在
+	// 请求开始时就可用（semconv：没有低基数目标时，名称就用 `{method}`）。
+	//
+	// 这里**不带路径**：semconv 禁止拿 URI 路径当 span 名，而 Begin 阶段除了
+	// 名称之外没有别的用途——请求事实（含 `url.path`）都在 End 的 Span 里给。
 	Method string
-	Path   string
 }
 
 // SpanRef 是 hook 在 Begin 里给出的本请求 span 身份。
@@ -80,6 +81,10 @@ type Span struct {
 	Route string
 
 	// Path 是实际请求路径（`url.path`），含路径参数的实际值。
+	//
+	// 官方 otel/ 适配件**不直接读**它——`url.path` 已经随 Attrs 过去，再读一遍
+	// 只会多一个取值口径。它服务于自定义 hook 的便利取值（比如要建一条带
+	// 路径的 link 事件，不想从 Attrs 里翻）。
 	Path string
 
 	// Status 是**映射后**的 HTTP 状态码（与访问日志同源）：handler 返回的错误
@@ -125,6 +130,14 @@ type Span struct {
 // End 里用 `trace.SpanFromContext(ctx)` 取回同一个 span，补上名称（路由到这时
 // 才知道）、属性与状态，然后结束它。ctx 是**请求 context**（自带 Begin 注入的
 // span），所以 hook 不必自己维护「请求 ↔ span」的映射。
+//
+// 两条对**实现者**的约定（写在接口上，免得只看 Span 的字段注释才看得到）：
+//
+//   - `sp.Attrs` 是引擎的**栈上局部**的指针，只在本次 End 调用期间有效。要留就
+//     当场拷一份（`sp.Attrs.Range` 或者自己 clone），**不得**存下来延后读。
+//   - End 是**请求 goroutine 最后一次**看到这个请求的机会：此刻的 ctx 与 sp 都
+//     随请求结束失效，别把它们捕获进后台 goroutine（后台任务用 `Ctx.Detach()`
+//     拿 TraceID / SpanID，在追踪体系里建 link，不是拿 span 往下走）。
 type SpanHook interface {
 	Begin(ctx context.Context, in SpanInfo) (context.Context, SpanRef)
 	End(ctx context.Context, sp Span)
@@ -167,7 +180,20 @@ const attrSpanID = "span.id"
 //	              就没有 span-id 可写。
 //
 // 响应侧**不写 traceparent**：W3C 没有给响应定义这个头，客户端也不会读它。
+//
+// 被代理剥离时按这个顺序排查：访问日志的 `trace=` 与 `span.id` → `X-Trace-Id`
+// → 最后才怀疑本头（WAF / CDN / 老网关对不认得的响应头并不都原样透传）。
 const serverTimingHeader = "Server-Timing"
+
+// serverTimingMetric 是这条 Server-Timing 指标的名字，W3C trace-context 定死为
+// `trace`（客户端按这个名字找链路信息）。
+const serverTimingMetric = "trace"
+
+// traceparentVersion 是 W3C 当前唯一的版本号 `00`。
+//
+// Server-Timing 的 desc 里要把 traceparent 的四个字段按原序写一遍，版本位同样
+// 是这个值——所以它既用于入站校验，也用于出站拼装，不各写一份。
+const traceparentVersion = "00"
 
 // serverTimingValue 产出 Server-Timing 的指标值（不含头名）。
 //
@@ -177,18 +203,31 @@ func serverTimingValue(ref SpanRef) string {
 	if ref.TraceID == "" || ref.SpanID == "" {
 		return ""
 	}
-	return "trace;desc=00-" + ref.TraceID + "-" + ref.SpanID + "-" + flagsHex(ref.Sampled, ref.Random)
+	return serverTimingMetric + ";desc=" + traceparentVersion + "-" +
+		ref.TraceID + "-" + ref.SpanID + "-" + flagsHex(ref.Sampled, ref.Random)
 }
 
-// flagsHex 只写规范支持的两bit：sampled(0x01) 与 random-trace-id(0x02)。
+// trace-flags 是 W3C 定义的两位（外加保留位）：
+//
+//	flagSampled    0x01  sampled——上游决定要采这条链路
+//	flagRandom     0x02  random-trace-id——trace-id 来自随机源（不是历史 id）
+//	knownFlagBits  两位都算「已知」，`00` 版本不允许出现其他位（规范：保留位必须
+//	               为 0，官方 otel-go 同样按 >3 判非法）
+const (
+	flagSampled   = 0x01
+	flagRandom    = 0x02
+	knownFlagBits = flagSampled | flagRandom
+)
+
+// flagsHex 只写规范支持的两 bit：sampled 与 random-trace-id。
 // W3C 要求出站时把不认识的位写 0，所以这里不做位透传。
 func flagsHex(sampled, random bool) string {
 	var v byte
 	if sampled {
-		v |= 0x01
+		v |= flagSampled
 	}
 	if random {
-		v |= 0x02
+		v |= flagRandom
 	}
 	const hexDigits = "0123456789abcdef"
 	return string([]byte{hexDigits[v>>4], hexDigits[v&0x0f]})
@@ -262,15 +301,15 @@ func parseTraceparent(tp string) (SpanInfo, bool) {
 	if version == 0 {
 		// 00 版本是定长格式：不允许额外的尾部字段，也不允许保留 flag 位
 		// （与官方 otel-go 实现同口径）。
-		if len(tp) != traceparentMinLen || flagBits > 0x03 {
+		if len(tp) != traceparentMinLen || flagBits > knownFlagBits {
 			return SpanInfo{}, false
 		}
 	}
 	return SpanInfo{
 		TraceID:  traceID,
 		ParentID: parentID,
-		Sampled:  flagBits&0x01 != 0,
-		Random:   flagBits&0x02 != 0,
+		Sampled:  flagBits&flagSampled != 0,
+		Random:   flagBits&flagRandom != 0,
 	}, true
 }
 
