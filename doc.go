@@ -42,6 +42,9 @@
 //     使用；异步场景用 `Ctx.Detach()` 取独立的值与进程级 kernel 句柄。
 //   - **中间件无例外**：Static 注册的静态资源同样经过全局与分组中间件。
 //   - **错误脱敏**：HTTPError.cause 与 panic 栈只进观测记录，绝不进响应体。
+//   - **测试入口与真路径同源**：`NewTestContext` / `ServeTest` 与真实请求共用同一份
+//     装配与收尾（`Engine.begin` + `finish`），差别只有 `ServeMux` 不参与——路径参数
+//     与路由模板要调用方补在 request 上。
 //
 // 设计文档：docs/design/web-framework-design.md
 package web

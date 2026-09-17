@@ -304,6 +304,10 @@ func (app *Engine) Serve(ln net.Listener) error    // 自定义 listener
 func (app *Engine) Handler() http.Handler          // 导出视图（等价自身）
 app.Static("/static", "./files")
 app.OnShutdown(fn func(ctx context.Context) error) // 单回调
+
+// 测试入口（#63）：不起 server 测 handler，装配与收尾与真路径同源
+func (app *Engine) NewTestContext(w http.ResponseWriter, r *http.Request) (*Ctx, func(error))
+func (app *Engine) ServeTest(w http.ResponseWriter, r *http.Request, h Handler, mw ...Middleware)
 ```
 
 - `Run` **阻塞**；`nil` = 收到信号正常关闭，非 nil = 启动失败或关闭期错误。两条路径都完成 `root.Dispose()`——**调用方不能再 Dispose**
@@ -800,6 +804,7 @@ v1 只做当前视图：`app.Debug("/debug/pulse")` 输出 `kernel.FiberSnapshot
 | `Recover()` 中间件 | 不做（Engine `defer` 兜底已覆盖） |
 | `HoldScope()` / `Release()` | 不做（延长请求 scope 会破坏"请求结束即回收"） |
 | `RunTLS` | 不做（`tls.NewListener` + `Serve` 或反代） |
+| `WithRoute` / `WithPathParam`（测试入口的便捷参数） | 不做——路径参数与路由模板用标准库导出面自己补（`Request.SetPathValue` / `Request.Pattern`），不造测试特供的词汇表（#63） |
 | 请求级数据对 kernel 插件**通用**可见 | 不做——上游 v0.2.1 已给出 `kernel.Local()`（这条"属上游改动"的阻塞已解除），但把整个请求 KV 袋挂进 scope 是每条绑定 ≈ +250 ns / +12 allocs（同轮实测，表 B），且语义上把"通用容器"当成"语义性绑定"。只做 `WithCollector()` 这一处显式、边界清楚的用例 |
 | 内置 agent / LLM 相关的观测与装配接线 | 不做——pulse-web **只依赖 kernel 与 observability**，与 pulse 其余组件（llm / loop / host / toolset…）无耦合；需要时由调用方在自己的装配代码里显式接入 |
 
@@ -824,6 +829,7 @@ pulse-web/
 ├── templates.go               # html/template 薄封装 + web.H
 ├── console_sink.go            # 默认出口：给人读的列式单行（见「默认出口」——薄壳 + 版式渲染器）
 ├── debug.go                   # 装配诊断端点（FiberSnapshots 的 JSON 视图）
+├── testing.go                 # 测试入口：NewTestContext / ServeTest（装配与真路径同源，#63）
 ├── *_test.go                  # 与源文件同包（无独立 xxx_test 包），黑盒走 Engine 入口
 ├── assets/
 │   ├── logo.svg               # 品牌 mark（48×48，currentColor；参数见「品牌标识」）
@@ -845,7 +851,7 @@ pulse-web/
 
 **协作规范面**（`LICENSE` 与四个规范文件、`.github` 下的模板）不是框架设计的一部分，但同样是仓库的事实源：流程规则改**这些文件**，不要只在 Issue 评论里约定——评论会沉，文件不会。四份文件的契约关系是：`CONTRIBUTING.md` 管代码怎么提，`CODE_OF_CONDUCT.md` 管人怎么相处，`SECURITY.md` 管漏洞往哪报，`AGENTS.md` 管 agent 怎么在这个仓库里干活。
 
-**文档分层**：**设计文档 = 数据与契约的事实源，站点 = 公开展示面，README = 结论与入口**。推论有三：① 性能跑分、对比表、图表这类**展示性内容不进 README**（进站点），部署运维细节（容器日志轮转、journald 配置）同理；README 只留一句结论 + 链接。② README 分中英两版（`README.md` 英文主版 / `README_zh.md` 中文版），两版的**结构等价**由守卫保证（`##`/`###` 数、各语言代码块计数、相对引用目标集合、互相链接）——措辞各语言自己地道，骨架不许各有各的。③ README **不写状态计数**（「已实现 N/N」这类）：它是内部进度的话术，且每次清单增删都要跟着改；进度的事实源是本文档的验收清单。
+**文档分层**：**设计文档 = 数据与契约的事实源，站点 = 公开展示面，README = 结论与入口**。推论有三：① 性能跑分、对比表、图表这类**展示性内容不进 README**（进站点），部署运维细节（容器日志轮转、journald 配置）同理；README 只留一句结论 + 链接。② README 分中英两版（`README.md` 英文主版 / `README_zh.md` 中文版），两版的**结构等价**由守卫保证（`##`/`###` 数、各语言代码块计数、引用目标集合——含绝对 URL，站点深链按语言归一化 `/en/…` ≡ `/…`、互相链接）——措辞各语言自己地道，骨架不许各有各的。③ README **不写状态计数**（「已实现 N/N」这类）：它是内部进度的话术，且每次清单增删都要跟着改；进度的事实源是本文档的验收清单。
 
 ## 品牌标识
 
@@ -902,6 +908,8 @@ mark 的走势**直接沿用 pulse**（平段 → 上升 → 峰值 → 深谷 �
   证据：`bodylimit_test.go` 10 条——分组（`TestBodyLimitOnGroup`）、路由与分组叠加（`TestBodyLimitOnRoute`）、边界（`TestBodyLimitBoundary`：恰好 n 通过 / n+1 得 413）、声明未知 chunked（`TestBodyLimitChunked`）、只能收紧（`TestBodyLimitCannotLoosen`：引擎级 1 KiB 拦得住路由级 1 MiB）、预检不读 body（`TestBodyLimitPrecheckRejectsDeclaredOverLimit`）、cause 同型两条路径（`TestBodyLimitCauseType`）、`n <= 0` 直通（`TestBodyLimitNonPositiveIsPassThrough`）、构造器（`TestTooLargeConstructor`）、真实连接上「超限关连接」语义不丢（`TestBodyLimitKeepsCloseConnection`：断言响应带 `Connection: close`，即 `MaxBytesReader` 的 `w` 拿到的是原始 writer 而非包装器）。
 - [x] **写出 / 错误语义收口**：`c.JSON` 先编码成功才写头（失败 → 500 统一错误体，不再 200 空体）；`c.Flush` 与包装器 `Flush` 同一实现、首刷吃 `Status()`；`panic(web.NotFound(...))` 一律 500（要 4xx 请 return）
   证据：`TestJSONEncodeFailureMappedTo500` / `TestJSONBytesStable`（尾换行保留）/ `TestPanicHTTPErrorMapsTo500`；Flush 三条见上一条。
+- [x] **测试入口与真路径同构**（[#63](https://github.com/Luo-root/pulse-web/issues/63)）：`NewTestContext`（`done(err)` 回灌 handler 返回值 → 走统一错误映射）与 `ServeTest`（handler + 中间件链，连 panic 与请求体闸门一起接管）与真实请求共用 `begin` / `finish`；差别只有 `ServeMux` 不参与——路径参数与路由模板由调用方补在 request 上
+  证据：`testing_test.go` 12 条——逐项对比（`TestNewTestContextMatchesRealPath`：状态码 / 响应体 / `Record.TraceID` 32hex / 属性集逐键相同）、错误映射（`TestNewTestContextMapsHandlerError`）、装了 hook 的 `Server-Timing` 档（`TestNewTestContextWritesServerTimingWithHook`）、body（`TestNewTestContextBindsBody`）、KV（`TestNewTestContextCarriesRequestKV`）、`Detach`（`TestNewTestContextDetachSharesTrace`）、已销毁 engine 的 503（`TestNewTestContextOnDisposedEngine`）、`done` 幂等（`TestNewTestContextDoneIsIdempotent`）、panic 归属（`TestNewTestContextDoesNotSwallowPanic` + `TestServeTestRecoversPanic`）、`Use` 叠链（`TestServeTestChainsGlobalUse`）、体闸门（`TestServeTestEnforcesBodyLimit`）。
 - [x] **性能回归**：请求路径开销进入仓库 bench，作为基线不劣化
   证据：`bench/` 全套基准 + 分配预算门禁 `TestRequestPathAllocBudget`（CI 的 `Alloc budget` 步骤，不带 `-race` 执行）。
 - [x] **真实负载与 gin 同级**（不以 micro-benchmark 胜负作承诺）——**已复采三轮、结论一致**：裸档 0.91× / 0.95×、观测档 0.82× / 0.93×（见「表 C」；采集工程在 `loadtest/`，CI 覆盖它的 build / vet / test）

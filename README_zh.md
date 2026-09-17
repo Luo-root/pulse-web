@@ -182,6 +182,22 @@ app := web.New(web.WithTemplates(web.TemplateConfig{
 
 模板是对 `html/template` 的薄封装；没有需要额外学习的自研模板引擎。
 
+### 测试
+
+handler 单测不必起 server。测试入口与真路径**共用同一份请求装配**——同一份代码，所以状态码落定、错误映射、访问日志的表现与线上一致。
+
+```go
+rec := httptest.NewRecorder()
+req := httptest.NewRequest("GET", "/users/42", nil)
+req.Pattern = "GET /users/{id}"     // 路由模板与路径参数由你补上
+req.SetPathValue("id", "42")
+
+c, done := app.NewTestContext(rec, req)
+done(myHandler(c))                  // 跑一遍、把 error 交回去、收尾
+```
+
+`app.ServeTest(rec, req, handler, mw...)` 覆盖「handler + 中间件链」，并且连 panic 与请求体闸门一起接管。两个入口都不经 `ServeMux`；确切边界——以及什么时候仍该起真 server——见[测试指南](https://luo-root.github.io/pulse-web/guide/testing)。
+
 ## 观测
 
 每个请求都有一个 32hex 的 TraceID、一条 `http.request` 记录，以及一个**在 handler 返回时立即回收**的请求作用域——早于引擎做错误映射与任何后续写出。

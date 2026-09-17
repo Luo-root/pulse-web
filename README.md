@@ -182,6 +182,22 @@ app := web.New(web.WithTemplates(web.TemplateConfig{
 
 Templates are a thin wrapper over `html/template`; there is no template engine of our own to learn.
 
+### Testing
+
+Handlers can be unit-tested without starting a server. The entry points share the request assembly with the real path — the same code — so how the status settles, error mapping and the access log behave exactly as they do in production.
+
+```go
+rec := httptest.NewRecorder()
+req := httptest.NewRequest("GET", "/users/42", nil)
+req.Pattern = "GET /users/{id}"     // route template and path parameters are yours to fill in
+req.SetPathValue("id", "42")
+
+c, done := app.NewTestContext(rec, req)
+done(myHandler(c))                  // run, hand the error back, wrap up
+```
+
+`app.ServeTest(rec, req, handler, mw...)` covers the handler plus a middleware chain, taking over panics and the request-body gate as well. Neither entry point goes through `ServeMux`; the exact boundary — and when a real server is still the right answer — is in the [testing guide](https://luo-root.github.io/pulse-web/en/guide/testing).
+
 ## Observability
 
 Every request gets a 32-hex TraceID, one `http.request` record, and a request scope that is disposed as soon as the handler returns — before the engine maps the outcome and writes anything further.
