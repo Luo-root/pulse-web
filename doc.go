@@ -5,6 +5,9 @@
 //   - 装配内核：kernel 的 IoC、可逆生命周期、请求作用域、事件总线
 //   - 一等观测：每请求 32hex TraceID、结构化记录（observability.Record）、装配诊断；
 //     默认出口 `ConsoleSink` 把记录渲染成**给人读**的列式单行（零分配）
+//   - 链路出口（可选）：`WithSpanHook` 把请求交给宿主的追踪体系（W3C Trace Context / OTel
+//     HTTP semconv），span-id 由追踪体系分配、框架不编造；官方适配在 nested module
+//     github.com/Luo-root/pulse-web/otel
 //   - 零第三方依赖：只用 stdlib 与 pulse 的 kernel / observability
 //
 // # 快速开始

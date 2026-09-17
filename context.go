@@ -33,6 +33,10 @@ type Ctx struct {
 	r       *http.Request
 	scope   *kernel.Context
 	traceID string
+	// spanID 是本次请求的 span 标识（16hex）；**只有装了 WithSpanHook 才非空**。
+	// 它由追踪体系分配、经 SpanRef 交回框架（理由见 span.go 顶部注释），
+	// 空串的含义是「这次请求没有 span」。
+	spanID  string
 	started time.Time
 
 	kv  map[string]any
@@ -52,6 +56,13 @@ func (c *Ctx) Query(name string) string { return c.r.URL.Query().Get(name) }
 
 // TraceID 返回本请求的 32hex trace 标识。
 func (c *Ctx) TraceID() string { return c.traceID }
+
+// SpanID 返回本请求的 16hex span 标识；**没装 WithSpanHook 时是空串**。
+//
+// 空串的含义是「这次请求没有 span」——不要拿它当占位符去填日志或响应头。
+// 它唯一的用途是让调用方自己把请求内的工作与 trace 关联起来（例如后台任务
+// 用 c.Detach() 带走 TraceID + SpanID，在追踪体系里建一条显式的 span link）。
+func (c *Ctx) SpanID() string { return c.spanID }
 
 // Kernel 返回**请求 scope**：登记 Effect、注册事件监听、派生更深 scope、
 // 或传给需要作用域的组件。它是随请求销毁的，不是进程级 kernel ——

@@ -208,8 +208,11 @@ web.WithSink(observability.MultiSink{a, b})                     // several desti
 - `c.TraceID()` — the same id in the handler, the access log and downstream calls
 - `c.Observe("order.paid", func(a *observability.Attrs) { a.Set("order_id", id) })` — your own events land in the same sink as the framework's
 - `web.WithCollector()` — attach the kernel collector to the request scope when you need per-request fiber visibility
+- `web.WithSpanHook(hook)` — let your tracing stack own the request's span; the official OpenTelemetry adapter is the nested [`otel/`](otel/) module
 - `web.WithRoot(root)` — attach an existing kernel tree; note that `Run` / `Serve` dispose it on return, so do not keep using it afterwards
 - `app.Debug("/debug/assembly")` — a JSON view of the assembly state (snapshots, fibers, plugins)
+
+A span hook is what makes a request a real span in your tracing backend. The framework never invents a span-id: your tracer allocates it and the framework adopts it, so the same real span appears in `Server-Timing`, in the access record's `span.id`, and in the `traceparent` your downstream clients send. That `Server-Timing` header is **not** `X-Trace-Id` — the latter is this framework's own header carrying the trace id only, while `Server-Timing` is the W3C-defined response binding and carries this request's span id (written only once a span exists).
 
 Records hold scalars only (`~string | ~int64 | ~float64 | ~bool`) with no `map[string]any` escape hatch, so request bodies, headers and query strings cannot end up in your logs by construction. The default sink writes to stdout and is not a persistence layer — rotation and retention belong to your platform (containers, journald, or your own writer).
 

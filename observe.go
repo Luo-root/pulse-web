@@ -1,12 +1,8 @@
 package web
 
 import (
-	"crypto/rand"
-	"encoding/hex"
-	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/Luo-root/pulse/observability"
 )
@@ -35,83 +31,24 @@ func writeObservation(sink observability.Sink, hostID, traceID, event string, se
 	sink.Write(rec)
 }
 
-// generateTraceID 生成 32hex 的 W3C 兼容 trace-id。
+// resolveSpanInfo 解析入站链路头，得到本请求的 trace 身份（span 侧的数据）。
 //
-// 不使用 observability.NewTraceID()：它返回 UnixNano-随机段-序号 的异构格式，
-// 自生成场景下回写 traceparent 会违反 W3C（trace-id 必须 32 位小写 hex）。
-// 自带生成器符合其设计（traceid.go:19 明确「返回值无契约语义、宿主可自带格式」）。
-func generateTraceID() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("%032x", time.Now().UnixNano())
-	}
-	return hex.EncodeToString(b[:])
-}
-
-// resolveTraceID 优先采纳上游链路头，否则新生成。
-func (e *Engine) resolveTraceID(r *http.Request) string {
-	if id := traceIDFromHeader(r); id != "" {
-		return id
-	}
-	return generateTraceID()
-}
-
-// zeroTraceID 是全零 trace-id。W3C traceparent 明文规定 trace-id 不得为全零
-// （B3 未禁止）——两条入站路径统一按「不存在」处理：否则带该头的请求会在日志里
-// 共享同一条 TraceID，比链路断裂更难排查。
-const zeroTraceID = "00000000000000000000000000000000"
-
-// traceIDFromHeader 读取 W3C traceparent / B3 的 trace-id。
-// traceparent 的 trace-id 必须是 32 位 hex（W3C 规定）；B3 接受 32hex 与
-// 16hex（Zipkin 64-bit，左垫 0 归一）。格式不符（长度、字符集）或全零一律
-// 视为不存在 —— 不信任畸形输入。
-func traceIDFromHeader(r *http.Request) string {
-	if tp := strings.TrimSpace(r.Header.Get("Traceparent")); tp != "" {
-		// version-traceid-parentid-flags
-		parts := strings.Split(tp, "-")
-		if len(parts) >= 3 && isHex32(parts[1]) {
-			if id := strings.ToLower(parts[1]); id != zeroTraceID {
-				return id
-			}
-		}
-	}
-	if b3 := strings.TrimSpace(r.Header.Get("X-B3-TraceId")); b3 != "" {
-		if id := normalizeB3(b3); id != zeroTraceID {
-			return id
-		}
-	}
-	return ""
-}
-
-// normalizeB3 归一 B3 trace-id：32hex（128-bit）原样小写；16hex（Zipkin
-// 64-bit）左垫 16 个 0 归一为 32hex；其余返回空串（视为不存在）。
+// 顺序：W3C `traceparent`（严格校验，规则与官方 otel-go 实现逐条对齐，见 span.go）
+// → B3 `X-B3-TraceId`（历史兼容，只给 trace-id，没有 parent）→ 都没有就新起一条。
 //
-// 补零方向取「高 64 位为零」这一多数 tracer 的约定 —— B3 规格只要求
-// 「32 或 16 个 hex 字符、标识符不透明」，**未规定** 64→128 的补零方向
-// （openzipkin/b3-propagation 的 README 未涉及）。将来若要与某个 128-bit
-// 上游按位对齐，以对方的位序为准。
-func normalizeB3(s string) string {
-	switch {
-	case isHex32(s):
-		return strings.ToLower(s)
-	case isHex16(s):
-		return "0000000000000000" + strings.ToLower(s)
-	}
-	return ""
-}
-
-func isHex32(s string) bool { return len(s) == 32 && isHex(s) }
-
-func isHex16(s string) bool { return len(s) == 16 && isHex(s) }
-
-func isHex(s string) bool {
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
-		default:
-			return false
+// trustTraceHeader 关掉时整段跳过：不读任何入站头，一律新起 trace。
+//
+// 自启 trace 时 sampled 与 random 都置位：trace-id 全部来自 crypto/rand（满足
+// W3C 对 random-trace-id 的条件），而本服务确实会为这次请求留下记录（访问日志），
+// 所以 sampled=1 是事实而不是乐观假设。
+func (e *Engine) resolveSpanInfo(r *http.Request) SpanInfo {
+	if e.trustTraceHeader {
+		if in := parseInboundTrace(r.Header.Get("Traceparent"), r.Header.Get("Tracestate")); in.TraceID != "" {
+			return in
+		}
+		if id := parseB3TraceID(strings.TrimSpace(r.Header.Get("X-B3-TraceId"))); id != "" {
+			return SpanInfo{TraceID: id}
 		}
 	}
-	return true
+	return SpanInfo{TraceID: generateTraceID(), Sampled: true, Random: true}
 }

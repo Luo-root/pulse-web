@@ -68,6 +68,53 @@ app := web.New(
 - 开一个**请求作用域**：handler 返回时立即 LIFO 回收——早于引擎做错误映射与任何后续写出
 - 兜 panic：handler 里的 panic 变成 500，panic 值与栈留在进程内（挂在记录上，绝不发给客户端）
 
+入站身份优先按 W3C `traceparent` 解析（字段级严格校验，任何一处不合法就整条忽略、起新 trace）。B3 的 `X-B3-TraceId` 是**历史兼容路径**：它只有 trace-id、没有 span-id，所以走 B3 的请求在链路里是 **root span**（没有 parent）——它不是 W3C 的等价物。
+
+## 接进追踪体系：span 出口
+
+框架自己**不引任何追踪 SDK**（主模块零第三方依赖是红线），它产出结构化数据，把数据变成真 span 的是宿主——官方适配在独立 module 里：
+
+```go
+import (
+	"go.opentelemetry.io/otel/sdk/trace"
+	otelweb "github.com/Luo-root/pulse-web/otel"
+)
+
+tp := trace.NewTracerProvider(trace.WithBatcher(exporter))
+app := web.New(web.WithSpanHook(otelweb.New(tp)))
+```
+
+一次请求的两头由 `SpanHook` 的两个方法接住：
+
+| 时刻 | 框架给什么 | 适配件做什么 |
+|---|---|---|
+| `Begin`（路由前） | `SpanInfo`：入站解析结果（`TraceID` / `ParentID` / `TraceState` / `Sampled` / `Random`）加方法与实际路径 | 建 server span 并注入请求 context（下游 `otelhttp` / `otelgrpc` / `otelsql` 自动接上），再用 `SpanRef` 把身份回给框架 |
+| handler 期间 | —— | span 正在记录：`c.SpanID()` 拿得到 id，往下传的 `context.Context` 带着它 |
+| `End`（响应写完后） | `Span`：路由模板、**映射后**的状态码、与访问日志同一份属性、起止时间、原始错误 | `trace.SpanFromContext(ctx)` 取回同一个 span，补名称 / 属性 / 状态后结束 |
+
+口径按 semconv：span 名用 `{method} {http.route}`（路由拿不到时退化为 `{method}`，**不**退回 URI 路径）；未知方法在名字里退化为 `HTTP`、属性侧写 `_OTHER` 并附 `http.request.method_original`；5xx → `Error`、4xx/2xx → 保持 unset；`http.response.status_code` 用映射后的状态码。
+
+访问日志里那个方法**不归一**（`purge` 就写 `purge`）——日志给人读，span 给 APM，两边属性名相同、取值口径这一处不同是有意的。
+
+**有意不记的三个 Recommended 属性**：`url.scheme` / `server.address` / `network.protocol.version` 框架不产出——它们记的是「本服务的监听信息」而不是请求事实（反代后面 `url.scheme` 拿到的是内网值，照记等于写错），要它们请在**边缘那一层**记。这是一条**声明过的**对 semconv 的偏差，不是漏记。
+
+### 两个响应头，各管各的
+
+装了 span 出口后，同一个响应上会多出一个链路相关的头——它和 `X-Trace-Id` **不是一回事**：
+
+| 头 | 内容 | 什么时候有 |
+|---|---|---|
+| `X-Trace-Id` | 32hex trace-id，**不含 span** | 一直有（`Minimal()` 关掉 trace 时没有） |
+| `Server-Timing: trace;desc=…` | `00-<trace-id>-<本请求 span-id>-<flags>`，含 span | 只有拿到 span 身份才有 |
+
+响应侧**不写 `traceparent`**：W3C 没有给响应定义这个头。出站请求侧的 `traceparent` 由宿主下游客户端的插桩注入，parent-id 就是本请求的 span-id。
+
+**在多层代理后面时，`Server-Timing` 可能被中间设备改写或剥掉**——WAF、CDN、老网关对不认得的响应头并不都原样透传；`X-Trace-Id` 是自带头，被剥掉的概率低得多。排查「链路信息怎么没了」时按这个顺序看：访问日志里的 `trace=` 与 `span.id` → `X-Trace-Id` → 最后才怀疑 `Server-Timing`。
+
+### 后台任务：link，不是父子
+
+`c.Detach()` 出来的任务活过请求，把它做成请求 span 的子节点会让父 span 的时长语义失真。推荐做法是**显式 link**：把 `c.TraceID()` / `c.SpanID()` 带进 `Detached` 值（或自己的任务表），在追踪体系里建一条 link。框架不替后台任务建 span。
+
 ## 打自己的点：`c.Observe`
 
 ```go
