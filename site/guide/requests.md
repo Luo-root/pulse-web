@@ -8,13 +8,19 @@
 app.GET("/users/{id}", func(c *web.Ctx) error {
     id := c.Path("id")                 // 路径参数（同 c.Request().PathValue）
     page := c.Query("page")            // 查询参数；不存在返回空串
+    sid, err := c.Cookie("session")    // cookie；缺失时返回 http.ErrNoCookie
+    if err != nil {
+        return web.Unauthorized("no_session", err)
+    }
     ua := c.Request().Header.Get("User-Agent")   // 需要原始请求就用 c.Request()
     c.SetHeader("X-Trace", c.TraceID())          // 响应头（写头之前有效）
-    return c.Text(200, id+"@"+page)
+    return c.Text(200, id+"@"+page+"@"+sid.Value+"@"+ua)
 })
 ```
 
 `c.Query(name)` 只取第一个值；要多值 / 复杂结构就走下面的绑定。**同一个请求里要取多个参数，取一次存成变量**——每次调用都会重新解析一遍 query string，框架不替调用方做缓存（最简的做法是调用方自己取一次）。
+
+**传给下游库的 `context.Context` 用 `c.Context()`**（≡ `c.Request().Context()`）——取消语义与底层请求一致：客户端断开连接时被取消。写响应侧 cookie（`c.SetCookie`）见[响应](/guide/responses)。
 
 ## 绑定请求体：`Bind`
 

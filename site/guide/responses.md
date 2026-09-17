@@ -19,6 +19,7 @@ app.GET("/healthz", func(c *web.Ctx) error {
 
 - `c.JSON(code, v)` **先编码到内存缓冲、成功后才写响应头**——编码失败不会留下一个 200 空体，代价是每响应 **+2 allocs / +97 B**（数字见[性能](/performance)）。它的输出不流式。
 - `c.Text(code, s)` 自动补 `text/plain; charset=utf-8`；`c.JSON` 补 `application/json`。
+- `c.Blob(code, contentType, b)` 写原始字节，`Content-Type` **原样写出**（不补 charset、不嗅探）——图片、protobuf、导出文件这类「类型由调用方说了算」的场景用它。
 
 ## 状态码与响应头
 
@@ -32,6 +33,45 @@ app.POST("/users", func(c *web.Ctx) error {
 ```
 
 **首刷 = 第一次真正写出**，它可能来自三处里的最先一个：`c.Writer().Write`、`c.Flush()`、handler 返回后的引擎收尾。首刷之后响应头已发出，再调 `Status` 无效。所以「先 `Status(201)` 再写第一段、最后 `Flush`」这条自然顺序是成立的（三条路径共用同一实现，不会出现「`Status` 被第一次 `Write` 的隐式 200 吃掉」）。
+
+空响应（204 / 304）用 `c.NoContent(code)`——它与 `c.Status(code)` 同源：只设置状态码，由首刷落定，所以之后 `return` 的 error 仍会被错误映射接管。两者的差别只有可读性。
+
+Cookie 用 `c.SetCookie(&http.Cookie{Name: "sid", Value: v})`，走标准库 `http.SetCookie`：**同名是追加**（一次响应可以写多条 `Set-Cookie`），值里的非法字节被标准库丢掉并记一条日志。读请求侧的 cookie 用 `c.Cookie(name)`，见[请求](/guide/requests)。
+
+## 重定向
+
+```go
+app.GET("/old", func(c *web.Ctx) error {
+    return c.Redirect(301, "/new")        // 走标准库 http.Redirect
+})
+
+app.GET("/tenant", func(c *web.Ctx) error {
+    return c.Redirect(302, "dashboard")   // 相对路径：按请求路径补成绝对
+})
+```
+
+语义与标准库逐字一致：相对路径按**请求路径**补成绝对、非 ASCII 转义成 `%XX`、GET 请求带一段 HTML 提示体（HEAD 与 POST 不带）；`code` 不做范围校验，非 3xx 也照写。
+
+**它与 `Status` 的差别在落码时机**——`Redirect` 当场把响应头发出去，之后再 `return` 一个 error 也不会被错误映射接管。要先校验再重定向，校验放在调用之前。
+
+## 文件与下载
+
+```go
+app.GET("/report", func(c *web.Ctx) error {
+    return c.File("./data/report.csv")      // 走标准库 http.ServeFile
+})
+
+app.GET("/report/download", func(c *web.Ctx) error {
+    return c.Attachment("./data/report.csv", "2026 年 9 月报告.csv")
+})
+```
+
+- `c.File(path)` 把标准库 `http.ServeFile` 的语义整个拿来：Range、`If-Modified-Since` / `If-None-Match`、按扩展名与内容嗅探 `Content-Type`、目录命中 `index.html` 时的 301。
+- `c.Attachment(path, name)` 在上面基础上加 `Content-Disposition: attachment`。`name` 交给 `mime.FormatMediaType` 编码——**非 ASCII 名走 RFC 2231**（`filename*=utf-8''…`），中文名只有这样才带得出去；手拼引号（`filename="中文.csv"`）在部分客户端上是乱码。
+
+::: warning 文件类方法的失败**不走错误映射**
+文件不存在时标准库自己写 404（纯文本错误页），不可读写写 403——**不经**框架的错误映射，观测记录里也没有错误属性。要在缺失时给出统一的错误体，自己先 `os.Stat` 再返回 `web.NotFound`。
+:::
 
 ## 直接写字节：`Writer`
 

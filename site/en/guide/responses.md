@@ -19,6 +19,7 @@ app.GET("/healthz", func(c *web.Ctx) error {
 
 - `c.JSON(code, v)` **encodes into a memory buffer first and only then writes the headers** — an encoding failure never leaves a 200 with an empty body. The price is **+2 allocs / +97 B per response** (numbers on the [performance page](/en/performance)), and the output does not stream.
 - `c.Text(code, s)` sets `text/plain; charset=utf-8`; `c.JSON` sets `application/json`.
+- `c.Blob(code, contentType, b)` writes raw bytes with the `Content-Type` **written as given** (no charset added, no sniffing) — for images, protobuf, exported files, anything where the type is the caller's call.
 
 ## Status codes and headers
 
@@ -32,6 +33,45 @@ app.POST("/users", func(c *web.Ctx) error {
 ```
 
 **The first flush** is the first actual write, and it can come from any of three places: `c.Writer().Write`, `c.Flush()`, or the engine's own wrap-up after the handler returns. Once it happens the headers are out and `Status` no longer has an effect. That is why the natural streaming order — `Status(201)`, write the first chunk, `Flush` — works: all three paths share one implementation, so a `Status` never gets eaten by the implicit 200 of the first `Write`.
+
+An empty response (204 / 304) is `c.NoContent(code)` — the same source as `c.Status(code)`: it only sets the status code and leaves the settling to the first flush, so a later `return`ed error is still taken over by the error mapper. The only difference is readability.
+
+Cookies go through `c.SetCookie(&http.Cookie{Name: "sid", Value: v})`, backed by the standard library's `http.SetCookie`: **the same name appends** (one response can carry several `Set-Cookie` headers), and illegal bytes in the value are dropped by the standard library with a log line. To read a request-side cookie use `c.Cookie(name)` — see [requests](/en/guide/requests).
+
+## Redirects
+
+```go
+app.GET("/old", func(c *web.Ctx) error {
+    return c.Redirect(301, "/new")        // backed by http.Redirect
+})
+
+app.GET("/tenant", func(c *web.Ctx) error {
+    return c.Redirect(302, "dashboard")   // relative: resolved against the request path
+})
+```
+
+The semantics are the standard library's, word for word: a relative path is resolved against the **request path**, non-ASCII is escaped to `%XX`, and a GET request gets a short HTML hint body (HEAD and POST do not); `code` is not range-checked, and a non-3xx value is written as given.
+
+**The difference from `Status` is when the code settles** — `Redirect` sends the headers right away, so a later `return`ed error is *not* taken over by the error mapper. Validate before you redirect.
+
+## Files and downloads
+
+```go
+app.GET("/report", func(c *web.Ctx) error {
+    return c.File("./data/report.csv")      // backed by http.ServeFile
+})
+
+app.GET("/report/download", func(c *web.Ctx) error {
+    return c.Attachment("./data/report.csv", "2026-09-report.csv")
+})
+```
+
+- `c.File(path)` takes the whole `http.ServeFile` semantics: Range, `If-Modified-Since` / `If-None-Match`, `Content-Type` sniffed from the extension and the content, and the 301 when a directory hits `index.html`.
+- `c.Attachment(path, name)` adds `Content-Disposition: attachment` on top. `name` is encoded by `mime.FormatMediaType` — **non-ASCII names go through RFC 2231** (`filename*=utf-8''…`), the only way a Chinese filename survives the trip; hand-quoting it (`filename="中文.csv"`) is mojibake on some clients.
+
+::: warning The file helpers **do not go through the error mapper**
+When the file is missing, the standard library writes its own 404 (a plain-text page), and 403 when it is unreadable — **not** through the framework's error mapping, and with no error attribute in the observability record. If you want a uniform error body, `os.Stat` first and return `web.NotFound`.
+:::
 
 ## Writing bytes: `Writer`
 

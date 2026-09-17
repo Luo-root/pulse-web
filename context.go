@@ -2,8 +2,10 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"mime"
 	"net/http"
 	"time"
 
@@ -48,11 +50,20 @@ type Ctx struct {
 // Request 返回底层 *http.Request（只读）。
 func (c *Ctx) Request() *http.Request { return c.r }
 
+// Context 返回请求的 context.Context（== Request().Context()）。
+//
+// 把 ctx 交给下游库时用它——`c.Request().Context()` 是纯噪音。取消语义与底层请求
+// 一致：客户端断开连接（或服务端强制关掉连接）时被取消。
+func (c *Ctx) Context() context.Context { return c.r.Context() }
+
 // Path 返回路径参数值——与 Request().PathValue 同源（ServeMux 写入的同一份），不另存。
 func (c *Ctx) Path(name string) string { return c.r.PathValue(name) }
 
 // Query 返回查询参数。
 func (c *Ctx) Query(name string) string { return c.r.URL.Query().Get(name) }
+
+// Cookie 返回请求里名为 name 的 cookie；不存在时返回 http.ErrNoCookie。
+func (c *Ctx) Cookie(name string) (*http.Cookie, error) { return c.r.Cookie(name) }
 
 // TraceID 返回本请求的 32hex trace 标识。
 func (c *Ctx) TraceID() string { return c.traceID }
@@ -177,6 +188,80 @@ func (c *Ctx) Text(code int, s string) error {
 	c.w.WriteHeader(code)
 	_, err := c.w.Write([]byte(s))
 	return err
+}
+
+// Blob 写出原始字节：code + 调用方给定的 Content-Type + body。
+//
+// 与 Text 的差别是**不补 charset、不假设文本**——Content-Type 原样写出，给什么写什么。
+//
+// **空串的边界**（实测，见 `TestBlobEmptyContentTypeIsEmptyNotSniffed`）：传 `""` 写出的
+// 是一条**空的** Content-Type 头——标准库判断要不要嗅探，看的是「这个头在不在」而不是
+// 「值空不空」，所以它不会替你猜。反过来，**整个不设**这个头才会触发嗅探（HTML 载荷会
+// 被认成 `text/html; charset=utf-8`，那才是更难看的默认）。空串比「不设」安全，但也不是
+// 调用方想要的结果——类型不该猜，请给准。
+func (c *Ctx) Blob(code int, contentType string, b []byte) error {
+	c.w.Header().Set("Content-Type", contentType)
+	c.w.WriteHeader(code)
+	_, err := c.w.Write(b)
+	return err
+}
+
+// Redirect 回复一个重定向：设置 Location 并**立即落定 code**。
+//
+// 走标准库 http.Redirect，语义与它逐字一致——相对路径按**请求路径**补成绝对、
+// 非 ASCII 转义成 %XX、GET 请求带一段 HTML 提示体（HEAD 与 POST 不带）。
+// code 不做范围校验，非 3xx 也照写（http.Redirect 同样不校验）。
+//
+// **它与 Status 的差别在落码时机**：这里响应头当场发出，之后再 return error 也不会
+// 被错误映射接管。要先做检查再重定向，检查放在调用之前。
+//
+// 返回值与 File / NoContent 同理：标准库的这条路径不回报写出结果，恒为 nil——
+// 留着是为了让「写出即 return」在全部写出方法上形态一致。
+func (c *Ctx) Redirect(code int, url string) error {
+	http.Redirect(c.w, c.r, url, code)
+	return nil
+}
+
+// NoContent 声明一个无正文响应（204 / 304 等）。
+//
+// 与 Status 同源：只设置状态码，由首刷（含引擎收尾）落定——它**不**声称响应已发出，
+// handler 之后 return error 仍会被错误映射接管。与 `Status(204)` 的差别只有可读性。
+func (c *Ctx) NoContent(code int) error {
+	c.Status(code)
+	return nil
+}
+
+// SetCookie 追加一个 Set-Cookie 响应头（必须在首刷之前调用）。
+//
+// 走标准库 http.SetCookie：同名 cookie 是**追加**而不是覆盖，一次响应可以写多条；
+// cookie 值里的非法字节被标准库**丢掉**（不是报错）并记一条日志，剩余部分照发。
+func (c *Ctx) SetCookie(cookie *http.Cookie) { http.SetCookie(c.w, cookie) }
+
+// File 把磁盘文件作为响应体写出（走标准库 http.ServeFile）。
+//
+// 拿来的是标准库的完整语义：Range 与 If-Modified-Since / If-None-Match、按扩展名与
+// 内容嗅探 Content-Type、目录命中 index.html 时的 301。
+//
+// **失败由标准库直接写响应**——文件不存在写 404、不可读写写 403，**不经**框架的错误
+// 映射（响应形态与 `web.NotFound` 那条路不同，观测记录里也没有错误属性）。要在缺失时
+// 走统一错误面，自己先 os.Stat 再返回 `web.NotFound`。
+//
+// 返回值恒为 nil：http.ServeFile 不回报写出结果（它已经决定了响应）。
+func (c *Ctx) File(path string) error {
+	http.ServeFile(c.w, c.r, path)
+	return nil
+}
+
+// Attachment 以「下载」形式写出磁盘文件：`Content-Disposition: attachment` + File 的全部语义。
+//
+// name 是客户端看到的建议文件名，交给 mime.FormatMediaType 编码——ASCII 名字裸写，
+// 含非 ASCII 或控制字符时走 RFC 2231（`filename*=utf-8”%E4%B8%AD%E6%96%87.pdf`）。
+// 中文名只有这样才带得出去；手拼引号（`filename="中文.pdf"`）在部分客户端上是乱码。
+func (c *Ctx) Attachment(path, name string) error {
+	c.w.Header().Set("Content-Disposition",
+		mime.FormatMediaType("attachment", map[string]string{"filename": name}))
+	http.ServeFile(c.w, c.r, path)
+	return nil
 }
 
 // Flush 把已写内容刷到客户端（SSE / 流式响应）。

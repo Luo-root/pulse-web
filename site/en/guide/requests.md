@@ -8,13 +8,19 @@ This page covers how a handler gets data out of a request, and which state hangs
 app.GET("/users/{id}", func(c *web.Ctx) error {
     id := c.Path("id")                 // path parameter (same as c.Request().PathValue)
     page := c.Query("page")            // query parameter; empty string when absent
+    sid, err := c.Cookie("session")    // cookie; http.ErrNoCookie when absent
+    if err != nil {
+        return web.Unauthorized("no_session", err)
+    }
     ua := c.Request().Header.Get("User-Agent")   // need the raw request? c.Request()
     c.SetHeader("X-Trace", c.TraceID())          // response header (valid before the first flush)
-    return c.Text(200, id+"@"+page)
+    return c.Text(200, id+"@"+page+"@"+sid.Value+"@"+ua)
 })
 ```
 
 `c.Query(name)` returns the first value only; for multiple values or nested structures use binding below. **When one request needs several parameters, call it once and keep the values in local variables** — every call re-parses the query string, and the framework deliberately does not cache it for you (calling once is the simplest fix).
+
+**To hand a `context.Context` to a downstream library use `c.Context()`** (≡ `c.Request().Context()`) — the cancellation semantics match the underlying request: it is cancelled when the client disconnects. For writing a response-side cookie (`c.SetCookie`) see [responses](/en/guide/responses).
 
 ## Binding a body: `Bind`
 
