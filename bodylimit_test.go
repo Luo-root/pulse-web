@@ -9,6 +9,8 @@ import (
 	"testing"
 )
 
+// 本文件覆盖 bodylimit.go：路由 / 分组的请求体闸门、边界值，与 TooLarge 错误的映射。
+
 // bodyLimitReq 发一个带指定 body 的 POST，body 长度即 Content-Length。
 func bodyLimitReq(e *Engine, path string, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest("POST", path, strings.NewReader(body))

@@ -12,6 +12,8 @@ import (
 	"testing"
 )
 
+// 本文件覆盖 bind.go：Content-Type 分派、form / query 映射，以及与请求体上限的交互。
+
 // bindReq 发一个带 Content-Type 的请求；不走 doReq 是因为部分用例要改
 // ContentLength（预检路径）。
 func bindReq(e *Engine, method, target, contentType string, body io.Reader) *httptest.ResponseRecorder {

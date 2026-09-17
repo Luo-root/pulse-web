@@ -14,6 +14,8 @@ import (
 	"github.com/Luo-root/pulse/observability"
 )
 
+// 本文件覆盖 Serve / Run 的关闭链路：信号 → drain → OnShutdown → Dispose → flush，以及 ServerConfig 的合并与透传。
+
 // 生命周期入口的覆盖：`Engine.Run` / `Engine.Serve` / `Engine.serve`。
 //
 // 这三条此前一条都没被执行过——原有的优雅关闭用例自建 `http.Server` 直接调
@@ -269,5 +271,70 @@ func TestWithoutAccessLogKeepsTraceAndPanicGuard(t *testing.T) {
 	// panic 兜底独立于访问日志
 	if r := doReq(e, "GET", "/boom", nil); r.Code != http.StatusInternalServerError {
 		t.Fatalf("panic 兜底 status = %d，want 500", r.Code)
+	}
+}
+
+// TestGracefulShutdownDrainsInflight 验证 drain 由 net/http 承担：
+// 在途请求在 Shutdown 期间正常完成，不被截断（kernel.Dispose 不做这件事）。
+func TestGracefulShutdownDrainsInflight(t *testing.T) {
+	e, _ := newTestEngine(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	e.GET("/slow", func(c *Ctx) error {
+		close(started)
+		<-release
+		return c.Text(http.StatusOK, "drained")
+	})
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: e}
+	go func() { _ = srv.Serve(ln) }()
+
+	respCh := make(chan string, 1)
+	go func() {
+		resp, err := http.Get("http://" + ln.Addr().String() + "/slow")
+		if err != nil {
+			respCh <- "ERR: " + err.Error()
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		b, _ := io.ReadAll(resp.Body)
+		respCh <- string(b)
+	}()
+
+	<-started
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+		close(shutdownDone)
+	}()
+
+	// Shutdown 不应在在途请求结束前返回
+	select {
+	case <-shutdownDone:
+		t.Fatal("Shutdown returned while the request was still in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+
+	select {
+	case got := <-respCh:
+		if got != "drained" {
+			t.Fatalf("response = %q", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("in-flight request did not complete")
+	}
+	select {
+	case <-shutdownDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Shutdown did not complete after drain")
 	}
 }
