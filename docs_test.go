@@ -46,6 +46,23 @@ var (
 // readmePaths 是双语 README：英文主版在前，中文版在后。
 var readmePaths = []string{"README.md", "README_zh.md"}
 
+// siteOrigin 是 README 里站点链接的绝对前缀（站内用相对路径，README 里跨仓库只能用绝对 URL）。
+const siteOrigin = "https://luo-root.github.io/pulse-web"
+
+// normalizeREADMEtarget 让两版 README 的**站点深链**可比：英文版指向 `/en/…`、中文版指向
+// `/…`，指的是同一页（站点语言布局：根 = 中文、`/en/` = English）。口径与站点守卫的
+// normalizeSiteTarget 相同，区别只在目标形态是绝对 URL。
+//
+// 只归一化站点自己的域：外部引用（徽章、上游仓库、规范原文）一律原样比，两版必须逐字一致。
+func normalizeREADMEtarget(target string) string {
+	rest, ok := strings.CutPrefix(target, siteOrigin+"/en")
+	if !ok || (rest != "" && !strings.HasPrefix(rest, "/")) {
+		// 不是本站链接，或只是同前缀的另一个路径（`/pulse-web/english`）——不折。
+		return target
+	}
+	return siteOrigin + "/" + strings.TrimPrefix(rest, "/")
+}
+
 // designCriterionNames 抽出「验收标准」节里的条目名，保持文档顺序。
 func designCriterionNames(t *testing.T) []string {
 	t.Helper()
@@ -190,13 +207,14 @@ func TestDesignCriterionNamesAreUsedInReferences(t *testing.T) {
 //  2. 代码围栏数量一致，且**各语言标注的数量**逐一相同（示例一一对应，不是「反正都是 8 个块」）
 //  3. 引用目标集合一致——Markdown 链接 + HTML 的 `href` / `src`，**绝对 URL 也算**
 //     （徽章行就是靠这一点比对：少一个徽章、两版徽章不同，都会被这一条抓住）；
+//     站点深链先按语言归一化（`/en/guide/x` ≡ `/guide/x`，同一页的两种写法），
 //     锚点与语言切换链接除外
 //  4. 两版互相链接（切换入口双向可达）
 //
 // 措辞各语言自己地道，不逐句比——那样的守卫会因为翻译腔而天天误报。
 //
 // 变异探针：删掉任一版的一节、让某一版少一个代码块、断掉语言切换链接、只给一版加一个
-// 新的链接或徽章目标，本用例必须红。
+// 新的链接或徽章目标、把某一版的站点深链换到另一页，本用例必须红。
 func TestREADMEBilingualStructureMatches(t *testing.T) {
 	type shape struct {
 		path     string
@@ -245,7 +263,7 @@ func TestREADMEBilingualStructureMatches(t *testing.T) {
 					}
 					// 绝对 URL 也收：徽章行（href + shields 图片地址）就是靠它比对——
 					// 只收相对路径的话，少一个徽章、两版徽章不一样，守卫都看不见。
-					s.links[target] = true
+					s.links[normalizeREADMEtarget(target)] = true
 				}
 			}
 		}
@@ -288,4 +306,29 @@ func TestREADMEBilingualStructureMatches(t *testing.T) {
 	}
 	t.Logf("%s: %d 个 `##` / %d 个 `###` / 代码块 %v / 引用目标 %d 个；两版结构与引用目标一致",
 		a.path, a.h2, a.h3, a.fences, len(a.links))
+}
+
+// TestREADMEtargetNormalization 钉住双语守卫里唯一的归一化规则：只在站点自己的域上把
+// `/en/…` 折成 `/…`，其余原样比。
+//
+// 不能只靠 TestREADMEBilingualStructureMatches 顺带覆盖：归一化**折宽了**会让那个守卫
+// 静默失去分辨力（把两版指向不同页的深链看成一致），而它自己仍然全绿。
+//
+// 变异探针：把 `siteOrigin+"/en"` 改成 `siteOrigin`（边界外的也折），或去掉 `/en` 之后的
+// 分隔符判断（`/pulse-web/english` 被折成 `/pulse-web/lish`），本用例必须红。
+func TestREADMEtargetNormalization(t *testing.T) {
+	const origin = "https://luo-root.github.io/pulse-web"
+	cases := []struct{ in, want string }{
+		{origin + "/en/guide/testing", origin + "/guide/testing"},
+		{origin + "/en", origin + "/"},
+		{origin + "/guide/testing", origin + "/guide/testing"},
+		{origin + "/", origin + "/"},
+		{origin + "/english", origin + "/english"},
+		{"https://github.com/Luo-root/pulse", "https://github.com/Luo-root/pulse"},
+	}
+	for _, c := range cases {
+		if got := normalizeREADMEtarget(c.in); got != c.want {
+			t.Errorf("normalizeREADMEtarget(%q) = %q，想要 %q", c.in, got, c.want)
+		}
+	}
 }

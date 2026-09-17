@@ -48,6 +48,7 @@ detach.go               # Detached 值袋子（跨 goroutine 的安全值）
 templates.go            # html/template 薄封装 + web.H
 console_sink.go         # 默认出口：给人读的列式单行（薄壳 + 版式渲染器）
 debug.go                # 装配诊断端点（FiberSnapshots 的 JSON 视图）
+testing.go              # 测试入口：NewTestContext / ServeTest（装配与真路径同源）
 *_test.go               # 与源文件同包（无独立 xxx_test 包），黑盒走 Engine 入口
 assets/                 # 品牌事实源：logo.svg / banner.svg / favicon.svg
 bench/                  # 性能回归基线 + 分配预算门禁；muxprobe/ 是路由选型的一次性实测程序

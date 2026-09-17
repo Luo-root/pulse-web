@@ -469,10 +469,11 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // begin 是**请求级装配的唯一实现**：派生请求作用域、造 Ctx、解析链路身份、挂请求级
-// collector、把 Ctx 注入 context。返回的 end 负责收尾（dispose scope + 写访问日志）。
+// collector、把 Ctx 注入 context。执行交给 withCtx、收尾交给配对的 end——三者合起来
+// 就是真实请求走的那条路，测试入口（#63）复用的也是它们。
 //
-// ServeHTTP 与测试入口（#63）都从它出发——「构造出来的 Ctx 与真路径同构」因此不是靠
-// 纪律维持的，而是结构上只有这一处装配代码。
+// **这里不做**的三件事，正是 `NewTestContext` 与真路径的差别所在：请求体闸门与 panic
+// recover 在 withCtx，路由匹配在 ServeHTTP。
 //
 // kernel 已销毁（进程关闭中）时返回 nil，此时 503 已经写到 w。
 func (e *Engine) begin(w http.ResponseWriter, r *http.Request) *Ctx {
