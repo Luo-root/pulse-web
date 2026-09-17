@@ -329,6 +329,8 @@ func (c *Ctx) Query(name string) string
 func (c *Ctx) Bind(v any) error          // 请求体绑定：按 Content-Type 分派；无 body 落 query（#32）
 func (c *Ctx) BindQuery(v any) error     // query 参数绑定（GET / 过滤场景）
 func (c *Ctx) Request() *http.Request
+func (c *Ctx) Context() context.Context  // ≡ Request().Context()（#69）
+func (c *Ctx) Cookie(name string) (*http.Cookie, error)
 func (c *Ctx) TraceID() string
 
 // 请求级 KV（框架自有 map —— 不用 kernel.Local()，依据见下「关系澄清」）
@@ -346,13 +348,26 @@ func (c *Ctx) Detach() Detached
 // 响应
 func (c *Ctx) JSON(code int, v any) error
 func (c *Ctx) Text(code int, s string) error
+func (c *Ctx) Blob(code int, contentType string, b []byte) error // Content-Type 原样写出（#69）
+func (c *Ctx) Redirect(code int, url string) error               // http.Redirect：当场落码（#69）
+func (c *Ctx) NoContent(code int) error                          // ≡ Status(code)：只设置（#69）
+func (c *Ctx) File(path string) error                            // http.ServeFile：Range / 条件请求 / 嗅探（#69）
+func (c *Ctx) Attachment(path, name string) error                // File + Content-Disposition（非 ASCII 名走 RFC 2231）（#69）
 func (c *Ctx) Status(code int) *Ctx       // 只设置，不立即写头
 func (c *Ctx) SetHeader(k, v string)
+func (c *Ctx) SetCookie(cookie *http.Cookie) // 同名是追加（#69）
 func (c *Ctx) Writer() http.ResponseWriter // 流式：直接写字节（包装器，状态码与体积照常采集）
 func (c *Ctx) Flush() error                // 流式：首刷落 Status() 设置（缺省 200），此后逐段推送；底层不支持 Flusher 时返回明确 error
 ```
 
 **「首刷」= 第一次写出**：`c.Writer().Write`、`c.Flush()`、handler 返回后的引擎收尾——三处里的最先一个落定状态码（吃 `Status()` 的提示、缺省 200）；此后响应头已发出，再调 `Status` 无效。三条路径共用同一实现（`responseWriter.writeHeaderNow`），所以「先写第一段、再 Flush」这条流式 handler 的自然顺序也吃提示（gin 的 `WriteHeaderNow()` 是同一语义）。只让 `Flush` 吃提示是不够的——`Status(201)` 会被第一次 `Write` 的隐式 200 吃掉（review 提出，PR #35）。
+
+**便利 API 的口径（#69）**：`Blob` / `Redirect` / `NoContent` / `File` / `Attachment` / `SetCookie` / `Cookie` / `Context()` 八个方法是标准库的薄壳，不新造语义。三条显式约定：
+
+- **写出方法一律返回 `error`**——与 `Text` / `JSON` / `HTML` 同形，于是 `return c.Redirect(302, "/x")` 这类收尾写法在**全部**写出方法上成立。其中只有 `Blob` 真会出错；`Redirect` / `NoContent` / `File` / `Attachment` 走的是标准库那条不回报写出结果的路径，返回值恒为 nil。
+- **`Redirect` 与 `NoContent` 在「何时落码」上相反**：`Redirect` 当场把响应头发出去（此后 `return` 的 error 不被错误映射接管）；`NoContent(code)` ≡ `Status(code)`，只设置、不落码，错误映射照常。两者都遵守既有首刷规则：落码之后不再改变。
+  `NoContent` 存在的理由**不是**这层语义（它俩的响应逐字节相同，`TestNoContentEqualsStatusPlusReturnNil` 连响应头都逐项钉着），而是**调用形态**：`Status` 返回 `*Ctx`——它是「设置状态码」这个中间动作，后面通常还要写 body，于是空响应收尾得写 `c.Status(204); return nil` 两行；`NoContent` 把它压成 `return c.NoContent(204)` 一行，与 `Text` / `JSON` / `Blob` 的收尾形状对齐。
+- **`File` / `Attachment` 的失败不经错误映射**：文件缺失由 `http.ServeFile` 自己写 404（纯文本错误页），观测记录里也没有错误属性。要统一错误面就自己先 `os.Stat` 再返回 `web.NotFound`——这是「薄」的代价，写进 godoc 与站点指南，不替调用方兜底。
 
 类型约束：`Key[T]` 与 `kernel.ServiceKey[T]` 是不同类型，误用编译期报错——命名是第一道防线，类型是第二道。
 
