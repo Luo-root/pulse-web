@@ -14,7 +14,7 @@ app.GET("/users/{id}", func(c *web.Ctx) error {
 })
 ```
 
-`c.Query(name)` returns the first value only; for multiple values or nested structures use binding below.
+`c.Query(name)` returns the first value only; for multiple values or nested structures use binding below. **When one request needs several parameters, call it once and keep the values in local variables** — every call re-parses the query string, and the framework deliberately does not cache it for you (calling once is the simplest fix).
 
 ## Binding a body: `Bind`
 

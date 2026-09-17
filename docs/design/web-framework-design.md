@@ -713,6 +713,8 @@ PULSE | 2026/09/14 - 08:30:00 | 200 |   585.1µs | 192.0.2.1:1234  | GET     /us
 
 B3 是历史兼容路径：单头 `X-B3-TraceId` 里**没有** span-id，因此走这条路的请求只有 trace-id、没有 parent——它不是 W3C 的等价物，span 出口拿到的是 root span。
 
+**自生成 trace-id 的随机源不换（[#78](https://github.com/Luo-root/pulse-web/issues/78) 的实测结论）。** 曾建议换成更快的源，量下来三条实现（`go test -run '^$' -bench BenchmarkGenerateTraceID -benchtime=20000x -count=5 .`，同轮、32 P）：`crypto/rand + hex.EncodeToString`（现状）**91.5 ns / 32 B / 1 alloc**、`crypto/rand + 手写 nibble` 85.7 ns / 32 B / 1 alloc、`math/rand/v2 + 手写 nibble` 30.6 ns / 32 B / 1 alloc。三条**分配计数完全相同**——那一次分配是返回的字符串本身，`hex.EncodeToString` 的中间 buffer 被编译器证明留在栈上，手写 hex 也省不出来；而对照同轮的默认请求路径（1869 ns / 22 allocs），换源只能省约 61 ns（**3.3%**）却要放弃「不可预测」——那是 W3C 对 random-trace-id 的语义要求，`math/rand/v2` 明文不用于安全用途。结论：**不换**。三条实现都留在 `traceid_bench_test.go`（含被否掉的那条），下次有人再提这条建议时先看那张表。
+
 **出站是两个响应头，别混**（[#76](https://github.com/Luo-root/pulse-web/issues/76)）：
 
 | 头 | 形态 | 什么时候写 |
