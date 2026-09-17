@@ -461,20 +461,26 @@ func ctxFromRequest(r *http.Request) *Ctx {
 	return c
 }
 
-// ServeHTTP 实现 http.Handler。
-//
-// 执行顺序（关键时序）：
-//
-//	中间件链 → handler 返回
-//	  → scope.Dispose()       业务态结束（请求级 Effect 立即回收，先于写响应）
-//	  → 错误映射 + 写响应      网络态
-//	  → AccessLog 落盘
+// ServeHTTP 实现 http.Handler；装配与收尾见 withCtx。
 func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	e.withCtx(w, r, func(c *Ctx) {
+		e.mux.ServeHTTP(c.w, c.r)
+	})
+}
+
+// begin 是**请求级装配的唯一实现**：派生请求作用域、造 Ctx、解析链路身份、挂请求级
+// collector、把 Ctx 注入 context。返回的 end 负责收尾（dispose scope + 写访问日志）。
+//
+// ServeHTTP 与测试入口（#63）都从它出发——「构造出来的 Ctx 与真路径同构」因此不是靠
+// 纪律维持的，而是结构上只有这一处装配代码。
+//
+// kernel 已销毁（进程关闭中）时返回 nil，此时 503 已经写到 w。
+func (e *Engine) begin(w http.ResponseWriter, r *http.Request) *Ctx {
 	scope, err := e.kernel.Derive()
 	if err != nil {
 		// kernel 已销毁（进程关闭中）
 		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
-		return
+		return nil
 	}
 
 	rw := &responseWriter{ResponseWriter: w}
@@ -548,28 +554,51 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 换成同一个 request（ServeMux 只是把 Pattern 写在它上面）。
 	c.r = req
 
+	return c
+}
+
+// end 与 begin 配对收尾。**是方法不是闭包**——闭包每次请求都会逃逸到堆，正好撞上
+// 分配预算门禁（实测：返回闭包的版本让七个档位各 +1 alloc）。
+func (e *Engine) end(c *Ctx) {
+	c.scope.Dispose()
+	e.finish(c, c.w)
+}
+
+// withCtx 在装配之上负责**执行与收尾**：请求体闸门 → call → recover → end。
+//
+// 执行顺序（关键时序）：
+//
+//	中间件链 → handler 返回
+//	  → scope.Dispose()       业务态结束（请求级 Effect 立即回收，先于写响应）
+//	  → 错误映射 + 写响应      网络态
+//	  → AccessLog 落盘
+func (e *Engine) withCtx(w http.ResponseWriter, r *http.Request, call func(*Ctx)) {
+	c := e.begin(w, r)
+	if c == nil {
+		return
+	}
+
 	defer func() {
 		if p := recover(); p != nil {
 			c.setErr(&PanicError{Value: p, Stack: debug.Stack()})
 		}
-		scope.Dispose()
-		e.finish(c, rw)
+		e.end(c)
 	}()
 
 	// 请求体上限（WithMaxBodyBytes）：与路由级 BodyLimit 共用 limitBody ——
 	// 声明即超限则快速失败（不读 body），否则由读取闸门兜底。传的是这里拿到的
 	// **原始 writer**（理由见 limitBody 的 godoc）。
 	//
-	// 注意传 req（WithContext 的浅拷贝）而不是 r：body 要装在 ServeMux 收到的
+	// 注意传 c.r（WithContext 的浅拷贝）而不是 r：body 要装在 ServeMux 收到的
 	// 那个 request 上。
 	if e.maxBodyBytes > 0 {
-		if err := limitBody(w, req, e.maxBodyBytes); err != nil {
+		if err := limitBody(w, c.r, e.maxBodyBytes); err != nil {
 			c.setErr(err)
 			return
 		}
 	}
 
-	e.mux.ServeHTTP(rw, req)
+	call(c)
 }
 
 // finish 是 Engine 层收尾：错误映射 → 兜底写响应 → 访问日志。
