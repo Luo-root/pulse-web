@@ -14,7 +14,8 @@ import (
 	"github.com/Luo-root/pulse/observability"
 )
 
-// 本文件覆盖 console_sink.go——默认出口的行版式、错误可见性与 flush 契约。
+// 本文件覆盖 console_sink.go：默认出口的行版式、错误可见性，以及框架关闭时对出口的 flush 调用。
+// 边界：出口怎么选、AsyncSink 的组合语义属上游 observability，这里只测框架侧怎么用它们。
 
 var consoleTestTime = time.Date(2026, 9, 14, 8, 30, 0, 0, time.UTC)
 

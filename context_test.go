@@ -18,7 +18,9 @@ import (
 	"github.com/Luo-root/pulse/observability"
 )
 
-// 本文件覆盖 context.go：Ctx 的便利 API（Cookie / Redirect / Blob / NoContent / File …）与响应写出时序（首刷落码、Flush、Flusher 能力）。
+// 本文件覆盖 context.go：Ctx 的便利 API（Cookie / Redirect / Blob / NoContent / File …）
+// 与响应写出时序（首刷落码、Flush、Flusher 能力）。
+// 边界：错误到状态码的映射归 engine_test.go，请求体绑定归 bind_test.go。
 
 // 便利 API 的覆盖（#69）：每个方法都要过一遍既有契约——首刷锁定状态码、
 // 已落码之后不覆盖、未落码时错误映射照常接管。

@@ -11,7 +11,8 @@ import (
 	"github.com/Luo-root/pulse/observability"
 )
 
-// 本文件覆盖 observe.go（链路身份的产生与入站解析）与它的基准测试。
+// 本文件覆盖 observe.go：trace-id 的产生与入站链路头的解析（含基准测试）。
+// 边界：span 身份与两个响应头的分工归 span_test.go。
 
 func findRecord(sink *observability.MemorySink, event string) (observability.Record, bool) {
 	for _, r := range sink.Snapshot() {

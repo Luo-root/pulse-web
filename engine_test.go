@@ -17,7 +17,10 @@ import (
 	"github.com/Luo-root/pulse/observability"
 )
 
-// 本文件覆盖 Engine 的面：路由 / 中间件编排 / 错误映射 / 静态 / 生命周期，以及 Collector 选项与注册表、KV、服务查找、错误构造器这层公开面。
+// 本文件覆盖 Engine 的面：路由与分组、错误映射、静态、生命周期，以及 Collector 选项、
+// 注册表 / KV / 服务查找 / 错误构造器这层公开面。
+// 边界：中间件的编排与隔离归 middleware_test.go，Serve / Run 的关闭链路归 serve_test.go，
+// 请求体闸门归 bodylimit_test.go，响应写出时序（首刷落码 / Flush）归 context_test.go。
 
 func newTestEngine(t *testing.T, opts ...Option) (*Engine, *observability.MemorySink) {
 	t.Helper()

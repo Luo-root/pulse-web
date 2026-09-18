@@ -11,6 +11,7 @@ import (
 
 // 本文件覆盖 span.go：span 身份的来源（hook 与入站 traceparent）、两个响应头的分工，
 // 以及 Detach 出来的后台任务带走什么。
+// 边界：没挂 span hook 时的 trace-id 产生与入站解析归 observe_test.go。
 
 // testSpanID 是测试 hook 分配的 span-id（真实适配层用 SDK 分配的，这里固定值
 // 便于断言「框架用的是 hook 给的 id」）。

@@ -14,7 +14,9 @@ import (
 	"github.com/Luo-root/pulse/observability"
 )
 
-// 本文件覆盖 Serve / Run 的关闭链路：信号 → drain → OnShutdown → Dispose → flush，以及 ServerConfig 的合并与透传。
+// 本文件覆盖 Serve / Run 的关闭链路：信号 → drain → OnShutdown → Dispose → flush，
+// 以及 ServerConfig 的合并与透传。
+// 边界：请求级装配归 engine_test.go，退出时对出口的 flush 细节归 console_sink_test.go。
 
 // 生命周期入口的覆盖：`Engine.Run` / `Engine.Serve` / `Engine.serve`。
 //

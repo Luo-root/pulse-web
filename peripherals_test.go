@@ -15,6 +15,7 @@ import (
 
 // 本文件覆盖外围面：Detach 值袋子（detach.go）、模板封装（templates.go）、装配诊断端点（debug.go），
 // 以及入站链路头的信任开关。
+// 边界：Detach 带走的 span 身份归 span_test.go，测试入口那侧归 testing_test.go。
 
 // assertLoudError 断言框架给出的是**明确映射过的错误响应**，而不是静默空响应。
 //
