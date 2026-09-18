@@ -12,6 +12,9 @@ import (
 	"testing"
 )
 
+// 本文件覆盖 bind.go：Content-Type 分派、form / query 映射，以及绑定路径上的上限与错误。
+// 边界：闸门本身（路由 / 分组 BodyLimit、超限后的连接处理）归 bodylimit_test.go。
+
 // bindReq 发一个带 Content-Type 的请求；不走 doReq 是因为部分用例要改
 // ContentLength（预检路径）。
 func bindReq(e *Engine, method, target, contentType string, body io.Reader) *httptest.ResponseRecorder {

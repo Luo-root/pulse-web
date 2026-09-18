@@ -1,21 +1,15 @@
 package web
 
-// 中间件链的**层叠顺序 / 短路 / 隔离**（#40）。
-//
-// 中间件是最容易「看起来对」的一块：层叠顺序错了会静默改变鉴权与观测的作用范围；
-// 隔离漏了会让某个分组的中间件串到别的分组与根路由上。本文件把三类语义各钉一条用例，
-// 断言一律用**完整序列**（got == want）——缺陷的典型形态是「多跑了一个中间件」，
-// `strings.Contains` 形式的弱断言抓不到多出来的那一项。
-//
-// 已有覆盖，这里不重复：TestGroupAndMiddlewareOrder（分组 1 个 + 路由 1 个）、
-// TestMiddlewareShortCircuit（最外层短路）、regression_test.go（静态资源走中间件链）、
-// stdlib_interop_test.go（stdlib 中间件包在外层）。
-
 import (
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// 本文件覆盖中间件的编排与隔离：跨层顺序、短路、分组前缀，以及与 Static 的交互。
+// 边界：单个中间件自己的语义（例如闸门的边界值）归它自己的文件（bodylimit_test.go）。
 
 // traceMW 是记录器中间件：进入记 name+"+"，回程记 name+"-"。
 // 记的是「谁跑过 + 怎么走的」，所以既能断言顺序，也能断言某个中间件压根没跑。
@@ -181,4 +175,48 @@ func TestGroupPrefixIsNotSubstringMatch(t *testing.T) {
 	log = log[:0]
 	doOK(t, e, "/apiv2/users")
 	assertTrace(t, "/apiv2 与 /api 只是共同前缀，不属于该分组", log, "h")
+}
+
+// TestStaticRunsThroughMiddleware 回归：静态资源必须经过全局中间件链。
+func TestStaticRunsThroughMiddleware(t *testing.T) {
+	e, _ := newTestEngine(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hi"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var hit bool
+	e.Use(func(c *Ctx, next Handler) error {
+		hit = true
+		return next(c)
+	})
+	e.Static("/files", dir)
+
+	rec := doReq(e, "GET", "/files/a.txt", nil)
+	if rec.Code != http.StatusOK || rec.Body.String() != "hi" {
+		t.Fatalf("got %d %q", rec.Code, rec.Body.String())
+	}
+	if !hit {
+		t.Fatal("static resource bypassed the middleware chain")
+	}
+}
+
+// TestGroupMiddlewareAppliesToStatic 分组中间件同样覆盖静态资源。
+func TestGroupMiddlewareAppliesToStatic(t *testing.T) {
+	e, _ := newTestEngine(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "b.txt"), []byte("yo"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var hit bool
+	g := e.Group("/api", func(c *Ctx, next Handler) error { hit = true; return next(c) })
+	g.Static("/assets", dir)
+
+	if rec := doReq(e, "GET", "/api/assets/b.txt", nil); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if !hit {
+		t.Fatal("group middleware skipped for static resource")
+	}
 }
