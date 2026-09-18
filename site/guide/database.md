@@ -101,11 +101,18 @@ func createOrder(c *web.Ctx) error {
 
 `kernel.Local()` 保证三件事：绑定只在本请求**子树**可见（父与兄弟读不到）、随 scope 销毁自动撤除、同名时遮蔽全局绑定。所以「事务跟着请求走」是作用域事实，不是命名约定。
 
-三条要点：
+四条要点：
 
 1. **回滚责任在中间件**。`defer` 同时兜住 panic 与提前返回；提交之后再 `Rollback` 是 `ErrTxDone`，忽略即可。
 2. **错误继续往上抛**，别在中间件里写响应——状态码由统一错误映射决定。
 3. `BeginTx` **传 `c.Context()`**：它既是取消语义，也是你忘记回滚时唯一的兜底。
+4. **handler 取事务要走同一个键**（`c.MustService(txKey)`）。绕过它直接查池，等于同一个请求里同时要两条连接——池上限紧的时候会自己把自己等死（实测：池上限 1 时那个请求永久等待，栈停在 `DB.conn` 上等连接，而那条连接正被本请求自己的事务握着）。
+
+::: warning 别在流式响应里持有事务
+SSE / 流式响应的 handler 会跑几秒到几分钟，而上面这个中间件**要等 handler 返回才提交**——这期间事务一直握着自己那条连接。实测：池上限 1 时，一条 1.85 秒的流让期间的普通请求排队 **1.45 秒**（等流结束、事务提交，它才拿到连接）。按池上限以上的并发量堆这类流，后面的请求只能排队到 `context deadline exceeded`。
+
+要流式输出，就把事务收在「取数」那一段：**先查完、提交，再开始写流**，别让事务横跨整条响应。
+:::
 
 ### 显式传递
 
@@ -144,6 +151,29 @@ func writeOrder(ctx context.Context, tx *sql.Tx, in orderIn) error { ... }
 | 事务里要读别的中间件放进作用域的东西 | 中间件 + `kernel.Local()`（同 scope 可见） |
 
 两者可以并存：中间件给默认路径，个别端点自己开事务绕开它。
+
+### 同一个键：读写分离与「强制走主库」
+
+上面的例子用两个键（池一个、事务一个）。也可以**只用一个键**——把它声明成接口，装配面绑只读池（副本），事务中间件往同一个键上 `Local()` 绑事务：
+
+```go
+type Querier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+var dbKey = kernel.NewServiceKey[Querier]("app.db")
+
+// 装配面：只读池（副本）——没挂事务的请求永远打到这里
+kernel.Provide[Querier](app.Root(), dbKey, readPool)
+
+// 中间件：事务绑到**同一个键**上，本请求子树读到它（同名遮蔽全局）
+kernel.Provide[Querier](c.Kernel(), dbKey, tx, kernel.Local())
+```
+
+于是「这个请求走主库还是副本」由**有没有挂事务中间件**决定，handler 里始终只有一行 `c.MustService(dbKey)`。实测语义（同一份 PG）：没挂事务的请求读到 `*sql.DB`、挂了的读到 `*sql.Tx`；事务里写的行**本请求内可见**、**提交前别的连接看不到**、提交后可见。
+
+一个语法注意：绑接口键要显式写类型参数 `kernel.Provide[Querier]`——泛型默认从值上推 `T`，`*sql.Tx` 与 `ServiceKey[Querier]` 对不上。
 
 ## 三种栈的最小示例
 
@@ -242,6 +272,10 @@ func listOrders(c *web.Ctx) error {
 ```
 
 ### GORM
+
+::: warning GORM 的池参数只在底层 `*sql.DB` 上设
+`*gorm.DB` 上**没有** `SetMaxOpenConns` / `SetMaxIdleConns` / `SetConnMaxLifetime` 这类方法（实测 v1.31.2：唯一的 `Set*` 是 `SetupJoinTable`），`gorm.Config` 也只提供 `ConnPool` 这一个注入口。所以不拿 `db.DB()` 回来设参时，你用的就是标准库默认池——**`MaxOpenConns` 不限**（实测 `Stats().MaxOpenConnections == 0`）、`MaxIdleConns` 为 2。压测一来就是连接打满数据库，而这**没有任何编译期或运行期提示**：代码看着像配过了，其实没配。
+:::
 
 ```go
 import (

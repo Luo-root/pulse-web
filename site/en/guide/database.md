@@ -101,11 +101,18 @@ func createOrder(c *web.Ctx) error {
 
 `kernel.Local()` gives you three things: the binding is visible only inside this request's **subtree** (parents and siblings cannot read it), it is removed when the scope is disposed, and it shadows a global binding of the same name. So "the transaction follows the request" is a scope-level fact, not a naming convention.
 
-Three points worth keeping:
+Four points worth keeping:
 
 1. **Rollback is the middleware's job.** The `defer` covers both panics and early returns; a `Rollback` after a successful commit is `ErrTxDone`, so ignore it.
 2. **Keep returning the error**, don't write the response from the middleware — the status code is decided by the central error mapper.
 3. `BeginTx` takes **`c.Context()`**: that gives you cancellation, and it is the only safety net when you forget to roll back.
+4. **Read the transaction through the same key** (`c.MustService(txKey)`). Reaching past it to the pool means one request wants two connections at once — and with a tight pool ceiling it waits on itself forever (measured: with `MaxOpenConns(1)` that request never returned; the stack sat in `DB.conn` waiting for a connection that this very request's transaction was holding).
+
+::: warning Do not hold a transaction across a streaming response
+An SSE / streaming handler runs for seconds to minutes, and this middleware **commits only after the handler returns** — so the transaction holds its connection the whole time. Measured: with a pool ceiling of 1, a 1.85 s stream made a normal request queue for **1.45 s** (it only got the connection once the stream ended and the transaction committed). Pile those streams up past the pool ceiling and everything behind them queues until `context deadline exceeded`.
+
+If you stream, keep the transaction inside the data-fetching part: **query, commit, then start writing the stream** — do not let a transaction span the whole response.
+:::
 
 ### Passing it explicitly
 
@@ -144,6 +151,29 @@ The upside: "this path uses a transaction" is visible in the signature and you c
 | The transaction needs something another middleware put in the scope | Middleware plus `kernel.Local()` (same scope, visible) |
 
 Both can coexist: the middleware covers the default path, and an individual endpoint can open its own transaction to step around it.
+
+### Same key: read/write splitting, forcing the primary
+
+The examples above use two keys (one for the pool, one for the transaction). You can also use **a single key** — declare it as an interface, bind the read-only pool (a replica) on the assembly surface, and have the transaction middleware bind the transaction to that same key with `Local()`:
+
+```go
+type Querier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+var dbKey = kernel.NewServiceKey[Querier]("app.db")
+
+// assembly surface: the read-only pool (a replica) — requests without a transaction always land here
+kernel.Provide[Querier](app.Root(), dbKey, readPool)
+
+// the middleware: bind the transaction to the **same key**; this request's subtree reads it (shadowing the global)
+kernel.Provide[Querier](c.Kernel(), dbKey, tx, kernel.Local())
+```
+
+Now "does this request go to the primary or the replica" is decided by **whether the transaction middleware is attached**, while a handler still has exactly one line, `c.MustService(dbKey)`. Measured semantics (same PG instance): a request without the middleware reads `*sql.DB`, one with it reads `*sql.Tx`; a row written inside the transaction is **visible to that request**, **invisible to other connections before the commit**, and visible after it.
+
+One syntactic note: an interface key needs its type argument spelled out, `kernel.Provide[Querier]` — inference takes `T` from the value, and `*sql.Tx` does not match `ServiceKey[Querier]`.
 
 ## Minimal examples for three stacks
 
@@ -242,6 +272,10 @@ func listOrders(c *web.Ctx) error {
 ```
 
 ### GORM
+
+::: warning GORM pool settings live on the underlying `*sql.DB`
+`*gorm.DB` has **no** `SetMaxOpenConns` / `SetMaxIdleConns` / `SetConnMaxLifetime` (measured on v1.31.2: the only `Set*` is `SetupJoinTable`), and `gorm.Config` offers just one injection point, `ConnPool`. So unless you take `db.DB()` and configure that, you are on the standard library's default pool — **unlimited `MaxOpenConns`** (measured: `Stats().MaxOpenConnections == 0`) with `MaxIdleConns` 2. The first load test fills the database's connection limit, and there is **no compile-time or runtime hint**: the code looks configured, but nothing was configured.
+:::
 
 ```go
 import (
