@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -21,7 +22,7 @@ import (
 // 两份副本必然有漂的风险。能自动化的部分是**结构与规格**，不是措辞——比措辞的守卫
 // 会因为翻译腔天天误报。
 //
-// 受守卫的五条约定：
+// 受守卫的六条约定：
 //
 //  1. 两版**页集相同**，逐页**结构等价**（frontmatter 键、列表项数、标题数、代码块语言数、
 //     引用目标集合）。漏译一页、少写一节、示例只加一边，都会在这里响。
@@ -32,6 +33,8 @@ import (
 //  4. `base` 与仓库名一致，且两语言都声明、英文版挂在 `/en/` 下（语言切换双向可达的地基）。
 //  5. **对外 API 都有落点**：源码里的每个导出符号都要在站点页面里出现过——符号直接从
 //     源码抽，不维护第二份清单（清单一定会过期）。
+//  6. **根相对链接都带上 `base`**：裸 HTML 的 `href="/…"` 不经过 markdown 渲染器，
+//     产物里也不会被补上项目页前缀——线上就是一条 404。
 //
 // 每条都给了变异探针（见各自注释）：改一处必须让对应用例红。
 
@@ -351,24 +354,26 @@ func TestSiteInternalLinksResolve(t *testing.T) {
 		}
 	}
 
+	// 绑定写法（`:href="withBase('/…')"`）要还原成裸路径才进得了这个判据面：
+	// `htmlLinkRe` 捕获的是整段 `withBase(…)`，不还原会以「不是根相对链接」之名被
+	// 静默跳过——实测首页两版共 20 条链接消失，而当时没有任何用例会红。
+	// 这条断言钉的就是那个接缝（见 `unwrapWithBase`）。
+	if targets := siteLinkTargets(readDocFile(t, path.Join(siteRootPath, "index.md"))); !slices.Contains(targets, "/guide/getting-started") {
+		t.Errorf("首页的绑定链接没进判据面——`unwrapWithBase` 失效了？")
+	}
+
 	if checked < 6 {
 		t.Fatalf("只核了 %d 条站内链接——守卫可能失效，不是通过", checked)
 	}
 	t.Logf("站内链接 %d 条全部可达", checked)
 }
 
-// siteLinkTargets 抽出一页里**所有可达的链接目标**，两个来源：
+// siteContentLines 逐行遍历一页正文，**跳过代码围栏内**的内容——围栏里是示例文本，
+// 里面的链接形状不代表站点自己的引用。
 //
-//  1. 正文的 Markdown 链接与 HTML 的 `href` / `src`（代码围栏内不算——那是示例文本）
-//  2. frontmatter 的 `link:`——**首页 hero 按钮就在这儿**，它是 YAML 不是 Markdown，
-//     只扫正文的正则看不到它。早先的版本漏了这一来源，探针因此报 MISSED
-//     （把英文版 hero 的 `/en/guide/x` 改成 `/guide/x` 无人察觉）。
-//
-// **外部 URL 也收**：两版对同一条外部引用（设计文档 / README）必须一致，只收内链的话
-// 「某一版把设计文档链接改旧了」会溜过去——与 README 守卫收绝对 URL 是同一条理由。
-// 锚点不收（两版标题本来就不同）；需要只看内链的调用方自己按前缀过滤。
-func siteLinkTargets(src string) []string {
-	var out []string
+// 抽出来共用：`siteLinkTargets` 与按行扫属性的守卫都走它。两处各写一遍遍历，
+// 迟早会出现「一处跳过围栏、另一处没跳」这种漂移（与 `walkSitePages` 同一条理由）。
+func siteContentLines(src string, fn func(line string)) {
 	inFence := false
 	for _, line := range strings.Split(src, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "```") {
@@ -378,6 +383,25 @@ func siteLinkTargets(src string) []string {
 		if inFence {
 			continue
 		}
+		fn(line)
+	}
+}
+
+// siteLinkTargets 抽出一页里**所有可达的链接目标**，两个来源：
+//
+//  1. 正文的 Markdown 链接、HTML 的 `href` / `src`，以及绑定写法
+//     `:href="withBase('/…')"`（落地页的按钮，见 `unwrapWithBase`）——代码围栏内不算，
+//     那是示例文本
+//  2. frontmatter 的 `link:`——**首页 hero 按钮就在这儿**，它是 YAML 不是 Markdown，
+//     只扫正文的正则看不到它。早先的版本漏了这一来源，探针因此报 MISSED
+//     （把英文版 hero 的 `/en/guide/x` 改成 `/guide/x` 无人察觉）。
+//
+// **外部 URL 也收**：两版对同一条外部引用（设计文档 / README）必须一致，只收内链的话
+// 「某一版把设计文档链接改旧了」会溜过去——与 README 守卫收绝对 URL 是同一条理由。
+// 锚点不收（两版标题本来就不同）；需要只看内链的调用方自己按前缀过滤。
+func siteLinkTargets(src string) []string {
+	var out []string
+	siteContentLines(src, func(line string) {
 		if m := frontLinkRe.FindStringSubmatch(line); m != nil {
 			if target := strings.Trim(m[1], `"'`); !strings.HasPrefix(target, "#") {
 				out = append(out, target)
@@ -385,13 +409,110 @@ func siteLinkTargets(src string) []string {
 		}
 		for _, re := range []*regexp.Regexp{linkRe, htmlLinkRe} {
 			for _, m := range re.FindAllStringSubmatch(line, -1) {
-				if target := m[1]; !strings.HasPrefix(target, "#") {
+				if target := unwrapWithBase(m[1]); !strings.HasPrefix(target, "#") {
 					out = append(out, target)
 				}
 			}
 		}
-	}
+	})
 	return out
+}
+
+// withBaseCall 是绑定写法的正则体：`withBase('/guide/x')` 的调用部分。
+//
+// 两处共用同一份正则：抽链接时它被 `htmlLinkRe` 连属性一起捕获（属性文本里含 `href="`），
+// 需要靠 `unwrapWithBase` 还原；计数时直接匹配带 `:href="` 前缀的完整属性。
+const withBaseCall = `withBase\('([^']*)'\)`
+
+var (
+	// withBaseCallRe 匹配**整段**就是绑定调用的字符串（`htmlLinkRe` 的捕获结果）。
+	withBaseCallRe = regexp.MustCompile(`^` + withBaseCall + `$`)
+	// boundHrefRe 匹配完整的绑定属性 `:href="withBase('/…')"`。
+	boundHrefRe = regexp.MustCompile(`:href="` + withBaseCall + `"`)
+	// rootHrefRe 匹配**字面量**的根相对锚点（裸 HTML 的 `href="/…"`）。
+	//
+	// 绑定写法不吃这个正则：`:href="withBase('/…')"` 捕获到的值以 `withBase(` 开头、
+	// 不以 `/` 开头——那正是推荐形态，不在本判据面内。
+	rootHrefRe = regexp.MustCompile(`href="(/[^"]*)"`)
+	// confHeadHrefRe 匹配 config.mts 里 head 的 `href: '/…'`（favicon 这类不经主题的 link）。
+	confHeadHrefRe = regexp.MustCompile(`href: '(/[^']*)'`)
+	// siteBaseRe 从 config.mts 里抽出 `base: '/…/'`。
+	siteBaseRe = regexp.MustCompile(`base: '(/[^']*)'`)
+)
+
+// unwrapWithBase 把 `withBase('/guide/x')` 还原成 `/guide/x`，不是这个形状就原样返回。
+//
+// 不还原会有两处**静默**后果：落地页的按钮从「链接可达」的判据面里消失
+// （`withBase(…)` 不以 `/` 开头，被当成外部 URL 跳过），双语结构比对也会因为两版
+// 都拿到同一段调用而看不出差异。
+func unwrapWithBase(target string) string {
+	if m := withBaseCallRe.FindStringSubmatch(target); m != nil {
+		return m[1]
+	}
+	return target
+}
+
+// TestSiteLandingLinksCarryBase 守卫「站点里的根相对链接都带上 base 前缀」。
+//
+// 为什么需要它：**裸 HTML 锚点不吃 VitePress 的 base**。markdown 链接 `[x](/guide/y)`
+// 会被渲染器改写成 `/pulse-web/guide/y`，而 `<a href="/guide/y">` 原样落进产物——
+// 线上真实地址成了 `https://luo-root.github.io/guide/y`（项目页挂在 `/pulse-web/` 下），
+// 整条 404。落地页为了挂 `.pw-btn` / `.pw-link` 这类类名只能写裸 HTML，于是首屏每颗按钮、
+// 每张特性卡的「→」都踩在这个坑上：构建不报错，导航条上的同名链接又好好的（它走主题，
+// base 由主题补）——两个入口一个能点、一个 404。
+//
+// 判据面 = 站点 markdown 正文里的字面量 `href="/…"` + `config.mts` head 的 `href: '/…'`
+// （favicon 走 head，同样不吃 base）。两者都必须以配置里的 `base` 开头；绑定写法
+// `:href="withBase('/…')"` 不在判据面内——它由 base 单一来源推导，是推荐形态。
+//
+// **`src` 不收**，这是实测出来的不对称：构建期会处理资源类属性（`<img src="/logo.svg">`
+// 在产物里就是 `/pulse-web/logo.svg`），但不管锚点。把 `src` 也纳进判据面，等于要求去改
+// 一处今天是对的的代码。
+//
+// 变异探针（两处都要能红）：① 把任意一条 `:href="withBase('/guide/x')"` 改回
+// `href="/guide/x"`；② 把 config.mts 的 favicon 改成 `href: '/favicon.svg'`。
+func TestSiteLandingLinksCarryBase(t *testing.T) {
+	m := siteBaseRe.FindStringSubmatch(readDocFile(t, siteConfPath))
+	if m == nil {
+		t.Fatalf("%s 里没有 `base: '/…/'`——GitHub Pages 是项目页，base 必须声明", siteConfPath)
+	}
+	prefix := m[1]
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+
+	// checked = 判据面里的站内链接总数（字面量 + 绑定），用来证明扫描没空转。
+	var checked, literals int
+	for _, root := range []string{siteRootPath, siteEnPath} {
+		walkSitePages(t, root, func(rel, src string) {
+			page := path.Join(root, rel)
+			siteContentLines(src, func(line string) {
+				for _, href := range rootHrefRe.FindAllStringSubmatch(line, -1) {
+					checked++
+					literals++
+					if !strings.HasPrefix(href[1], prefix) {
+						t.Errorf("%s：`%s` 少了 base 前缀——裸 HTML 锚点不吃 VitePress 的 base，"+
+							"线上会落到 %s。改成 `:href=\"withBase('%s')\"`，或补成 %s%s",
+							page, href[0], href[1], href[1], prefix, strings.TrimPrefix(href[1], "/"))
+					}
+				}
+				checked += len(boundHrefRe.FindAllString(line, -1))
+			})
+		})
+	}
+
+	for _, href := range confHeadHrefRe.FindAllStringSubmatch(readDocFile(t, siteConfPath), -1) {
+		checked++
+		if !strings.HasPrefix(href[1], prefix) {
+			t.Errorf("%s：head 里的 `%s` 少了 base 前缀——head 的 link 不经主题，base 要自己写全",
+				siteConfPath, href[0])
+		}
+	}
+
+	if checked < 10 {
+		t.Fatalf("只核了 %d 条站内链接（其中字面量 %d 条）——判据面可能失效，不是通过", checked, literals)
+	}
+	t.Logf("站内链接 %d 条（字面量 %d 条）全部带 base 前缀 %s", checked, literals, prefix)
 }
 
 // TestSiteWordmarkMatchesBanner 钉住「首页字标与 assets/banner.svg 同规格」。
