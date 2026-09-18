@@ -1,6 +1,6 @@
 # Testing: unit-test handlers without a server
 
-Two entry points let a handler unit test run through **the same assembly and wrap-up as a real request** — the same code (`Engine.begin` + `finish`). So how the status settles, error mapping, the access log and `X-Trace-Id` are all produced the way production produces them.
+Two entry points let a handler unit test run through **the same assembly and wrap-up as a real request** — the same code (`Engine.begin` + `Engine.end`). So how the status settles, error mapping, the access log and `X-Trace-Id` are all produced the way production produces them.
 
 The only thing missing versus the real path is `ServeMux`: route matching, group prefixes and route-level `BodyLimit` do not take part, so path parameters and the route template are yours to fill in.
 
