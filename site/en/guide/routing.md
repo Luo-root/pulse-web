@@ -42,7 +42,7 @@ A group is an **independent view**: middleware registered with `Use` on a group 
 
 ```go
 type Handler func(*Ctx) error
-type Middleware func(Handler) Handler
+type Middleware func(c *Ctx, next Handler) error
 ```
 
 Three places to attach one, outermost first:
@@ -55,13 +55,7 @@ app.GET("/y", h, routeMW)                             // 3. a single route
 
 **Order** is global → group → route, and repeated `Use` calls keep their call order. Returning an error short-circuits the chain; writing a response before `next(c)` does too (later writes hit the "a written response is never overwritten" rule).
 
-stdlib middleware plugs in through `web.Wrap`:
-
-```go
-app.Use(func(next web.Handler) web.Handler {
-    return web.Wrap(myStdlibMiddleware(stdlibHandler(next)))   // or simply: Wrap the whole handler
-})
-```
+`next(c)` means "keep going". Middleware shaped `func(http.Handler) http.Handler` (chi/middleware, rs/cors, promhttp, …) is **not** wired up with `Wrap` — use **`web.Adapt`** to put it inside the onion. Its promises and limits get [their own page](/en/guide/middleware).
 
 ## Request body limits (`BodyLimit`)
 
@@ -96,6 +90,9 @@ Registering `GET /static/{file...}` **covers** the static service (method-qualif
 | Direction | How |
 |---|---|
 | stdlib → framework | `web.Wrap(h http.Handler) web.Handler` |
+| stdlib middleware → framework middleware | `web.Adapt(mw func(http.Handler) http.Handler) web.Middleware` (inside the onion), or wrap the whole thing around `app.Handler()` |
 | framework → stdlib | `app.Handler()` returns an `http.Handler` (or use `app` itself as one) |
 
 After `Wrap` you **cannot reach `*Ctx`** (no `c.Path`, no request-scoped KV, no `c.Observe`), but `PathValue`, the middleware chain, tracing and the access log all still apply. So: if you need `*Ctx` capabilities, write `func(*web.Ctx) error`; reach for `Wrap` only when what you have is "just an http.Handler".
+
+Whether a middleware belongs inside via `Adapt` or outside via `Handler()` is a decision with criteria of its own — see [stdlib middleware](/en/guide/middleware).

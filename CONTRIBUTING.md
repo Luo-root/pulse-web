@@ -116,9 +116,9 @@ is fine there, but nothing that a reviewer needs to see belongs in it.
   the error mapper turns them into a status code and the access log records the same decision.
   Wrap external errors with `web.NotFound` / `web.BadRequest`-style constructors rather than
   reaching for `c.Writer()`.
-- **stdlib interop works in both directions** — `web.Wrap` for stdlib handlers in,
-  `Engine.Handler()` for the engine out. Keep it that way: a change that makes one direction
-  require an adapter is a regression.
+- **stdlib interop has three paths, and all three stay** — `web.Wrap` for stdlib handlers in,
+  `web.Adapt` for stdlib middleware inside the onion, `Engine.Handler()` for the engine out.
+  Keep all three: a change that makes any of them require a hand-rolled adapter is a regression.
 - **The response writer is a deliberately narrow interface.** Only `http.Flusher` is
   promised; `Hijacker` / `Pusher` / `SetWriteDeadline` are not exposed. Widening it is an API
   decision, not a convenience.
@@ -256,8 +256,8 @@ gitignore 暂存区——草稿放那里没问题，但 reviewer 需要看的东
 - **handler 签名是 `func(*Ctx) error`。** 错误靠返回，不手写状态码：错误映射器把 error 变成
   状态码，访问日志记录同一个决定。外部错误用 `web.NotFound` / `web.BadRequest` 这类构造器包一层，
   不要绕到 `c.Writer()` 去写。
-- **stdlib 双向互操作要保持**——进来的用 `web.Wrap`，出去的用 `Engine.Handler()`。让其中一个方向
-  需要额外适配器，就是回归。
+- **stdlib 互操作三条路径都要在**——进来的用 `web.Wrap`，stdlib 中间件进洋葱用 `web.Adapt`，
+  出去的用 `Engine.Handler()`。删掉任一条、或让其中一条需要手写适配器，就是回归。
 - **响应写出器是**有意**收窄的接口。** 只承诺 `http.Flusher`；`Hijacker` / `Pusher` /
   `SetWriteDeadline` 不透出。放宽它是 API 决策，不是顺手便利。
 - **中文注释与中文文档是本仓库常态**；在这些内容旁边改动时，用同一种语言写，不要顺手翻译。

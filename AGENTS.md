@@ -43,7 +43,7 @@ context.go              # Ctx、请求级 KV、响应写出（Writer / Flush / J
 bind.go                 # 请求体 / query 绑定：Content-Type 分派 + form / query 映射器
 errors.go               # HTTPError / StatusCoder / PanicError / 默认 mapper
 observe.go              # TraceID 生成与入站链路头解析（32hex）
-wrap.go                 # stdlib 互操作（Wrap）
+wrap.go                 # stdlib 互操作（Wrap / Adapt）
 detach.go               # Detached 值袋子（跨 goroutine 的安全值）
 templates.go            # html/template 薄封装 + web.H
 console_sink.go         # 默认出口：给人读的列式单行（薄壳 + 版式渲染器）
@@ -71,7 +71,7 @@ docs/design/            # 设计文档（决策与验收清单的事实源）
 - **单包，根目录。** 不放 `internal/`、不放 `cmd/`、不切子包——这是库不是可执行程序，发布的每个符号都是公开 API。
 - **`Ctx` 不得跨 goroutine**（它与请求及其响应写出器绑定）；后台任务用 `c.Detach()`。
 - **handler 签名 `func(*Ctx) error`**，错误靠返回；状态码由错误映射器决定。外部错误用 `web.NotFound` / `web.BadRequest` 这类构造器包，不要绕到 `c.Writer()` 手写。
-- **stdlib 双向互操作要保持**：入用 `web.Wrap`，出用 `Engine.Handler()`。
+- **stdlib 互操作三条路径都要在**：入用 `web.Wrap`，stdlib 中间件进洋葱用 `web.Adapt`，出用 `Engine.Handler()`。删掉任一条、或让其中一条需要手写适配器，都是回归。
 - **响应写出器只承诺 `http.Flusher`**；`Hijacker` / `Pusher` / `FlushError` / `SetWriteDeadline` 不透出。放宽它是 API 决策。
 - **可配置处一律 functional options**（`WithSink` / `WithMaxBodyBytes` …）。
 - **不允许逃生舱**：不加 `map[string]any` 式的「额外参数」，不做 vendor 特判，不留无类型属性袋子。
