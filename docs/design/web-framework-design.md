@@ -438,11 +438,26 @@ app.POST("/api/export", h, web.BodyLimit(1<<20))                 // 单条路由
 
 ```go
 type Handler func(*Ctx) error
-func Wrap(h http.Handler) Handler   // stdlib → 框架
+func Wrap(h http.Handler) Handler                            // stdlib handler → 框架 handler
+func Adapt(mw func(http.Handler) http.Handler) Middleware    // stdlib 中间件 → 框架中间件（洋葱内）
 ```
 
 - `Wrap` 后的 handler **无法访问** `*Ctx`（`c.Path` / 请求级 KV / `c.Observe`），但可用 **`r.PathValue("id")`**（与 `c.Path` 同源，ServeMux 写入的同一份）；中间件链照常经过它
 - panic 由 Engine 兜底接（见下）；响应已写出则只记录不重写
+
+#### `Adapt`：为什么要有第三条路
+
+外包 `Handler()`（今天就能用）够不到框架的请求作用域：读不到路由模板 `r.Pattern`，短路的请求框架完全不知情（无访问日志、无 span）。手写适配器（十几行公开 API）则**静默失真**，两条已知失效都是实测：包 ResponseWriter 抓状态码恒为 0（promhttp 计数器全标 `code="0"`）；改写 body 的中间件被绕开（`Content-Encoding: gzip` 配明文 body，客户端报 `gzip: invalid header`）。生态矩阵（chi 8 项 + promhttp + rs/cors，端到端逐项比对）见站点「stdlib 中间件接入」页。
+
+**承诺三条**（都可观测）：① 中间件包 writer 时抓到真实状态码与字节数；② 中间件短路写响应时，状态码与字节数记回采集层；③ 中间件换掉的 request 传得下去。能力面只到 `http.Flusher`，且**不虚报**——底层不能 Flush 时代理**不带** Flush 方法，`Ctx.Flush()` 照旧返回明确 error。
+
+**实现三条**（都是实测撞出来的，不是洁癖）：① 交给中间件的是**调用时**的 `c.w.ResponseWriter`（不是「最底层那一个」），两层 `Adapt` 因此自然叠序；② 还原 `c.w.ResponseWriter` / `c.r` **必须走 defer**——顺序语句会被 panic 跳过，框架收尾写进中间件已收尾的 writer，后果是 **500 整个丢掉、客户端拿到 200 空响应**；③ 短路回填是**累加**（`c.w.bytes += proxy.bytes`），状态码只在**框架侧尚未落定**时取中间件的——外层已写过响应时不能被覆盖。
+
+**明确不做五条**：不搬动路由（预检 `OPTIONS` 到不了中间件，只注册 `GET /api` 时 ServeMux 直接 405 `Allow: GET, HEAD`）→ CORS 类必须外包；不解决「收尾型中间件 × error/panic」（框架错误映射发生在中间件返回**之后**）→ 压缩类推外包；不透出 `http.Hijacker`（能力承诺只到 `Flusher`）；不保证「同形状就能接」（chi `CleanPath` 读 `chi.RouteContext`，经 `Adapt` 与外包**都 panic**）；不改中间件语义（panic 谁接、错误响应体长什么样仍归中间件）。
+
+**传值**：中间件与 handler 之间走 request context，框架**不导出 `Ctx` 取用口**——那会把「`Ctx` 放在 request context 里」这个实现细节升格成契约；洋葱内中间件需要的路由模板本来就在 request 上（`r.Pattern`），不需要新口子。
+
+**`Adapt(nil)` 装配期 panic**（同 `NewConsoleSink(nil)` 的先例）：nil 中间件是编程错误，装配期暴露胜过每个请求 nil-deref 成 500。
 
 ### HTML 模板
 
