@@ -875,6 +875,8 @@ mark 的走势**直接沿用 pulse**（平段 → 上升 → 峰值 → 深谷 �
 
 **站点首页不用默认主题的 `hero:` / `features:` 模板**：那套是「大标题 + 卡片 + 阴影」，与本站的版式口径（中性面为底、一条 hairline 分栏、mono 编号）不是一路。落地页改成 `layout: page` + 自绘标记（mark 与字标锁定、规格条、能力面 hairline 网格、默认输出终端块、入口宫格），颜色全部走 VitePress 主题变量。`site_test.go` 把字标规格做成断言（字体栈 / 字号 / 字重逐字等于 `assets/banner.svg` 里的 `<text>`），「改了图没改站点」会先红。banner 里的 mark 与 `assets/logo.svg` 是**同一份几何**（同坐标、同圆角，只是内联并缩放到 1.3——测试会逐项比对）。
 
+**落地页的站内链接一律走 `:href="withBase('/…')"`**：裸 HTML 锚点**不吃** VitePress 的 `base`——markdown 链接 `[x](/guide/y)` 会被渲染器补成 `/pulse-web/guide/y`，而 `<a href="/guide/y">` 原样落进产物，线上就落到 `https://luo-root.github.io/guide/y`（项目页挂在 `/pulse-web/` 下），整条 404。落地页为了挂 `.pw-btn` / `.pw-link` 只能写裸 HTML，所以这条是它的实现约束、不是风格偏好；`site_test.go` 的 `TestSiteLandingLinksCarryBase` 守着它——连同 `config.mts` head 里的 `href: '/pulse-web/favicon.svg'`（head 的 link 同样不经主题，base 要自己写全；`src` 不在此列，构建期会处理资源类属性）。这类缺陷上游一个都不报：构建成功、导航条上的同名链接又是好的，只有首屏那几颗按钮 404——只能靠断言拦。
+
 **favicon**（`assets/favicon.svg`）：48 单位画布缩到 16px 只剩 1/3，9 根柱每根 1 像素宽、缝 0.4 像素，抗锯齿会把墨摊薄（笔画发灰、缝半填）——形状仍读得出，但对比度掉一截，且不同渲染器/DPI 的降采样策略不一致。故降到 **5 根柱、柱宽 6**（同尺寸下柱心实黑）、保留峰与谷两个关键柱；颜色同 logo 写死明暗两档（favicon 不继承宿主 CSS）。**两份文件不是冗余**：一个是 96px+ 的宿主可控色 mark，一个是 16px 的独立自足图标，各解各的尺寸。
 
 **同步面**：README 顶部引用 `assets/banner.svg`（mark + 字标一体）；站点那一轮从 `assets/` 复制到 `site/public/`（favicon 与 social preview 同源），**不在两处各维护一份**。改图后以 `assets/logo.svg` 为准回改本节参数表——`assets_test.go` 会逐项比对（表 ↔ 坐标、banner 里的 mark ↔ logo、favicon 的简化规则、README 相对路径可达），漂移时测试先响，不靠人工比对。
