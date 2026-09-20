@@ -56,6 +56,7 @@ bench/                  # 性能回归基线 + 分配预算门禁；muxprobe/ �
 loadtest/               # 与 gin 的真实负载对比（**独立 module**，带 gin 依赖；根 module 的 ./... 不过 module 边界）
 otel/                   # 官方 OTel 适配（**独立 module**，带 otel-go 依赖；主模块只产出结构化 span 数据）
 interop/                # 生态互操作对照（**独立 module**，带 websocket / CORS / chi 等真依赖；站点上公布的兼容结论由它守着）
+                        #   middleware_test.go = 中间件对照矩阵（同一条路由两个挂载点比三个面）；websocket_test.go = 升级端到端
 docs/design/            # 设计文档（决策与验收清单的事实源）
 .github/workflows/ci.yml
 ```

@@ -10,12 +10,15 @@ For writing your own middleware (`func(*Ctx, Handler) error`) and attaching it, 
 
 | | Hand-rolled adapter (a dozen lines of public API) | Wrap outside `Handler()` | `Adapt` (inside the onion) |
 |---|---|---|---|
-| Middleware wraps the writer to read the status | ❌ always 0 | ✅ | ✅ |
-| Middleware rewrites the body (gzip) | ❌ corrupt response | ✅ | ✅ |
+| Middleware wraps the writer to read the status | ❌ always 0 | ✅ | ✅ sees what the handler wrote; sees 0 on the framework-mapped error/panic path (below) |
+| Middleware rewrites the body (gzip) | ❌ corrupt response | ✅ | ✅ on the normal path; degrades on error/panic (below) |
 | Middleware short-circuits | ❌ access log says "no response written" | ⚠️ framework never learns (no log, no span) | ✅ recorded back |
 | Middleware replaces the request | ❌ handler never sees it | ✅ | ✅ |
 | Read the route template `r.Pattern` | ❌ | ❌ routing hasn't run yet | ✅ |
 | Intercept preflight / run before routing | ❌ | ✅ | ❌ |
+| Requests that match no route (real 404, trailing slash) | — | ✅ middleware sees them | ❌ never reaches the onion |
+
+The parenthetical notes after the first two ✅s are the price of the same ordering on the **error path**, spelled out in "What it does not do" item 2. On the normal path (the handler writes its own response) those three columns hold without qualification.
 
 The first column is **silent corruption** — the worst kind: it looks like it works, while counters report `code="0"` and gzip responses make clients fail with `gzip: invalid header`.
 
@@ -47,7 +50,10 @@ Plus: the writer handed to middleware supports `http.Flusher` and `http.Hijacker
 ## What it does not do
 
 1. **It does not move routing.** Route matching still happens before middleware, so a preflight `OPTIONS` never reaches it — register only `GET /api` and ServeMux answers 405 (`Allow: GET, HEAD`) directly. **CORS that must intercept preflight has to be wrapped outside**, or you register an explicit `OPTIONS` route.
-2. **It does not solve "finalizing middleware × error/panic".** The framework's error mapping happens **after** middleware returns, so middleware that unconditionally writes once next returns (e.g. gzip with its own `defer zw.Close()`) locks the status at 200. **Compression is pushed outside by default.**
+2. **It does not solve "finalizing middleware × error/panic".** The framework's error mapping happens **after** middleware returns, and that single ordering has consequences in two directions:
+   - **On the response**: middleware that unconditionally writes once next returns (e.g. gzip with its own `defer zw.Close()`) locks the status at 200. **Compression is pushed outside by default.**
+   - **On observability**: the middleware's own finalizer reads **0** — `chi Logger` records `0 / 0B` on routes that return an error or panic, and a `promhttp` counter files a 404 under `code="200"` (`sanitizeCode(0)`), or records nothing at all for a panic. To log or measure the **real** response, use the framework's own access log and traces.
+   - And one more square, in the other direction: when middleware writes the response **around** next (a `Recoverer` answering a panic with 500), the framework records its own default 200 while the client received the middleware's 500 — a known defect ([#96](https://github.com/Luo-root/pulse-web/issues/96)), pinned as-is by the matrix.
 3. **It does not expose `http.Pusher` or `FlushError`.** The response writer's capability surface is an explicit short list (`Flush` / `Hijack` / `SetWriteDeadline` / `EnableFullDuplex`); HTTP/2 server push and flush-error reporting are not on it.
 4. **It does not guarantee "same shape means it works".** Middleware that depends on a particular router context stays unusable — chi's `CleanPath` reads `chi.RouteContext` and **panics either way**, adapted or wrapped outside.
 5. **It does not change middleware semantics.** Who recovers a panic, and what an error body looks like, is still the middleware's call.
@@ -78,35 +84,48 @@ Not exporting a `Ctx` accessor here is deliberate: it would promote "`Ctx` lives
 
 | Your middleware… | Where |
 |---|---|
-| Only touches headers / short-circuits / wraps the writer (logger, auth, rate limit, promhttp counters) | Either works; needs the route template or needs short-circuits in the access log → **`Adapt` (inside)** |
+| Only touches headers / short-circuits / wraps the writer (logger, auth, rate limit, promhttp counters) | Either works; needs the route template or needs short-circuits in the access log → **`Adapt` (inside)**; must log or measure the **real status** → **wrap outside** (inside the onion it cannot see the framework-mapped error/panic response, see "What it does not do" item 2) |
 | Rewrites the body and finalizes unconditionally after next (gzip) | **Outside `Handler()`** |
 | Must intercept before routing (CORS preflight) | **Outside `Handler()`** |
 | Asserts `http.Hijacker` (WebSocket upgrades) | Either — `Adapt`'s proxy forwards `Hijack`; only re-wrapping the writer without forwarding breaks it |
 
-promhttp is a good example split in two: **collection** uses `Adapt` around `promhttp.InstrumentHandlerCounter` (needs correct status codes and the route template), while **exposure** goes through `Wrap`, because `promhttp.Handler()` is already an `http.Handler`:
+promhttp is a good example split in two: **collection** uses `Adapt` around `promhttp.InstrumentHandlerCounter` (so the route template `r.Pattern` is readable), while **exposure** goes through `Wrap`, because `promhttp.Handler()` is already an `http.Handler`:
 
 ```go
 app.GET("/metrics", web.Wrap(promhttp.Handler()))
 ```
 
+One trade-off in the collection half needs to be said out loud: **the counter's `code` label is wrong on error routes** when it runs inside the onion (a 404 is filed under `code="200"`, a panic is not recorded at all — see "What it does not do" item 2). To count by the real status code, wrap it outside `Handler()` instead — at the cost of `r.Pattern` not being populated yet, so you supply the route label yourself.
+
 ## Ecosystem pieces already exercised
 
-::: warning This table is a local spike, **not in CI, not a maintenance guarantee**
-The data comes from one end-to-end matrix on a dev machine (same middleware, same route, compared item by item through `Adapt` against wrapped outside `app.Handler()`: status, response headers, body). That evidence does not live in the repo and does not run in CI, so it may already have drifted as upstream releases. Treat it as "this name is worth trying", not as a contract. If you adopt one, run the check in the next section yourself.
-:::
+These conclusions are held up by a comparison project that **runs in CI**: [`interop/`](https://github.com/Luo-root/pulse-web/tree/main/interop) (a nested module; `go build` / `go vet` / `go test` are all gates, same pattern as `otel/` and `loadtest/`). The criterion is not "it ran" but **the same middleware on the same route, compared item by item through `Adapt` against wrapped outside `app.Handler()`**, across three faces:
+
+1. **The response** — status code plus the response headers that matter, plus the body;
+2. **The middleware's own side channel** — the log line / metric labels it records;
+3. **The framework's access record** — status, route template, response size, error category.
+
+Face 3 gets its own place because for the short-circuit row the difference is not in the response at all (both sides return 401) but in whether the **framework knows the request happened**. If an upstream release changes behaviour, this goes red. The matrix itself lives in [`interop/middleware_test.go`](https://github.com/Luo-root/pulse-web/blob/main/interop/middleware_test.go).
 
 | Middleware | Result | How far it was verified |
 |---|---|---|
-| chi `Logger` / `RequestID` / `RealIP` / `Timeout` / `Compress` | **Identical** through `Adapt` vs wrapped outside | End to end (status + 9 response headers + body) |
-| `promhttp.InstrumentHandlerCounter` | Same, including the status code | End to end |
-| rs/cors | Real requests match; **preflight never arrives** (405) → wrap outside | End to end |
-| chi `Recoverer` | Both 500, but the **body differs** (Recoverer writes its own) → use the framework's panic handling | End to end |
+| chi `RequestID` / `ClientIPFromXFF` | **Identical** through `Adapt` vs wrapped outside, including whether the value they put in the request context reaches the handler | End to end |
+| chi `Logger` / `Compress` | Identical on the **normal path**; the two sides differ on error routes (see "What it does not do" item 2) | End to end |
+| chi `Timeout` | Identical (the 504 it writes after a timeout never takes effect on either side — the response is already committed) | End to end |
+| chi `Recoverer` | Both 500, but the **body differs** (Recoverer writes its own empty body) → use the framework's panic handling | End to end |
 | chi `CleanPath` | **Panics either way**, unusable | End to end |
-| `httprate` | Whole family is `func(next http.Handler) http.Handler` | **Signature only**, never ran |
-| `gorilla/csrf` | All four seams line up in the source (replaced request / writes headers first / short-circuits / reads the form on demand) | **Source review only**, never ran |
+| `promhttp.InstrumentHandlerCounter` | `code=200` matches on the normal path; on error routes it files a 404 under `code=200` | End to end |
+| `rs/cors` | Real requests match; **preflight never arrives** (405) → wrap outside, or register an explicit `OPTIONS` route (the matrix covers both, and the workaround is verified to work) | End to end |
+| `golang-jwt/jwt/v5` | Both seams hold: short-circuit (401) and request replacement | End to end |
+| `httprate` | **Stateful** limiter, one instance per mount point: two 200s, a third request 429 with `Retry-After`, and once exhausted even other routes 429 | End to end |
+| `gorilla/csrf` | All four seams (replaced request / writes headers first / short-circuits / reads the form on demand) line up in the source | **Source review only**, never ran |
 
-The last two rows only mean "the shape fits" — **not** "it works". They are candidates, not conclusions.
+The last row only means "the shape fits" — **not** "it works". It is a candidate, not a conclusion.
+
+chi's `RealIP` is **not in the table**: it is marked Deprecated in chi v5.3.2 (it mutates `r.RemoteAddr` and can be spoofed — see GHSA-3fxj-6jh8-hvhx and two related advisories). The table runs its replacement `ClientIPFromXFF`, which stores the result in the request context — a shape that tests the adapter surface harder.
 
 ## Verifying a middleware yourself
 
-The criterion is not "it ran" but **the same middleware on the same route, compared item by item through `Adapt` against wrapped outside `app.Handler()`** — status code plus the response headers you care about, including routes where the handler returns an error or panics. Testing only that "both return 200" misses every silent corruption.
+The criterion is not "it ran" but **the same middleware on the same route, compared item by item through `Adapt` against wrapped outside `app.Handler()`**: status code, the response headers you care about, the body (**including routes where the handler returns an error or panics** — that is where the differences concentrate), plus the middleware's own side channel (its log line / metric labels). Testing only that "both return 200" misses every silent corruption.
+
+Two criteria are easy to write vacuously. **First, comparing responses only**: for the short-circuit row the difference is not in the response (both return 401) but in whether the framework knows the request happened. **Second, "both sides set the same header" and "neither side set it" look identical** — so every comparison needs a companion **positive** assertion pinning down that the middleware actually did something.
