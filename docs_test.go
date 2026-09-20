@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -332,4 +333,200 @@ func TestREADMEtargetNormalization(t *testing.T) {
 			t.Errorf("normalizeREADMEtarget(%q) = %q，想要 %q", c.in, got, c.want)
 		}
 	}
+}
+
+// ---- #93：门禁清单与 ci.yml 的计数守卫 ----
+
+// ciStepRe 匹配 workflow 里的一个 step：`      - name: Build`。
+var ciStepRe = regexp.MustCompile(`(?m)^\s+- name:\s*\S`)
+
+// bashFenceRe 抽出 ```bash 代码块的内容（跨行、非贪婪）。
+var bashFenceRe = regexp.MustCompile("(?s)```bash\n(.*?)```")
+
+// TestGateListsMatchCIWorkflow 守卫「贡献者向的门禁清单不会与 CI 悄悄脱节」。
+//
+// 起因（#93）：`ci.yml` 从 6 步长到 9 步（先加 `loadtest` / `otel`，随后 `interop`），
+// 而 `CONTRIBUTING.md` 中英两份与 PR 模板停在 6 条没动——**恰好漏掉那几个嵌套 module**，
+// 而它们正是「没人跑就静默过期」的一类（#73：性能工程曾长期量一个已经不存在的默认，
+// 不报错、不告警）。清单靠人记得同步，就等于没有同步；这里把条数变成断言。
+//
+// 判据四条，**全部以 `ci.yml` 的 `- name:` 条数为准**（不拿文档自己数的数当基准）：
+//
+//  1. `AGENTS.md` 的门禁 bash 块：命令条数 == step 数
+//  2. `CONTRIBUTING.md` 的门禁 bash 块：中英各一块，各自 == step 数
+//  3. `.github/PULL_REQUEST_TEMPLATE.md` 的 Testing 清单：条目数 == step 数
+//  4. 三处引出清单的话里**写明**的条数词与 step 数一致（「九条」/「nine commands」）
+//
+// 第 4 条是这条守卫的重点：只比条数的话，清单补齐而那句话没改，读者仍会按旧数字判断
+// 「这些就是全部门禁」——那正是 #93 描述的那种误判。
+//
+// 变异探针（三个方向都实测过，全部让本用例变红）：给 `ci.yml` 加一条 `- name:` 而清单
+// 不动；从 PR 模板删掉一条；把 `AGENTS.md` 的「九条」改成「六条」。
+func TestGateListsMatchCIWorkflow(t *testing.T) {
+	want := len(ciStepRe.FindAllString(readRepoFile(t, ".github/workflows/ci.yml"), -1))
+	if want == 0 {
+		t.Fatal("没从 ci.yml 里数到任何 step——守卫失效，不是通过")
+	}
+	// 数词表是有限的（到二十）：`ci.yml` 长过这个数而没人更新词表时，先红而不是静默跳过。
+	if _, ok := gateCountWord(gateNumeralZH, want); !ok {
+		t.Fatalf("ci.yml 有 %d 个 step，但数词表（gateNumeralZH / gateNumeralEN）里没有对应写法——"+
+			"加/删 CI step 时请一并更新词表、三处清单与那三句话", want)
+	}
+
+	// 1 + 2：门禁 bash 块按**内容**认（含 `go build ./...`），不按位置——文档里还有别的 bash 片段。
+	for _, c := range []struct {
+		file string
+		ndoc int // 期望找到几块：CONTRIBUTING 中英各一块
+	}{{"AGENTS.md", 1}, {"CONTRIBUTING.md", 2}} {
+		src := readRepoFile(t, c.file)
+		found := 0
+		for _, m := range bashFenceRe.FindAllStringSubmatch(src, -1) {
+			if !strings.Contains(m[1], "go build ./...") {
+				continue
+			}
+			found++
+			if got := countGateLines(m[1]); got != want {
+				t.Errorf("%s 的门禁清单 %d 条命令，ci.yml 有 %d 个 step（多半漏了嵌套 module）", c.file, got, want)
+			}
+		}
+		if found != c.ndoc {
+			t.Errorf("%s 里找到 %d 个门禁 bash 块，期望 %d 个", c.file, found, c.ndoc)
+		}
+	}
+
+	// 3：PR 模板的自检清单。
+	tpl := readRepoFile(t, ".github/PULL_REQUEST_TEMPLATE.md")
+	if got := strings.Count(testingSection(t, tpl), "- [ ]"); got != want {
+		t.Errorf("PR 模板 Testing 清单 %d 条，ci.yml 有 %d 个 step", got, want)
+	}
+
+	// 4：引出清单那句话里写明的条数词。
+	//
+	// 只查「期望的数词出现过」不够：同一句里往往还有第二个数字（`下面九条就是全部 CI 门禁
+	// （… 的九个 step）`），把前半段的「九条」改成「六条」时它照样通过。所以改成**逐个数词
+	// 核**：这句话里凡是以「N 条 / N 个 step / N commands / N steps」形态出现的数字，每一个
+	// 都必须等于当前条数（探针：把 AGENTS.md 的「九条」改成「六条」，本用例必须红）。
+	//
+	// 只看「能解析成数字」的那些：英文那句里 `one per step of …` 的 `per` 也会被正则捞到，
+	// 它不是数词，跳过。
+	zhWord, _ := gateCountWord(gateNumeralZH, want)
+	enWord, _ := gateCountWord(gateNumeralEN, want)
+	for _, c := range []struct {
+		file, anchor string
+		re           *regexp.Regexp
+		digits       map[string]int
+	}{
+		{"AGENTS.md", "就是全部 CI 门禁", gateNumReZH, gateNumeralZH},
+		{"CONTRIBUTING.md", "就是全部门禁", gateNumReZH, gateNumeralZH},
+		{"CONTRIBUTING.md", "the whole gate", gateNumReEN, gateNumeralEN},
+	} {
+		line := lineContaining(t, readRepoFile(t, c.file), c.anchor)
+		seen := 0
+		for _, m := range c.re.FindAllStringSubmatch(line, -1) {
+			got, ok := gateNumeralValue(m[1], c.digits)
+			if !ok {
+				continue
+			}
+			seen++
+			if got != want {
+				t.Errorf("%s 里那句话把条数写成 %q（ci.yml 是 %d 个 step）：\n  %s",
+					c.file, strings.TrimSpace(m[1]), want, strings.TrimSpace(line))
+			}
+		}
+		if seen == 0 {
+			t.Errorf("%s 里那句话没写明条数（该写 %q 或 %q commands）：\n  %s",
+				c.file, zhWord+"条", enWord, strings.TrimSpace(line))
+		}
+	}
+}
+
+// gateNumReZH / gateNumReEN 抓「引出清单那句话」里的条数词。
+var (
+	gateNumReZH = regexp.MustCompile(`([0-9]+|[一二三四五六七八九十]+)\s*(?:条|个 step)`)
+	gateNumReEN = regexp.MustCompile(`([0-9]+|[a-z]+)\s+(?:commands?|steps?)\b`)
+)
+
+// gateNumeralZH / gateNumeralEN 把数词解析成数字（只到二十——CI 的 step 不可能更多；
+// 真超过二十时用例会在开头就报「数词表不够」，不会静默放过）。
+var (
+	gateNumeralZH = map[string]int{"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+		"六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+		"十一": 11, "十二": 12, "十三": 13, "十四": 14, "十五": 15,
+		"十六": 16, "十七": 17, "十八": 18, "十九": 19, "二十": 20}
+	gateNumeralEN = map[string]int{"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+		"six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+		"eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+		"sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20}
+)
+
+// gateNumeralValue 把一次正则捕获解析成数字：阿拉伯数字直接解析，数词查表，两者都不是
+// 就返回 ok=false（调用方跳过——`per` 这类词就是这么被放过的）。
+func gateNumeralValue(tok string, words map[string]int) (int, bool) {
+	tok = strings.TrimSpace(tok)
+	if n, err := strconv.Atoi(tok); err == nil {
+		return n, true
+	}
+	n, ok := words[tok]
+	return n, ok
+}
+
+// gateCountWord 反查某条数在词表里的写法。
+func gateCountWord(words map[string]int, want int) (string, bool) {
+	for k, v := range words {
+		if v == want {
+			return k, true
+		}
+	}
+	return "", false
+}
+
+// testingSection 切出 PR 模板里「## 测试 / Testing」到下一个二级标题之间的内容。
+func testingSection(t *testing.T, src string) string {
+	t.Helper()
+	_, rest, ok := strings.Cut(src, "## 测试 / Testing")
+	if !ok {
+		t.Fatal("PR 模板里没有「## 测试 / Testing」段——标题被改了？")
+	}
+	sec, _, _ := strings.Cut(rest, "\n## ")
+	return sec
+}
+
+// readRepoFile 读仓库里的文本文件，并归一化行尾：下面两条判据都按行切分，
+// 不想让 CRLF 把一行数成两行。
+func readRepoFile(t *testing.T, rel string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.FromSlash(rel))
+	if err != nil {
+		t.Fatalf("读 %s: %v", rel, err)
+	}
+	return strings.ReplaceAll(string(b), "\r\n", "\n")
+}
+
+// countGateLines 数代码块里的**门禁行**：非空、且不是整行注释（`# …`）。
+//
+// 整行注释不算——把一条门禁注释掉意味着它不再被要求跑，那正是这条守卫要拦的
+// （探针：把 CONTRIBUTING 英文区的一条 `(cd …)` 行前面加 `#` 注释掉，本用例必须红）。
+func countGateLines(block string) int {
+	n := 0
+	for _, line := range strings.Split(block, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
+// lineContaining 返回第一行含该锚点的行；找不到就直接失败——锚点被改写时给出明确信号，
+// 而不是让第 4 条判据静默通过。
+func lineContaining(t *testing.T, src, anchor string) string {
+	t.Helper()
+	for _, line := range strings.Split(src, "\n") {
+		if strings.Contains(line, anchor) {
+			return line
+		}
+	}
+	t.Fatalf("没找到含 %q 的行——引出清单的那句话被改了？", anchor)
+	return ""
 }

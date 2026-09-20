@@ -62,7 +62,8 @@ Two kinds of issue carry extra requirements:
 ### Local development
 
 Requires **Go 1.27+** — the toolchain downloads itself if it is missing. There is no Makefile
-and no linter config; the commands below are the whole gate.
+and no linter config; the nine commands below are the whole gate (one per step of
+`.github/workflows/ci.yml`):
 
 ```bash
 go build ./...                                            # compilation
@@ -71,6 +72,9 @@ go vet ./...                                              # static checks
 go test -race ./...                                       # the full suite (the CI test step)
 go test -run TestRequestPathAllocBudget ./bench/          # allocation budget — must NOT run with -race
 go test -run '^$' -bench '^$' ./bench/                    # bench compile check
+(cd loadtest && go build ./... && go vet ./... && go test ./...)   # nested module — the root `./...` does not cross module boundaries
+(cd otel && go build ./... && go vet ./... && go test ./...)       # the OTel adapter, same reason (it is what keeps the core dependency-free)
+(cd interop && go build ./... && go vet ./... && go test ./...)    # ecosystem interop probes (websocket / CORS / chi …)
 ```
 
 Three details in there are not incidental:
@@ -84,6 +88,11 @@ Three details in there are not incidental:
 - **The allocation budget must be run without `-race`.** The race detector inflates `B/op`;
   that test file is excluded from race builds via `//go:build !race` and runs as its own CI
   step.
+
+The three `(cd … && …)` lines deserve one more sentence: a nested module is **outside** the root
+module's `./...`, so nobody runs it unless it is listed here and in CI. That is exactly how the
+perf-comparison harness once kept measuring a default that no longer existed, silently — see the
+design doc's table C note.
 
 On Windows PowerShell the format gate is:
 
@@ -212,8 +221,8 @@ Pulse-Web 是开源的 Go web 框架，目前仍在 1.0 之前（`v0.x`）。欢
 
 ### 本地开发
 
-需要 **Go 1.27+**，工具链缺失时会自动下载。本仓库没有 Makefile、没有 linter 配置；下面这几条
-就是全部门禁。
+需要 **Go 1.27+**，工具链缺失时会自动下载。本仓库没有 Makefile、没有 linter 配置；下面这九条
+就是全部门禁（与 `.github/workflows/ci.yml` 的九个 step 一一对应）：
 
 ```bash
 go build ./...                                            # 编译
@@ -222,6 +231,9 @@ go vet ./...                                              # 静态检查
 go test -race ./...                                       # 全部测试（= CI 的 test 步骤）
 go test -run TestRequestPathAllocBudget ./bench/          # 分配预算门禁——必须不带 -race
 go test -run '^$' -bench '^$' ./bench/                    # bench 编译检查
+(cd loadtest && go build ./... && go vet ./... && go test ./...)   # 嵌套 module——根 module 的 ./... 不过 module 边界
+(cd otel && go build ./... && go vet ./... && go test ./...)       # otel 适配件同理（主模块零依赖靠它保住）
+(cd interop && go build ./... && go vet ./... && go test ./...)    # 生态互操作对照（websocket / CORS / chi …）
 ```
 
 其中三处不是顺手写的：
@@ -233,6 +245,9 @@ go test -run '^$' -bench '^$' ./bench/                    # bench 编译检查
   `_scratch/`（已 gitignore）里全是一次性文件。
 - **分配预算门禁必须不带 `-race`。** race 检测器会抬高 `B/op`；那个测试文件用
   `//go:build !race` 排除在 race 构建外，由 CI 的独立步骤执行。
+
+那三条 `(cd … && …)` 值得多一句：嵌套 module **不在**根 module 的 `./...` 里，不写进这里与
+CI 就等于没人跑——性能对比工程当年就是这样静默地继续量一个已经不存在的默认（见设计文档表 C 那一段）。
 
 Windows PowerShell 下的格式门禁是：
 

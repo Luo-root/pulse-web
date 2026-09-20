@@ -4,7 +4,7 @@
 
 ## 这是什么
 
-`github.com/Luo-root/pulse-web`——基于 [pulse](https://github.com/Luo-root/pulse) 的 **kernel** 与 **observability** 构建的通用 Go web 服务框架。库形态（与 gin / chi / echo 同级），**单包** `package web` 位于仓库根目录，不含前端。目前 pre-1.0（`v0.x`，首个 tag 尚未发布）。卖点是**装配能力 + 一等观测**。
+`github.com/Luo-root/pulse-web`——基于 [pulse](https://github.com/Luo-root/pulse) 的 **kernel** 与 **observability** 构建的通用 Go web 服务框架。库形态（与 gin / chi / echo 同级），**单包** `package web` 位于仓库根目录，不含前端。目前 pre-1.0（`v0.x`；最新 tag 是 `v0.1.0`，2026-09-16 发布）。卖点是**装配能力 + 一等观测**。
 
 ## 构建与测试
 
