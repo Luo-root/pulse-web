@@ -42,7 +42,7 @@ admin.Use(requireAdmin)                    // 只影响 /api/v1/admin
 
 ```go
 type Handler func(*Ctx) error
-type Middleware func(Handler) Handler
+type Middleware func(c *Ctx, next Handler) error
 ```
 
 三种挂法，从外到内依次是：
@@ -55,13 +55,7 @@ app.GET("/y", h, routeMW)                             // 3. 路由：这一条
 
 **顺序**：全局 → 分组 → 路由，`Use` 多次则按调用顺序。中间件里 `return err` 即短路，后续不再执行；`next(c)` 之前写响应也等于短路（后面再写会被「已写响应不被覆盖」规则挡掉）。
 
-stdlib 中间件直接用 `web.Wrap` 接：
-
-```go
-app.Use(func(next web.Handler) web.Handler {
-    return web.Wrap(myStdlibMiddleware(stdlibHandler(next)))   // 或者更常见的：Wrap 整个 handler
-})
-```
+`next(c)` 就是「继续往下走」。生态里 `func(http.Handler) http.Handler` 形状的中间件（chi/middleware、rs/cors、promhttp……）**不是**用 `Wrap` 接——用 **`web.Adapt`** 把它接进洋葱内，承诺与边界单独成页：[stdlib 中间件接入](/guide/middleware)。
 
 ## 请求体上限（`BodyLimit`）
 
@@ -96,6 +90,9 @@ app.Static("/static", "./files")
 | 方向 | 做法 |
 |---|---|
 | stdlib → 框架 | `web.Wrap(h http.Handler) web.Handler` |
+| stdlib 中间件 → 框架中间件 | `web.Adapt(mw func(http.Handler) http.Handler) web.Middleware`（洋葱内）；或把它整个包在 `app.Handler()` 外面 |
 | 框架 → stdlib | `app.Handler()` 返回 `http.Handler`（也可以直接把 `app` 当 `http.Handler` 用） |
 
 `Wrap` 之后**拿不到 `*Ctx`**（没有 `c.Path`、请求级 KV、`c.Observe`），但 `PathValue`、中间件链、Trace 与访问日志照常。所以：需要 `*Ctx` 的能力就写成 `func(*web.Ctx) error`，纯粹是「一段 http.Handler」才用 `Wrap`。
+
+中间件走 `Adapt`（洋葱内）还是外包 `Handler()`，判据见 [stdlib 中间件接入](/guide/middleware)。

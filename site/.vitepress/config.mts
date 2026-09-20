@@ -38,6 +38,7 @@ export default defineConfig({
               items: [
                 { text: '快速开始', link: '/guide/getting-started' },
                 { text: '路由与中间件', link: '/guide/routing' },
+                { text: 'stdlib 中间件接入', link: '/guide/middleware' },
                 { text: '请求', link: '/guide/requests' },
                 { text: '响应', link: '/guide/responses' },
                 { text: '错误模型', link: '/guide/errors' },
@@ -88,6 +89,7 @@ export default defineConfig({
               items: [
                 { text: 'Getting started', link: '/en/guide/getting-started' },
                 { text: 'Routing and middleware', link: '/en/guide/routing' },
+                { text: 'stdlib middleware', link: '/en/guide/middleware' },
                 { text: 'Requests', link: '/en/guide/requests' },
                 { text: 'Responses', link: '/en/guide/responses' },
                 { text: 'The error model', link: '/en/guide/errors' },

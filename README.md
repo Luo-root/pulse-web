@@ -238,8 +238,11 @@ Records hold scalars only (`~string | ~int64 | ~float64 | ~bool`) with no `map[s
 
 ```go
 app.Handle("/legacy", web.Wrap(http.HandlerFunc(oldHandler)))    // stdlib handler in
+app.Use(web.Adapt(chiMW.Logger))                                 // ecosystem middleware into the onion
 http.Handle("/app/", http.StripPrefix("/app", app.Handler()))    // the engine out, as an http.Handler
 ```
+
+All three directions are **seams**, not implementations: `Wrap` takes stdlib handlers, `Adapt` brings `func(http.Handler) http.Handler` ecosystem middleware (logger, auth, rate limiting, metrics counters, …) inside the onion, and `Handler()` exports the engine. Which middleware belongs inside and which belongs wrapped outside `Handler()` (CORS that has to intercept preflight, for instance) follows the criteria in [the stdlib middleware guide](https://luo-root.github.io/pulse-web/en/guide/middleware).
 
 What it is not: a batteries-included micro-framework with a large middleware catalogue. If you want an ecosystem of community middleware and maximum familiarity for a team, gin, chi or echo are the obvious picks. Pulse-Web aims at services that would rather keep the dependency surface at "standard library plus two packages" and get first-class observability out of the box.
 
