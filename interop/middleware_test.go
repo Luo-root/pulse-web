@@ -110,6 +110,9 @@ func defaultReqs() []reqSpec {
 
 // watchHeaders 是矩阵比对的响应头。**值逐次不同的头只比「在不在」**：请求 id / trace
 // id / cookie 每条请求都换，比字面值等于自找假阴性。
+//
+// `X-Interop-Saw` 是边界用例自己塞的标记（未匹配路由那条，见文件末尾）——放进同一张
+// 清单，它才进得了比对面。
 var watchHeaders = []string{
 	"Access-Control-Allow-Credentials", "Access-Control-Allow-Methods",
 	"Access-Control-Allow-Origin", "Access-Control-Max-Age", "Allow",
@@ -493,8 +496,8 @@ func TestMatrixChiLogger(t *testing.T) {
 // → 外包 Handler()」。
 func TestMatrixChiCompress(t *testing.T) {
 	known := map[string]string{
-		"GET /err":   "压缩器在 next 返回后收尾，框架的错误映射写在另一个 writer 上（压缩类推外包）",
-		"GET /panic": "同上，panic 路径上洋葱内也拿不到压缩器写的头",
+		"GET /err":   "压缩器在 next 返回后收尾，框架的错误映射写在另一个 writer 上：洋葱内是**明文** 404（且没有 Content-Encoding），外包是合法 gzip",
+		"GET /panic": "同一条时序：洋葱内是明文 500，外包是 gzip 过的 500",
 	}
 	run := compareMatrix(t, "chi middleware.Compress(5)", once(middleware.Compress(5)), nil, known)
 	run.need(t, "GET /ok", "Content-Encoding=gzip")
