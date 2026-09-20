@@ -89,10 +89,45 @@ app.GET("/raw", func(c *web.Ctx) error {
 ::: warning `Writer()` 的能力面是一份**显式的窄清单**
 **显式实现并转发底层的四个**：`Flush` / `Hijack` / `SetWriteDeadline` / `EnableFullDuplex`；**不透出** `Pusher` / `FlushError`，也**不提供 `Unwrap()`**（那等于把底层 writer 整个交出去，连上面两个一起）。内嵌 `http.ResponseWriter` 只提升 `Header` / `Write` / `WriteHeader`，其余能力必须显式实现才有——所以清单就是全部，一眼可见，不靠断言碰运气。
 
-**协议升级（WebSocket）走 `Hijack`**：`w := c.Writer().(http.Hijacker)` 拿到的就是这条连接，生态库零改动直接可用（`gorilla/websocket` 直接断言 `w.(http.Hijacker)`；`coder/websocket` 先断言、再沿 `Unwrap()` 链找——两条路都满足）。连接交出去之后框架不再写这条响应（`Write` / `Flush` 返回 `http.ErrHijacked`），收尾不落码、也不写兜底错误体；访问日志按 `101` 记并带 `connection.hijacked` 标记（本框架声明的扩展键），**不记** `http.response.body.size`——连接已交出，记 0 会被读成「响应是空的」。
+**协议升级（WebSocket）走 `Hijack`**：`w := c.Writer().(http.Hijacker)` 拿到的就是这条连接，生态库零改动直接可用（`gorilla/websocket` 直接断言 `w.(http.Hijacker)`；`coder/websocket` 先断言、再沿 `Unwrap()` 链找——两条路都满足）。连接交出去之后框架不再写这条响应（`Write` / `Flush` 返回 `http.ErrHijacked`），连接**只能交出去一次**（第二次 `Hijack` 返回同一个错误）；收尾不落码、也不写兜底错误体；访问日志按 `101` 记并带 `connection.hijacked` 标记（本框架声明的扩展键），**不记** `http.response.body.size`——连接已交出，记 0 会被读成「响应是空的」。
 
 **两条边界**：① **HTTP/2 下不可用**（h2 的 writer 不是 `Hijacker`）；② **洋葱内可用，但受中间件影响**——`Adapt` 交出去的代理会转发 `Hijack`（`Use(Adapt(…))` 之后的升级路由照常工作），而中间件自己再包一层且不转发时同样会断，这与纯 stdlib 下完全同形（见 [stdlib 中间件接入](/guide/middleware)）。
 :::
+
+### WebSocket：`gorilla/websocket` 最小可用示例
+
+```go
+import (
+    "net/http"
+
+    "github.com/gorilla/websocket"
+)
+
+var upgrader = websocket.Upgrader{
+    CheckOrigin: func(r *http.Request) bool { return true },   // 默认拒绝跨源，按自己的策略来
+}
+
+app.GET("/ws", func(c *web.Ctx) error {
+    conn, err := upgrader.Upgrade(c.Writer(), c.Request(), nil)
+    if err != nil {
+        // 升级失败时 gorilla 已经把错误响应写出来了，这里只把 error 交出去
+        return err
+    }
+    defer func() { _ = conn.Close() }()
+
+    for {
+        mt, data, err := conn.ReadMessage()
+        if err != nil {
+            return nil // 客户端断开：正常收场
+        }
+        if err := conn.WriteMessage(mt, data); err != nil {
+            return err
+        }
+    }
+})
+```
+
+`c.Writer()` 交给 `Upgrade` 的就是连接本身——gorilla 用 `w.(http.Hijacker)` 取，中间没有任何适配器。这个示例与仓库里真跑的那次握手同源（`interop/websocket_test.go` 的 `TestGorillaWebSocketUpgrade`）。
 
 ## 流式：SSE
 

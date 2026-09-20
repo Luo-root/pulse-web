@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -830,6 +831,135 @@ func TestHijackUnsupportedReturnsError(t *testing.T) {
 	}
 	if w.code != http.StatusOK {
 		t.Fatalf("status = %d，want 200（hijack 失败不影响正常响应）", w.code)
+	}
+}
+
+// hijackableWriter 是一个**支持 Hijack** 的最小 writer，而且它不学 net/http 拒绝第二次
+// ——专门用来看住「第二次交出是框架自己挡下的」，而不是底层帮忙挡的。
+type hijackableWriter struct {
+	*plainWriter
+	hijacks int
+}
+
+func (w *hijackableWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	w.hijacks++
+	conn, peer := net.Pipe()
+	_ = peer.Close()
+	return conn, bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn)), nil
+}
+
+// TestHijackOnlyOnce：连接只能交出去一次，第二次拿到 http.ErrHijacked——不 panic，
+// 也不会把同一条连接再交一份出去；框架侧状态不变，仍是「已交出」（日志按 101 记、
+// 带标记）。
+//
+// 底层特意用上面那个「照单全收」的 writer：net/http 自己会拒绝第二次，但那是它的
+// 实现细节，换个 writer 就没了——这条判定得由包装器自己做。
+func TestHijackOnlyOnce(t *testing.T) {
+	e, sink := newTestEngine(t)
+
+	var second error
+	e.GET("/hijack", func(c *Ctx) error {
+		h, ok := c.Writer().(http.Hijacker)
+		if !ok {
+			t.Errorf("c.Writer() 不是 http.Hijacker")
+			return nil
+		}
+		if _, _, err := h.Hijack(); err != nil {
+			t.Errorf("首次 Hijack 失败：%v", err)
+			return nil
+		}
+		_, _, second = h.Hijack()
+		return nil
+	})
+
+	w := &hijackableWriter{plainWriter: &plainWriter{}}
+	e.ServeHTTP(w, httptest.NewRequest("GET", "/hijack", nil))
+
+	if !errors.Is(second, http.ErrHijacked) {
+		t.Fatalf("第二次 Hijack = %v，want http.ErrHijacked", second)
+	}
+	if w.hijacks != 1 {
+		t.Fatalf("底层 Hijack 被调用 %d 次，want 1——第二次该在框架层就被挡下", w.hijacks)
+	}
+
+	rec := waitRecord(t, sink, eventHTTPReq)
+	if rec.Status != "101" {
+		t.Fatalf("访问记录 Status = %q，want 101", rec.Status)
+	}
+	if got := attrsOf(rec)[attrConnHijacked]; got != true {
+		t.Fatalf("connection.hijacked = %v，want true", got)
+	}
+}
+
+// TestHijackUnderHTTP2ReturnsError 把 godoc 那句「HTTP/2 下不可用」跑成事实：真起一个
+// h2 server（httptest 的 EnableHTTP2 + StartTLS），h2 侧的 responseWriter 没有 Hijack
+// 方法（Go 1.27 的 h2 服务端实现在 net/http/internal/http2，那里只有一句注释说「没有
+// hijack HTTP/2 连接的计划」），所以断言失败、返回的是框架自己的明确 error。
+//
+// 不拿一个「不支持 Hijack 的最小 writer」顶替，是因为这条边界同时牵着三件事：请求
+// 本身要照常完成（升级失败不该把响应搞坏）、观测不能打上 connection.hijacked、
+// 状态码列必须是真实的 200 而不是约定值 101。
+func TestHijackUnderHTTP2ReturnsError(t *testing.T) {
+	e, sink := newTestEngine(t)
+
+	got := make(chan struct {
+		proto string
+		err   error
+	}, 1)
+	e.GET("/hijack", func(c *Ctx) error {
+		var proto string
+		var err error
+		proto = c.Request().Proto
+		if h, ok := c.Writer().(http.Hijacker); ok {
+			_, _, err = h.Hijack()
+		} else {
+			t.Errorf("c.Writer() 不是 http.Hijacker")
+		}
+		got <- struct {
+			proto string
+			err   error
+		}{proto, err}
+		return c.Text(http.StatusOK, "ok")
+	})
+
+	srv := httptest.NewUnstartedServer(e)
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+
+	resp, err := srv.Client().Get(srv.URL + "/hijack")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.ProtoMajor != 2 {
+		t.Fatalf("这条用例要在 HTTP/2 上跑，实际协商到 %q——判据面不对，通过也不算", resp.Proto)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seen := <-got
+	if seen.proto != "HTTP/2.0" {
+		t.Fatalf("handler 看到的协议 = %q，want HTTP/2.0", seen.proto)
+	}
+	if seen.err == nil {
+		t.Fatal("HTTP/2 下 Hijack 应返回明确 error，得到 nil")
+	}
+	if !errors.Is(seen.err, http.ErrNotSupported) {
+		t.Fatalf("错误应可 errors.Is(http.ErrNotSupported)：%v", seen.err)
+	}
+	if resp.StatusCode != http.StatusOK || string(body) != "ok" {
+		t.Fatalf("hijack 失败不该影响响应：status=%d body=%q", resp.StatusCode, body)
+	}
+
+	rec := waitRecord(t, sink, eventHTTPReq)
+	if rec.Status != "200" {
+		t.Fatalf("访问记录 Status = %q，want 200（连接没交出去，这一列就是真实观测）", rec.Status)
+	}
+	if v, ok := attrsOf(rec)[attrConnHijacked]; ok {
+		t.Fatalf("hijack 没成功，不该打 connection.hijacked 标记，得到 %v", v)
 	}
 }
 

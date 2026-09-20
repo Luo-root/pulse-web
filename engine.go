@@ -25,6 +25,12 @@ const (
 	eventHTTPReq  = "http.request"
 	sourceHTTP    = "http"
 
+	// statusHijacked 是「连接已交出」这条路上状态码列的**约定值**，不是观测到的事实：
+	// 升级类库各自往裸连接写响应，框架压根看不见（gorilla 先 hijack 再写、coder 先经
+	// writer 写 101 再 hijack）。它取 101 是因为协议升级就长这样，便于人和下游解析；
+	// 「这一列不是事实」由 attrConnHijacked 标记承担（见 console_sink.go）。
+	statusHijacked = http.StatusSwitchingProtocols
+
 	// sinkFlushTimeout 是关闭时序第 ⑤ 步（Sink flush）的独立预算：
 	// 它在 root.Dispose() 之后另起，**不在 ShutdownTimeout 之内**，
 	// 所以总关闭时长上限 = ShutdownTimeout + sinkFlushTimeout。
@@ -620,7 +626,7 @@ func (e *Engine) finish(c *Ctx, rw *responseWriter) {
 	// 再 hijack（看得到），`gorilla/websocket` 先 hijack 再自己往裸连接写（看不到）。
 	// 看不到的那条路上若照实记 0，访问日志会被读成「没写响应」——按 101 记才是事实。
 	if rw.hijacked && rw.status == 0 {
-		rw.status = http.StatusSwitchingProtocols
+		rw.status = statusHijacked
 	}
 
 	// 收尾落码与 Write / Flush 同源（writeHeaderNow）：吃 Status() 提示、缺省 200；

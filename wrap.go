@@ -125,8 +125,11 @@ func Adapt(m func(http.Handler) http.Handler) Middleware {
 		}
 		// 短路：中间件写的是 proxy，没经过框架的采集层，把观测补回去。
 		// 只累加不覆盖——外层中间件可能已经写过（那时状态码已落定）。
+		//
+		// 连接已交出的那条路上**不补状态码**：那条请求的状态码是 hijack 的约定值
+		// （101），不是中间件在交出之后写的那个（实测：补了就会记成 200）。
 		if proxy.wrote {
-			if !c.w.wrote {
+			if !c.w.wrote && !c.w.hijacked {
 				c.w.status = proxy.status
 			}
 			c.w.bytes += proxy.bytes
@@ -142,18 +145,24 @@ func Adapt(m func(http.Handler) http.Handler) Middleware {
 // 刻意**不**实现 `http.Flusher`——理由见 Adapt 里 handed 的注释。`Hijack` 的取舍
 // 相反，**无条件实现**：它有返回值，底层不支持时能如实报错，不存在「替底层虚报
 // 能力」的问题；而少了它，挂在 `Use(Adapt(...))` 之下的升级路由会集体失效——
-// handler 手上的 writer 链要穿过这一层。hijack 成功时顺带把框架侧那条记录标上，
-// 那是「这条连接不再归框架管」的唯一凭据（见 responseWriter.Hijack）。
+// handler 手上的 writer 链要穿过这一层。
+//
+// 「连接已交出」这件事**只在 target（框架侧那条 responseWriter）上存一份**，代理
+// 不另存副本，两条守卫读的都是它。洋葱内的 handler 是从 `c.Writer()` 拿的连接，
+// 那一刻走的是 responseWriter.Hijack，代理这边什么都不知道——代理若只信自己的标记，
+// 中间件在 next 返回后（例如 defer 里的兜底写）就会照常往已经交出去的连接上写：
+// net/http 会打两行告警，而行号属于本文件、使用者要查的是自己的中间件。契约一份，
+// 两个入口都读它。
 type adaptProxy struct {
 	http.ResponseWriter
-	target *responseWriter // 框架侧那条 Ctx writer：hijack 时给它留痕
+	target *responseWriter // 框架侧那条 Ctx writer：契约（含 hijack 标记）的唯一存放处
 	status int
 	bytes  int
 	wrote  bool
 }
 
 func (p *adaptProxy) WriteHeader(code int) {
-	if p.wrote {
+	if p.wrote || p.target.hijacked {
 		return
 	}
 	p.wrote, p.status = true, code
@@ -161,6 +170,14 @@ func (p *adaptProxy) WriteHeader(code int) {
 }
 
 func (p *adaptProxy) Write(b []byte) (int, error) {
+	if p.target.hijacked {
+		// 与 responseWriter.Write 同型。**这层守卫不能省**：底层是 net/http 时它确实
+		// 也会返回 ErrHijacked，但那是「借来的保护」——而且代价是 net/http 会打两行
+		// 归属到本文件行号的告警（`response.WriteHeader on hijacked connection`），
+		// 并且代理会把自己记成「写过 200」，短路回填就把这条 hijack 的请求记成
+		// status=200（实测）。自己挡住，这三件一起消失。
+		return 0, http.ErrHijacked
+	}
 	if !p.wrote {
 		p.WriteHeader(http.StatusOK)
 	}
@@ -172,7 +189,8 @@ func (p *adaptProxy) Write(b []byte) (int, error) {
 // Hijack 把连接交给调用方，并让框架知道自己已经管不着这条响应了。
 //
 // 与 responseWriter.Hijack 是同一个契约的两个入口：中间件直接在洋葱里升级、
-// 或洋葱内的 handler 升级，两条路都要记到同一处（`target`）。
+// 或洋葱内的 handler 升级，两条路都记到同一处（`target`）；交出之后**两边**都拒写
+// （读的是同一份标记）。
 func (p *adaptProxy) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	h, ok := p.ResponseWriter.(http.Hijacker)
 	if !ok {

@@ -376,8 +376,13 @@ func (w *responseWriter) flush() error {
 // 再自己往裸连接写）正是这条约定的由来。
 //
 // 底层不支持 Hijack 时返回明确 error（HTTP/2 就是这种情况，h2 的 writer 不是
-// Hijacker）——不 panic，也不静默放行。
+// Hijacker）——不 panic，也不静默放行。连接只能交出去一次：第二次调用同样返回
+// `http.ErrHijacked`，这条判定由本方法自己做（net/http 会给同一个错误，但那是它的
+// 内部实现细节，换一个底层 writer 就没了）。
 func (w *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if w.hijacked {
+		return nil, nil, http.ErrHijacked
+	}
 	h, ok := w.ResponseWriter.(http.Hijacker)
 	if !ok {
 		return nil, nil, fmt.Errorf("web: ResponseWriter does not support Hijack: %w", http.ErrNotSupported)
