@@ -93,16 +93,16 @@ Protocol: two separate processes sharing one `http.ListenAndServe` bootstrap wit
 
 | Pairing | Concurrency | pulse-web RPS | gin RPS | pulse/gin | pulse p99 | gin p99 |
 |---|---|---|---|---|---|---|
-| `bare` | 64 | 27848 | 30956 | **0.90x** | 11.27ms | 11.45ms |
-| `bare` | 256 | 36106 | 38183 | **0.94x** | 32.42ms | 38.89ms |
-| `obs` | 64 | 25392 | 29181 | **0.87x** | 11.84ms | 11.99ms |
-| `obs` | 256 | 34542 | 37166 | **0.92x** | 31.11ms | 39.71ms |
+| `bare` | 64 | 27494 | 31043 | **0.89x** | 11.32ms | 11.60ms |
+| `bare` | 256 | 36036 | 37951 | **0.95x** | 31.18ms | 37.99ms |
+| `obs` | 64 | 25332 | 29616 | **0.85x** | 11.49ms | 11.63ms |
+| `obs` | 256 | 33437 | 36882 | **0.91x** | 32.16ms | 39.94ms |
 
-- **The bare pairing is on par**: 0.90–0.94×; the p99 is lower on both concurrency levels (11.27ms vs 11.45ms, 32.42ms vs 38.89ms). The pairing is `gin.New()` ↔ `web.New(web.Minimal())` — neither side carries default middleware.
-- **The observability pairing** (`gin.Default()` ↔ `web.New()`, both sides with their default middleware): 0.87× / 0.92×. On this pairing pulse-web additionally does three things gin does not — a TraceID, the route template (`/users/{id}` rather than the concrete path), and error classification; for reference, gin's own default middleware costs 5.7% / 2.7% between these two pairings.
+- **The bare pairing is on par**: 0.89–0.95×; the p99 is lower on both concurrency levels (11.32ms vs 11.60ms, 31.18ms vs 37.99ms). The pairing is `gin.New()` ↔ `web.New(web.Minimal())` — neither side carries default middleware.
+- **The observability pairing** (`gin.Default()` ↔ `web.New()`, both sides with their default middleware): 0.85× / 0.91×. On this pairing pulse-web additionally does three things gin does not — a TraceID, the route template (`/users/{id}` rather than the concrete path), and error classification; for reference, gin's own default middleware costs 4.6% / 2.8% between these two pairings.
 - **What carries the protocol is the pairing, not the absolute values**: the same cell moved from 28k to 78k between sessions (this round's absolute RPS is about half of the previous round's — machine state, nothing else), so only the paired ratio within one round counts (whole-machine drift such as the power state cancels out). **The two earlier independent sessions agree item by item** (0.90/0.91, 0.95/0.95, 0.81/0.82, 0.92/0.93) — that is what makes this more trustworthy than the absolute values.
 - The round before that (2026-09-14) had the observability pairing at **0.65× / 0.88×** — that round used the **then-current** default sink `SlogSink`. With the default now `ConsoleSink` and the same protocol re-run, you get 0.82× / 0.93×. Absolute values are not comparable across rounds; only the paired ratio from the same round is.
-- This round (2026-09-20) was re-run because the response writer **opened up `Hijack`** (a change on the request path), following the same discipline; the conclusion is unchanged.
+- This round (2026-09-20) was re-run twice, and the later run is the one recorded: first because the response writer **opened up `Hijack`** (a change on the request path; 0.90× / 0.94×, 0.87× / 0.92×), then a re-check after the review fix to the post-hijack write protection (0.89× / 0.95×, 0.85× / 0.91×) — both land in the same noise band, and **the conclusion is unchanged**.
 - The measurement code used to live on a side branch, so when the default sink changed it **kept silently measuring the old default** — no error, no warning. It now follows the main branch, and CI covers its build / vet / test separately so it cannot rot unnoticed.
 
 Reproduce:
