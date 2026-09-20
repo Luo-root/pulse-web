@@ -89,9 +89,11 @@ promhttp is a good example split in two: **collection** uses `Adapt` around `pro
 app.GET("/metrics", web.Wrap(promhttp.Handler()))
 ```
 
-## Ecosystem pieces already measured
+## Ecosystem pieces already exercised
 
-"Same shape" does not mean "absorbs cleanly". This table is what was actually run:
+::: warning This table is a local spike, **not in CI, not a maintenance guarantee**
+The data comes from one end-to-end matrix on a dev machine (same middleware, same route, compared item by item through `Adapt` against wrapped outside `app.Handler()`: status, response headers, body). That evidence does not live in the repo and does not run in CI, so it may already have drifted as upstream releases. Treat it as "this name is worth trying", not as a contract. If you adopt one, run the check in the next section yourself.
+:::
 
 | Middleware | Result | How far it was verified |
 |---|---|---|
@@ -100,8 +102,10 @@ app.GET("/metrics", web.Wrap(promhttp.Handler()))
 | rs/cors | Real requests match; **preflight never arrives** (405) → wrap outside | End to end |
 | chi `Recoverer` | Both 500, but the **body differs** (Recoverer writes its own) → use the framework's panic handling | End to end |
 | chi `CleanPath` | **Panics either way**, unusable | End to end |
-| `httprate` | Whole family is `func(next http.Handler) http.Handler`, expected to work as-is | Signature only |
-| `gorilla/csrf` | All four seams line up (replaced request / writes headers first / short-circuits / reads the form on demand) | Source review, not end to end |
+| `httprate` | Whole family is `func(next http.Handler) http.Handler` | **Signature only**, never ran |
+| `gorilla/csrf` | All four seams line up in the source (replaced request / writes headers first / short-circuits / reads the form on demand) | **Source review only**, never ran |
+
+The last two rows only mean "the shape fits" — **not** "it works". They are candidates, not conclusions.
 
 ## Verifying a middleware yourself
 

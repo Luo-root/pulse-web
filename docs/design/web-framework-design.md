@@ -19,7 +19,7 @@
 6. **一等观测**——装配期 `Bootstrap` + 请求期 `Trace` + `AccessLog`；32hex TraceID；`X-Trace-Id` 回写；可选 **span 出口**（`WithSpanHook`，把请求接进 W3C / OTel 追踪体系，见 [#76](https://github.com/Luo-root/pulse-web/issues/76)）
 7. **进程级装配面**——`app.Root()` / `web.WithRoot(k)`；其余用 kernel 原生 API（`Provide` / `Use` / `Loader`）
 8. **生命周期**——`Run`（信号 → `Server.Shutdown` → `OnShutdown` → `root.Dispose` → Sink flush）、`Serve`、`Handler`
-9. **stdlib 互操作**——`Wrap(http.Handler) Handler`，`Handler()` 反向导出
+9. **stdlib 互操作**——三条路径：`Wrap(http.Handler) Handler` 接 stdlib handler 进来、`Adapt(func(http.Handler) http.Handler) Middleware` 把 stdlib 中间件接进**洋葱内**、`Handler()` 反向导出
 10. **静态文件**——`Static(prefix, dir)`，**静态资源同样经过全局与分组中间件**（与普通路由共用注册路径）
 11. **流式响应**——`c.Writer()` 直接写字节 + `c.Flush()` 逐段推送（SSE / chunked / 大文件），仍是一条 AccessLog
 12. **HTML 模板**——`c.HTML()`，薄封装 stdlib `html/template`（生产缓存 / 开发热重载）
@@ -807,6 +807,7 @@ v1 只做当前视图：`app.Debug("/debug/pulse")` 输出 `kernel.FiberSnapshot
 
 | 项 | 去路 |
 |---|---|
+| 自研中间件实现（CORS / CSRF / 鉴权 / 限流…） | 不做——框架只给**缝**：`Adapt` 把生态里 stdlib 形状的中间件接进洋葱、`Wrap` 接 stdlib handler。要拦预检的 CORS 必须外包 `Handler()`（路由先于中间件，见「中间件与 stdlib 互操作」）。哪些生态件实测可吸纳、各挂哪个挂载点，见站点「stdlib 中间件接入」；官方要不要出自研件另议（[#61](https://github.com/Luo-root/pulse-web/issues/61)） |
 | `AsyncSink`（队列 / Drop / flushTimeout） | **上游已提供**（`observability.NewAsyncSink`，v0.2.1）——web 不另造缓冲层，`WithSink` 接入即可。注意组合语义：`AsyncSink.Flush` 只排空**它自己的**队列、不级联 inner 的 `Flush`，所以异步化的正确组合是 `NewAsyncSink(SlogSink)`；用 `AsyncSink` 包另一个缓冲出口（如 `LineSink`）会留下未落盘的内层缓冲，框架无从代劳 |
 | `Sink.Close`（停协程） | 不做——出口所有权属装配方：`Detach` 允许进程级后台任务继续写同一 Sink，框架在关闭时 `Close` 它会静默丢弃这些记录。关闭时序只负责 flush 并记错误 |
 | 流式双记录（Flush 启发式） | 不做——普通 handler / 中间件的 `Flush()` 会误判；SSE 的语义已由"handler 不返回 ⇒ AccessLog 晚写"覆盖。需要"流开始"再显式另开票 |
@@ -841,7 +842,7 @@ pulse-web/
 ├── bodylimit.go               # BodyLimit 中间件：按路由 / 分组限请求体（#38）
 ├── errors.go                  # HTTPError / StatusCoder / PanicError / 默认 mapper
 ├── observe.go                 # TraceID 生成与上游头解析（32hex）
-├── wrap.go                    # stdlib 互操作（Wrap）
+├── wrap.go                    # stdlib 互操作（Wrap / Adapt）
 ├── detach.go                  # Detached 值袋子（跨 goroutine 的安全值）
 ├── templates.go               # html/template 薄封装 + web.H
 ├── console_sink.go            # 默认出口：给人读的列式单行（见「默认出口」——薄壳 + 版式渲染器）
@@ -915,8 +916,8 @@ mark 的走势**直接沿用 pulse**（平段 → 上升 → 峰值 → 深谷 �
   证据：`TestTraceIDGeneratedAndSharedAcrossRecord`、`TestDetachSharesTraceAndRootAccess`；入站头采纳另见 `TestTraceparentAdopted` / `TestB3TraceIDAdopted` / `TestB3TraceID16HexNormalized`（16hex 左垫归一）/ `TestZeroTraceIDTreatedAsAbsent`（全零视为不存在）/ `TestMalformedTraceHeadersIgnored`。
 - [x] **span 出口可接**（[#76](https://github.com/Luo-root/pulse-web/issues/76)）：`WithSpanHook` 把请求的 span 身份交给追踪体系（官方适配在 `otel/` nested module）；**框架不编造 span-id**，两个响应头各写各的，入站 `traceparent` 的校验与官方 propagator 同口径
   证据：`span_test.go` 17 条——请求事实与访问日志同源（`TestSpanHookCarriesRequestFacts`）、注入到达中间件与 handler（`TestSpanHookInjectionReachesHandler`）、**404 也保住注入的 context**（`TestSpanInjectionOnUnmatchedRoute`）、`X-Trace-Id` 与 `Server-Timing` 各写各的（`TestSpanTwoResponseHeaders`）、采用 hook 的身份（`TestSpanAdoptsHookIdentity`）、入站 parent 与 flags（`TestSpanParentFromInboundTraceparent`）、严格解析 4 合法 / 10 非法逐条（`TestTraceparentStrictParsing`）、B3 只给 trace-id（`TestB3GivesTraceIDOnly`）、panic 与映射错误后的状态码（`TestSpanOnPanicAndMappedErrors`）、`nil` 装配期 panic（`TestSpanHookNilPanics`）、handler 读得到 span-id（`TestSpanIDIsReadableInHandler`）；`otel/otelweb_test.go` 12 条——server span 形状（`TestServerSpanFromRequest`）、入站父（`TestServerSpanAdoptsInboundParent`）、状态语义四档（`TestStatusSemantics`）、**下游注入的 parent-id 就是本请求 span-id**（`TestDownstreamPropagationUsesServerSpanID`）、记录里的 `span.id` 与导出 span 一致（`TestAccessRecordCarriesSpanID`）、**与官方 propagator 的差分对照 16 条**（`TestParsingAgreesWithOfficialPropagator`）、**span 名永不使用 URI 路径**（`TestSpanNameNeverUsesURIPath`，含 404 的几种形态）、**方法归一三档**（`TestMethodNormalizedPerSemconv`）、**注入的 context 走完边角路径**（`TestContextChainSurvivesEdgePaths`：未匹配路由 / panic / 映射错误 / `Wrap` / 中间件，判据是 span 被正常结束并导出）、**并发不串台**（`TestConcurrentRequestsDoNotCrosstalk`，64 并发 + `-race`）、**没有 span 身份时不编造**（`TestSpanNoIdentityWritesNoSpanID`：不写 `Server-Timing`、记录里没有 `span.id`）、**`Minimal()` 与 span 出口的分工**（`TestMinimalWithSpanHook`）、**`Detached` 带的是发起请求的那个 span**（`TestDetachCarriesSpanIdentity` / `TestDetachWithoutSpanHook`）、**关掉入站头信任后 span 侧同样新起 trace**（`TestUntrustedTraceHeaderSkipsInboundForSpan`）、**tracestate 原样透传**（`TestTraceStatePassedThroughVerbatim`）、**后台任务建 link 而不是父子**（`TestDetachedWorkLinksToRequestSpan`，真 SDK），外加钉住「记录侧保留原始方法」的 `TestRecordKeepsRawMethod`。
-- [x] **标准库兼容**：挂载 stdlib 中间件无侵入；`Wrap` 双向适配
-  证据：`TestWrapStdlibHandler`、`TestEngineUnderStdlibMiddleware`、`TestWrapPanicCaughtByEngine`。
+- [x] **标准库兼容**：三条路径都在——`Wrap` 接 stdlib handler 进来、`Adapt` 把 stdlib 中间件接进**洋葱内**、`Handler()` 把引擎导出去；`Wrap` 双向适配
+  证据：`TestWrapStdlibHandler`、`TestEngineUnderStdlibMiddleware`、`TestWrapPanicCaughtByEngine`；`Adapt` 13 条——真实状态码与字节数（`TestAdaptMiddlewareObservesRealStatusAndBytes`）、短路回填采集层（`TestAdaptShortCircuitReachesAccessLog`）、换过的 request 传下去（`TestAdaptReplacedRequestReachesHandler`）、**handler error 穿过适配层**（`TestAdaptPassesHandlerErrorThrough`）、预检到不了中间件（`TestAdaptDoesNotSeePreflight`）、读得到路由模板（`TestAdaptCanReadRouteTemplate`）、body 穿过中间件且体积记压缩前（`TestAdaptBodyRewritingMiddlewareKeepsResponseValid`）、无条件收尾的**已知边界**（`TestAdaptUnconditionalFinalizeLocksStatus`）、Flusher 透出与不虚报（`TestAdaptKeepsFlusher` / `TestAdaptDoesNotOverclaimFlusher`）、panic 时还原 writer（`TestAdaptRestoresCtxOnPanic`）、两层叠序（`TestAdaptLayersNest`）、`Adapt(nil)` 装配期 fail-fast（`TestAdaptNilMiddlewareFailsFast`）。每条守卫都配了变异探针（8 个变异全部被对应用例抓到）。
 - [x] **ServerConfig 契约**：6 个默认值 + 「非零覆盖、零值保持默认」+ 配置**真的**落到 `http.Server` 上
   证据：`TestDefaultServerConfigValues`、`TestWithServerMergesNonZeroFields`、`TestServerConfigReachesHTTPServer`（1 KiB 上限下超限请求头被拒 431）。
 - [x] **流式响应可用**：`c.Writer()` + `c.Flush()` 逐段推送（SSE），首刷（= 第一次写出：`Write` / `Flush` / 引擎收尾）落 `Status()` 设置（缺省 200）；底层不支持 `http.Flusher` 时返回明确 error；**仍是一条 AccessLog**（状态码与体积照常采集）

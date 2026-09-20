@@ -52,7 +52,8 @@ Anything in this repository — the framework's own handling of a request, and i
 - the response writer wrapper: first-write status capture, byte counting, `Flush`;
 - TraceID generation and the inbound header trust switch;
 - HTML template rendering and static file serving;
-- stdlib interop (`web.Wrap` in, `Engine.Handler()` out);
+- stdlib interop (`web.Wrap` for stdlib handlers in, `web.Adapt` for stdlib middleware inside
+  the onion, `Engine.Handler()` out);
 - assembly and lifecycle: `WithRoot` and its cascading dispose, the graceful-shutdown
   sequence;
 - the default console output and the fields an observation record can hold.
@@ -178,7 +179,7 @@ Pulse-Web 目前仍在 1.0 之前（`v0.x`）。本文件说明漏洞上报方�
 - 响应写出器包装：首刷状态码捕获、字节计数、`Flush`；
 - TraceID 生成与入站链路头的信任开关；
 - HTML 模板渲染与静态文件服务；
-- stdlib 互操作（`web.Wrap` 入、`Engine.Handler()` 出）；
+- stdlib 互操作（`web.Wrap` 接 stdlib handler 入、`web.Adapt` 把 stdlib 中间件接入洋葱内、`Engine.Handler()` 出）；
 - 装配与生命周期：`WithRoot` 的级联销毁、优雅关闭时序；
 - 默认控制台输出，以及一条观测记录能装得下的字段面。
 

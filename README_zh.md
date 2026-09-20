@@ -238,8 +238,11 @@ span 出口让请求在你的追踪后端里成为**一条真实 span**。框架
 
 ```go
 app.Handle("/legacy", web.Wrap(http.HandlerFunc(oldHandler)))    // stdlib handler 进来
+app.Use(web.Adapt(chiMW.Logger))                                 // 生态中间件接进洋葱内
 http.Handle("/app/", http.StripPrefix("/app", app.Handler()))    // 引擎作为 http.Handler 出去
 ```
+
+三个方向都是**缝**、不是实现：`Wrap` 接 stdlib handler、`Adapt` 把 `func(http.Handler) http.Handler` 形状的生态中间件（logger / 鉴权 / 限流 / 指标计数……）接进洋葱内、`Handler()` 反向导出。哪个中间件该进洋葱、哪个该外包 `Handler()`（比如要拦预检的 CORS），判据见[指南「stdlib 中间件接入」](https://luo-root.github.io/pulse-web/guide/middleware)。
 
 它**不是**什么：不是自带一整套社区中间件目录的微框架。如果你要的是生态、是团队最高的熟悉度，gin、chi、echo 是更明显的选择。Pulse-Web 面向的是那些宁可把依赖面控制在「标准库加两个包」、并且想要开箱即得的观测能力的服务。
 

@@ -79,8 +79,8 @@ func Wrap(h http.Handler) Handler {
 //   - **不改中间件的语义**：panic 谁接、错误响应体长什么样，仍由中间件自己
 //     决定（chi Recoverer 写出的 500 与框架兜底就不是同一个响应体）。
 //
-// 中间件该挂洋葱内还是外包 Handler()，见设计文档「中间件与 stdlib 互操作」
-// 一节的对照表。
+// 中间件该挂洋葱内还是外包 `Handler()`、以及各生态件的实测结论，见站点指南
+// 「stdlib 中间件接入」（`site/guide/middleware.md`）。
 func Adapt(m func(http.Handler) http.Handler) Middleware {
 	if m == nil {
 		panic("web: Adapt requires a non-nil middleware")

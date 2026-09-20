@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -241,8 +242,101 @@ func TestAdaptReplacedRequestReachesHandler(t *testing.T) {
 	}
 }
 
-// gzipWriter / gzipMW 代表「改写 body」这一类中间件（chi Compress 同形）：
-// 把写出的字节压过一遍再交给下游。
+// TestAdaptPassesHandlerErrorThrough 钉住框架契约在 Adapt 里的**全部落点**：handler 返回的
+// error 照常穿过适配层交给错误映射器。直通 Adapt（不改 writer、不改 request）不能让 error 消失。
+//
+// 反证：把 `if called { return err }` 写成 `return nil`——挂了 Adapt 的路由整条错误模型失效，
+// 404 变 200，且访问日志跟着记错。
+func TestAdaptPassesHandlerErrorThrough(t *testing.T) {
+	e, sink := newTestEngine(t)
+	e.Use(Adapt(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { next.ServeHTTP(w, r) })
+	}))
+	e.GET("/x", func(c *Ctx) error { return NotFound("missing", nil) })
+
+	rec := doReq(e, "GET", "/x", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d，want 404（handler 的 error 被适配层吞了）", rec.Code)
+	}
+	var env struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("响应不是统一错误信封：%v（body=%q）", err, rec.Body.String())
+	}
+	if env.Error.Code != "missing" {
+		t.Fatalf("信封 code = %q，want missing", env.Error.Code)
+	}
+	if logRec := waitRecord(t, sink, eventHTTPReq); logRec.Status != "404" {
+		t.Fatalf("访问日志 Status = %q，want 404", logRec.Status)
+	}
+}
+
+// TestAdaptDoesNotSeePreflight 钉住「不搬动路由」这条边界：路由匹配先于中间件，所以只注册了
+// GET 时，预检 OPTIONS 根本到不了中间件——405 + Allow，中间件一次都没跑、也没有 CORS 头。
+//
+// 这正是 CORS 必须外包 `Handler()` 的实证。（godoc / 站点 / 设计文档写了三遍，这里把它钉成红灯。）
+func TestAdaptDoesNotSeePreflight(t *testing.T) {
+	e, _ := newTestEngine(t)
+	called := false
+	e.Use(Adapt(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			next.ServeHTTP(w, r)
+		})
+	}))
+	e.GET("/api", func(c *Ctx) error { return c.Text(http.StatusOK, "ok") })
+
+	rec := doReq(e, "OPTIONS", "/api", nil)
+	if called {
+		t.Fatal("预检跑到了中间件——「路由先于中间件」这条边界不成立了？")
+	}
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d，want 405", rec.Code)
+	}
+	if allow := rec.Header().Get("Allow"); !strings.Contains(allow, "GET") {
+		t.Fatalf("Allow = %q，want 含 GET", allow)
+	}
+	if acao := rec.Header().Get("Access-Control-Allow-Origin"); acao != "" {
+		t.Fatalf("ACAO = %q，want 空（预检没经过中间件）", acao)
+	}
+	// 正向对照：同一条路由的 GET 确实经过中间件
+	if got := doReq(e, "GET", "/api", nil); got.Code != http.StatusOK || !called {
+		t.Fatalf("GET status = %d called = %v，want 200 / true", got.Code, called)
+	}
+}
+
+// TestAdaptCanReadRouteTemplate 钉住 Adapt 相对外包 `Handler()` 的**唯一卖点**：中间件跑在
+// 路由之后，所以读得到路由模板（`r.Pattern`）。外包时这里是空的——路由还没匹配。
+func TestAdaptCanReadRouteTemplate(t *testing.T) {
+	e, _ := newTestEngine(t)
+	var inside string
+	e.Use(Adapt(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			inside = r.Pattern
+			next.ServeHTTP(w, r)
+		})
+	}))
+	e.GET("/users/{id}", func(c *Ctx) error { return c.Text(http.StatusOK, c.Path("id")) })
+
+	if got := doReq(e, "GET", "/users/42", nil).Body.String(); got != "42" {
+		t.Fatalf("body = %q，want 42", got)
+	}
+	// stdlib 的 Pattern 带方法前缀（引擎内部也这么读，再去掉前缀得到 http.route）。
+	if inside != "GET /users/{id}" {
+		t.Fatalf("r.Pattern = %q，want %q（洋葱内读不到路由模板）", inside, "GET /users/{id}")
+	}
+}
+
+// gzipWriter / gzipMW 是**改写 body 的最小中间件**——不是 chi Compress。
+//
+// 它在 next 返回后**无条件**收尾（`defer zw.Close()`），这正是 godoc「压缩类推外包」
+// 所指的那种踩坑形态：幸福路没问题，但 handler 返回 error 时会把状态锁成 200（见
+// TestAdaptUnconditionalFinalizeLocksStatus）。chi Compress 是「真写过才收尾」，
+// 所以它经 Adapt 与外包完全一致——那是特例，不是通例。
 type gzipWriter struct {
 	http.ResponseWriter
 	zw *gzip.Writer
@@ -265,7 +359,7 @@ func gzipMW(next http.Handler) http.Handler {
 // 反证（naive 适配器）：handler 绕过中间件直接写底层，于是
 // `Content-Encoding: gzip` 配着明文 body 发出去，客户端报 gzip: invalid header。
 func TestAdaptBodyRewritingMiddlewareKeepsResponseValid(t *testing.T) {
-	e, _ := newTestEngine(t)
+	e, sink := newTestEngine(t)
 	e.Use(Adapt(gzipMW))
 	e.GET("/g", func(c *Ctx) error { return c.Text(http.StatusOK, "compress me") })
 
@@ -283,6 +377,49 @@ func TestAdaptBodyRewritingMiddlewareKeepsResponseValid(t *testing.T) {
 	}
 	if string(plain) != "compress me" {
 		t.Fatalf("解压后 = %q，want %q", plain, "compress me")
+	}
+	// 体积口径：采集层在 gzip **外面**，记的是压缩前字节数（#89 当显式契约）。
+	logRec := waitRecord(t, sink, eventHTTPReq)
+	if got := attrsOf(logRec)[attrHTTPBodySize]; got != int64(len("compress me")) {
+		t.Fatalf("访问日志 body.size = %v，want %d（压缩前）", got, len("compress me"))
+	}
+}
+
+// TestAdaptUnconditionalFinalizeLocksStatus 钉住 godoc 里那条**已知边界**（不是承诺）：
+// 在 next 返回后无条件收尾的中间件（本文件的 gzipMW），碰到 handler 返回 error 时会把
+// 状态锁成 200，并把 gzip 尾与**未被压缩**的错误体拼在一起。
+//
+// 与 TestAdaptPassesHandlerErrorThrough 是一对：直通 Adapt 必须让 error 穿过去；
+// 「无条件收尾」则是中间件自己的形态问题——所以压缩类默认推外包。
+//
+// 用真 server：`httptest.ResponseRecorder` 的 WriteHeader 是「最后一次赢」，会把 200 覆盖成
+// 框架随后写的 404，测不出「首刷已落定」这件事（真链路是「第一次赢」）。
+func TestAdaptUnconditionalFinalizeLocksStatus(t *testing.T) {
+	e, _ := newTestEngine(t)
+	e.Use(Adapt(gzipMW))
+	e.GET("/boom", func(c *Ctx) error { return NotFound("missing", nil) })
+
+	srv := httptest.NewServer(e)
+	defer srv.Close()
+
+	// 关掉 Transport 的透明解压：默认客户端读到「gzip 流后面跟着明文」会直接报
+	// `gzip: invalid header`——那是同一个损坏的另一面；这里要看的是原始字节。
+	client := &http.Client{Transport: &http.Transport{DisableCompression: true}}
+	resp, err := client.Get(srv.URL + "/boom")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d，want 200（无条件收尾的中间件先落码，这是已知边界）", resp.StatusCode)
+	}
+	if !bytes.Contains(raw, []byte("missing")) {
+		t.Fatalf("错误体没被拼进来？raw=%q", raw)
 	}
 }
 

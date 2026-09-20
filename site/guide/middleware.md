@@ -89,19 +89,23 @@ promhttp 是个拆开看的好例子：**采集**用 `Adapt` 接 `promhttp.Instr
 app.GET("/metrics", web.Wrap(promhttp.Handler()))
 ```
 
-## 已经实测过的生态件
+## 已经跑过的生态件
 
-「同形状」不等于「能吸纳」，下表是逐项跑过的结论：
+::: warning 这张表是本地 spike 的结论，**不进 CI、不是库维护的保证**
+数据来自开发机上的一次端到端矩阵（同一中间件、同一路由，经 `Adapt` 与包在 `app.Handler()` 外面逐项比对状态码 / 响应头 / body）。证据工程还没进仓库、没进门禁，上游发版后可能已经漂了——把它当「这个名字值得试试」，不要当契约。真要用请按下一节自己跑一遍。
+:::
 
-| 中间件 | 结论 | 验证程度 |
+| 中间件 | 结论 | 验证到哪一步 |
 |---|---|---|
 | chi `Logger` / `RequestID` / `RealIP` / `Timeout` / `Compress` | 经 `Adapt` 与外包**逐项一致** | 端到端（状态码 + 9 个响应头 + body） |
 | `promhttp.InstrumentHandlerCounter` | 同上，含状态码 | 端到端 |
 | rs/cors | 真实请求一致；**预检到不了**（405）→ 推荐外包 | 端到端 |
 | chi `Recoverer` | 两边都 500，但**响应体不同**（Recoverer 自己写）→ panic 兜底用框架自己的 | 端到端 |
 | chi `CleanPath` | 经 `Adapt` 与外包**都 panic**，不可用 | 端到端 |
-| `httprate` | 全族是 `func(next http.Handler) http.Handler`，预期直接吃 | 只核过签名 |
-| `gorilla/csrf` | 四条接缝（换 request / 先写头 / 短路 / 按需读表单）都对得上 | 源码核对，未端到端 |
+| `httprate` | 全族是 `func(next http.Handler) http.Handler` | **只核过签名**，没跑过 |
+| `gorilla/csrf` | 四条接缝（换 request / 先写头 / 短路 / 按需读表单）在源码上对得上 | **源码核对**，没跑过 |
+
+最后两行只是「形状上符合」，**不是「已经能跑」**——它们是候选，不是结论。
 
 ## 自己验证一个中间件
 
