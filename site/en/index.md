@@ -65,7 +65,7 @@ import { withBase } from 'vitepress'
     <div class="pw-cell">
       <span class="pw-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 15c2.5 0 2.5-6 5-6s2.5 6 5 6 2.5-6 5-6 2.5 6 5 6"/></svg></span>
       <h3>Streaming works</h3>
-      <p>The response writer promises <code>http.Flusher</code> and nothing else — SSE writes and flushes behind a deliberately narrow interface, with no Hijacker-style back doors.</p>
+      <p>The response writer is an explicit short list — <code>Flush</code> / <code>Hijack</code> / <code>SetWriteDeadline</code> / <code>EnableFullDuplex</code> forward to the underlying writer, so SSE and WebSocket upgrades both go through it; no <code>Pusher</code>, no <code>FlushError</code>, no <code>Unwrap()</code>. Deliberately narrow.</p>
       <a class="pw-link" :href="withBase('/en/guide/responses')">Responses →</a>
     </div>
   </div>

@@ -147,7 +147,7 @@ return web.NotFound("user", err)                // 404 + code "user"，cause 不
 
 ### 流式响应（SSE）
 
-直接写 `c.Writer()`，用 `c.Flush()` 把每段推出去。响应写出器是**有意收窄**的接口：只承诺 `http.Flusher`，别的都不透出。
+直接写 `c.Writer()`，用 `c.Flush()` 把每段推出去。响应写出器是一份**有意收窄、且显式**的清单：`Flush`、`Hijack`、`SetWriteDeadline`、`EnableFullDuplex` 四个显式实现并转发底层，`Pusher`、`FlushError` 与 `Unwrap()` 都不透出——协议升级（WebSocket）因此走 `Hijack`，生态里的 websocket 库零改动可用。
 
 ```go
 app.GET("/events", func(c *web.Ctx) error {

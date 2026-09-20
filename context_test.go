@@ -651,16 +651,20 @@ func TestCtxFlushWithoutFlusherReturnsError(t *testing.T) {
 	}
 }
 
-// TestResponseWriterKeepsFlusherCapability 钉住包装器的**能力边界**：它只显式实现
-// `http.Flusher`；`FlushError` / `Hijacker` / `Pusher` / `SetWriteDeadline` 都不透出。
+// TestResponseWriterCapabilitySurface 钉住包装器的**能力面清单**：`Flush` /
+// `Hijack` / `SetWriteDeadline` / `EnableFullDuplex` 四个显式实现并转发底层；
+// `Pusher` / `FlushError` 不透出；刻意**不**提供 `Unwrap()`。
 //
 // 边界要钉全，是因为「包装器＝底层能力都在」是错的，而类型断言静默失败很难查：
-// 内嵌 `http.ResponseWriter` 只提升 `Header` / `Write` / `WriteHeader`，Flusher 来自
-// `responseWriter` 自己实现的 `Flush()`。要升级协议（WebSocket）得走 `Wrap` 拿原始 writer。
+// 内嵌 `http.ResponseWriter` 只提升 `Header` / `Write` / `WriteHeader`，其余能力
+// 必须显式实现才有。协议升级（WebSocket）走 `Hijack`——生态里 gorilla 是直接断言、
+// coder 是先断言再沿 `Unwrap()` 链找，所以只给 `Unwrap` 不够（gorilla 那条不会展开链）。
+// 反过来说，给了 `Unwrap` 就等于把底层 writer 整个交出去（连这里刻意不透出的两个
+// 一起），窄清单就没有意义了——所以它不在清单里，且由本用例反向钉住。
 //
 // 用真实服务器：`httptest.ResponseRecorder` 本来就不支持 Hijacker，
 // 测不出「包装器把底层有的能力过滤掉了」这件事。
-func TestResponseWriterKeepsFlusherCapability(t *testing.T) {
+func TestResponseWriterCapabilitySurface(t *testing.T) {
 	e, _ := newTestEngine(t)
 
 	type caps struct {
@@ -668,8 +672,10 @@ func TestResponseWriterKeepsFlusherCapability(t *testing.T) {
 		flushError bool
 		hijacker   bool
 		pusher     bool
+		unwrapper  bool
 		rcFlush    error
 		rcDeadline error
+		rcDuplex   error
 	}
 	got := make(chan caps, 1)
 
@@ -680,9 +686,11 @@ func TestResponseWriterKeepsFlusherCapability(t *testing.T) {
 		_, cs.flushError = w.(interface{ FlushError() error })
 		_, cs.hijacker = w.(http.Hijacker)
 		_, cs.pusher = w.(http.Pusher)
+		_, cs.unwrapper = w.(interface{ Unwrap() http.ResponseWriter })
 		rc := http.NewResponseController(w)
 		cs.rcFlush = rc.Flush()
 		cs.rcDeadline = rc.SetWriteDeadline(time.Now().Add(time.Second))
+		cs.rcDuplex = rc.EnableFullDuplex()
 		got <- cs
 		return nil
 	})
@@ -706,16 +714,171 @@ func TestResponseWriterKeepsFlusherCapability(t *testing.T) {
 	if cs.flushError {
 		t.Fatal("FlushError 不该透出：ResponseController.Flush() 只能退回 Flusher.Flush()，flush 失败拿不到 error")
 	}
-	if cs.hijacker {
-		t.Fatal("Hijacker 不该透出：升级协议请走 Wrap 拿原始 writer")
+	if !cs.hijacker {
+		t.Fatal("http.Hijacker 必须可用——协议升级（WebSocket）的唯一入口，生态库正是靠它拿连接")
 	}
 	if cs.pusher {
 		t.Fatal("Pusher 不该透出")
 	}
+	if cs.unwrapper {
+		t.Fatal("Unwrap 不该透出：它会把底层 writer 整个交出去，连 Pusher / FlushError 一起")
+	}
 	if cs.rcFlush != nil {
 		t.Fatalf("ResponseController.Flush() = %v，want nil", cs.rcFlush)
 	}
-	if !errors.Is(cs.rcDeadline, http.ErrNotSupported) {
-		t.Fatalf("ResponseController.SetWriteDeadline() = %v，want http.ErrNotSupported", cs.rcDeadline)
+	if cs.rcDeadline != nil {
+		t.Fatalf("ResponseController.SetWriteDeadline() = %v，want nil", cs.rcDeadline)
+	}
+	if cs.rcDuplex != nil {
+		t.Fatalf("ResponseController.EnableFullDuplex() = %v，want nil", cs.rcDuplex)
+	}
+}
+
+// TestHijackHandsConnectionToHandler 钉住升级协议的那一步：handler 从
+// `c.Writer().(http.Hijacker)` 拿到的连接**真能用**，且交出之后框架不再碰这条响应
+// ——写出与 flush 都返回 http.ErrHijacked，而不是把字节静默写进别人的连接。
+//
+// 日志侧同时钉住那条契约：框架侧没落定状态码（handler 自己往裸连接写，框架看不见），
+// 访问日志按 101 补记并打上 connection.hijacked——**这条路上状态码不是框架的事实**，
+// 标记就是那张免责声明。
+func TestHijackHandsConnectionToHandler(t *testing.T) {
+	e, sink := newTestEngine(t)
+
+	e.GET("/hijack", func(c *Ctx) error {
+		h, ok := c.Writer().(http.Hijacker)
+		if !ok {
+			t.Fatal("c.Writer() 不是 http.Hijacker")
+		}
+		conn, buf, err := h.Hijack()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = conn.Close() }()
+
+		if _, err := buf.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi"); err != nil {
+			t.Fatalf("写裸连接失败：%v", err)
+		}
+		if err := buf.Flush(); err != nil {
+			t.Fatalf("刷裸连接失败：%v", err)
+		}
+
+		// 交出去之后：框架的写出路径必须明确拒绝。
+		if _, err := c.Writer().Write([]byte("x")); !errors.Is(err, http.ErrHijacked) {
+			t.Fatalf("hijack 后 Write = %v，want http.ErrHijacked", err)
+		}
+		if err := c.Flush(); !errors.Is(err, http.ErrHijacked) {
+			t.Fatalf("hijack 后 Flush = %v，want http.ErrHijacked", err)
+		}
+		return nil
+	})
+
+	srv := httptest.NewServer(e)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/hijack")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "hi" {
+		t.Fatalf("body = %q，want %q（handler 自己写的响应必须原样到达客户端）", body, "hi")
+	}
+
+	rec := waitRecord(t, sink, eventHTTPReq)
+	if rec.Status != "101" {
+		t.Fatalf("访问记录 Status = %q，want 101（框架看不到状态码时按协议升级补记）", rec.Status)
+	}
+	attrs := attrsOf(rec)
+	if attrs[attrConnHijacked] != true {
+		t.Fatalf("connection.hijacked = %v，want true", attrs[attrConnHijacked])
+	}
+	if v, ok := attrs[attrHTTPBodySize]; ok {
+		t.Fatalf("hijack 后不该记响应体积，得到 %v（记 0 会被读成「响应是空的」）", v)
+	}
+}
+
+// TestHijackUnsupportedReturnsError：底层不支持 Hijack 时返回明确 error（不是 panic、
+// 也不是静默放行）。HTTP/2 就是这种情况——h2 的 writer 不是 Hijacker。
+func TestHijackUnsupportedReturnsError(t *testing.T) {
+	e, _ := newTestEngine(t)
+
+	var hijackErr error
+	e.GET("/hijack", func(c *Ctx) error {
+		h, ok := c.Writer().(http.Hijacker)
+		if !ok {
+			t.Fatal("c.Writer() 不是 http.Hijacker")
+		}
+		_, _, hijackErr = h.Hijack()
+		return c.Text(http.StatusOK, "ok")
+	})
+
+	w := &plainWriter{} // 最小 writer：不实现 Hijacker
+	e.ServeHTTP(w, httptest.NewRequest("GET", "/hijack", nil))
+
+	if hijackErr == nil {
+		t.Fatal("底层不支持 Hijack 时应返回 error，得到 nil")
+	}
+	if !errors.Is(hijackErr, http.ErrNotSupported) {
+		t.Fatalf("错误应可 errors.Is(http.ErrNotSupported)：%v", hijackErr)
+	}
+	if !strings.Contains(hijackErr.Error(), "Hijack") {
+		t.Fatalf("错误文案应点明 Hijack 不支持：%v", hijackErr)
+	}
+	if w.code != http.StatusOK {
+		t.Fatalf("status = %d，want 200（hijack 失败不影响正常响应）", w.code)
+	}
+}
+
+// TestHijackSkipsErrorMapping：已 hijack 的连接上，框架**不**写错误响应。
+//
+// 错误映射发生在 handler 返回之后；如果不挡住，映射出来的错误体会被写进使用方
+// 已经接管的连接（实测里这是「500 写进 websocket」那一类事故）。原始 error 仍要
+// 进访问日志——观测不因为连接交出去而失忆。
+func TestHijackSkipsErrorMapping(t *testing.T) {
+	mapped := 0
+	e, sink := newTestEngine(t, WithErrorHandler(func(c *Ctx, err error) error {
+		mapped++
+		return nil
+	}))
+
+	e.GET("/boom", func(c *Ctx) error {
+		h, ok := c.Writer().(http.Hijacker)
+		if !ok {
+			t.Fatal("c.Writer() 不是 http.Hijacker")
+		}
+		conn, _, err := h.Hijack()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = conn.Close() }()
+		return NotFound("thing", nil)
+	})
+
+	srv := httptest.NewServer(e)
+	defer srv.Close()
+
+	// 连接被接管且没有再写任何响应：客户端拿到的是 EOF，而不是框架的错误体。
+	resp, err := http.Get(srv.URL + "/boom")
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatalf("不该有响应到达客户端，却拿到 status=%d", resp.StatusCode)
+	}
+
+	rec := waitRecord(t, sink, eventHTTPReq)
+	if rec.Status != "101" {
+		t.Fatalf("访问记录 Status = %q，want 101", rec.Status)
+	}
+	if mapped != 0 {
+		t.Fatalf("已 hijack 的连接上不该再跑错误映射器，跑了 %d 次", mapped)
+	}
+	if rec.Err == nil {
+		t.Fatal("原始 error 仍要进访问日志：连接交出去不等于观测失忆")
+	}
+	if got := attrsOf(rec)[attrConnHijacked]; got != true {
+		t.Fatalf("connection.hijacked = %v，want true", got)
 	}
 }

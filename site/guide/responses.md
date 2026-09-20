@@ -86,8 +86,12 @@ app.GET("/raw", func(c *web.Ctx) error {
 
 包装器照常采集状态码与响应体积（所以访问日志里的 `size=` 对这条路径一样准）。
 
-::: warning `Writer()` 只承诺 `http.Flusher`
-底层能力（`Hijacker` / `Pusher` / `FlushError` / `SetWriteDeadline`）**不透出**——内嵌只提升 `Header` / `Write` / `WriteHeader`。所以 `http.NewResponseController(c.Writer())` 上只有 `Flush()` 可用，`Hijack()` / `SetWriteDeadline()` 返回 `http.ErrNotSupported`。**要升级协议（WebSocket）请用 `web.Wrap` 包一个 stdlib handler**，代价是拿不到 `*Ctx`。
+::: warning `Writer()` 的能力面是一份**显式的窄清单**
+**显式实现并转发底层的四个**：`Flush` / `Hijack` / `SetWriteDeadline` / `EnableFullDuplex`；**不透出** `Pusher` / `FlushError`，也**不提供 `Unwrap()`**（那等于把底层 writer 整个交出去，连上面两个一起）。内嵌 `http.ResponseWriter` 只提升 `Header` / `Write` / `WriteHeader`，其余能力必须显式实现才有——所以清单就是全部，一眼可见，不靠断言碰运气。
+
+**协议升级（WebSocket）走 `Hijack`**：`w := c.Writer().(http.Hijacker)` 拿到的就是这条连接，生态库零改动直接可用（`gorilla/websocket` 直接断言 `w.(http.Hijacker)`；`coder/websocket` 先断言、再沿 `Unwrap()` 链找——两条路都满足）。连接交出去之后框架不再写这条响应（`Write` / `Flush` 返回 `http.ErrHijacked`），收尾不落码、也不写兜底错误体；访问日志按 `101` 记并带 `connection.hijacked` 标记（本框架声明的扩展键），**不记** `http.response.body.size`——连接已交出，记 0 会被读成「响应是空的」。
+
+**两条边界**：① **HTTP/2 下不可用**（h2 的 writer 不是 `Hijacker`）；② **洋葱内可用，但受中间件影响**——`Adapt` 交出去的代理会转发 `Hijack`（`Use(Adapt(…))` 之后的升级路由照常工作），而中间件自己再包一层且不转发时同样会断，这与纯 stdlib 下完全同形（见 [stdlib 中间件接入](/guide/middleware)）。
 :::
 
 ## 流式：SSE

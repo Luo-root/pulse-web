@@ -50,7 +50,7 @@ if err := sink.Err(); err != nil {
 ### `Ctx` 的边界
 
 - **不可跨 goroutine**：它与请求及其响应写出器绑定。后台任务用 `c.Detach()`，拿到的是值袋子（`TraceID` / `HostID` / `Sink` / 进程级 `Root`），不是上下文——见[请求](/guide/requests)。
-- **响应写出器只承诺 `http.Flusher`**：`Hijacker` / `Pusher` / `FlushError` / `SetWriteDeadline` 不透出。要让「流式能干什么」在类型层面一眼可见，而不是靠断言碰运气。
+- **响应写出器的能力面是一份显式的窄清单**：`Flush` / `Hijack` / `SetWriteDeadline` / `EnableFullDuplex` 四个显式实现并转发底层；`Pusher` / `FlushError` 不透出，也不提供 `Unwrap()`（那等于把底层 writer 整个交出去，连上面两个一起）。协议升级（WebSocket）走 `Hijack`——交出连接后框架不再写这条响应，访问日志按 `101` 记并带 `connection.hijacked` 标记、不记响应体积。
 - **首刷之后状态码锁死**：`c.Writer().Write`、`c.Flush()`、handler 返回后的引擎收尾——三处里最先发生的那个落定状态码。
 
 ### 错误映射器契约

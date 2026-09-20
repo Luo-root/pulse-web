@@ -8,7 +8,7 @@
 
 ## 构建与测试
 
-需要 **Go 1.27+**（`go.mod` 写 `go 1.27.0`，工具链缺失会自动下载）。没有 Makefile、没有 linter 配置——下面八条就是全部 CI 门禁（`.github/workflows/ci.yml` 的八个 step，一一对应）：
+需要 **Go 1.27+**（`go.mod` 写 `go 1.27.0`，工具链缺失会自动下载）。没有 Makefile、没有 linter 配置——下面九条就是全部 CI 门禁（`.github/workflows/ci.yml` 的九个 step，一一对应）：
 
 ```bash
 go build ./...                                            # 编译
@@ -19,6 +19,7 @@ go test -run TestRequestPathAllocBudget ./bench/          # 分配预算门禁�
 go test -run '^$' -bench '^$' ./bench/                    # bench 编译检查
 (cd loadtest && go build ./... && go vet ./... && go test ./...)   # loadtest 独立 module——根 module 的 ./... 盖不到
 (cd otel && go build ./... && go vet ./... && go test ./...)       # otel 适配件同理（带 otel-go 依赖，主模块零依赖靠它保住）
+(cd interop && go build ./... && go vet ./... && go test ./...)    # interop 生态互操作对照同理（websocket / CORS / chi …）
 ```
 
 Windows PowerShell 下格式门禁写成：
@@ -39,11 +40,11 @@ Windows PowerShell 下格式门禁写成：
 go.mod                  # module github.com/Luo-root/pulse-web（package web）
 doc.go                  # 包文档：定位 / 快速开始 / 运行时契约
 engine.go               # Engine、选项、路由与分组、Static、ServeHTTP 时序、Run / Serve、Handler
-context.go              # Ctx、请求级 KV、响应写出（Writer / Flush / JSON / Text）、responseWriter 包装
+context.go              # Ctx、请求级 KV、响应写出（Writer / Flush / JSON / Text / Hijack）、responseWriter 包装
 bind.go                 # 请求体 / query 绑定：Content-Type 分派 + form / query 映射器
 errors.go               # HTTPError / StatusCoder / PanicError / 默认 mapper
 observe.go              # TraceID 生成与入站链路头解析（32hex）
-wrap.go                 # stdlib 互操作（Wrap / Adapt）
+wrap.go                 # stdlib 互操作（Wrap / Adapt；Adapt 的代理透出 Flusher 与 Hijacker）
 detach.go               # Detached 值袋子（跨 goroutine 的安全值）
 templates.go            # html/template 薄封装 + web.H
 console_sink.go         # 默认出口：给人读的列式单行（薄壳 + 版式渲染器）
@@ -54,6 +55,7 @@ assets/                 # 品牌事实源：logo.svg / banner.svg / favicon.svg
 bench/                  # 性能回归基线 + 分配预算门禁；muxprobe/ 是路由选型的一次性实测程序
 loadtest/               # 与 gin 的真实负载对比（**独立 module**，带 gin 依赖；根 module 的 ./... 不过 module 边界）
 otel/                   # 官方 OTel 适配（**独立 module**，带 otel-go 依赖；主模块只产出结构化 span 数据）
+interop/                # 生态互操作对照（**独立 module**，带 websocket / CORS / chi 等真依赖；站点上公布的兼容结论由它守着）
 docs/design/            # 设计文档（决策与验收清单的事实源）
 .github/workflows/ci.yml
 ```
@@ -72,7 +74,7 @@ docs/design/            # 设计文档（决策与验收清单的事实源）
 - **`Ctx` 不得跨 goroutine**（它与请求及其响应写出器绑定）；后台任务用 `c.Detach()`。
 - **handler 签名 `func(*Ctx) error`**，错误靠返回；状态码由错误映射器决定。外部错误用 `web.NotFound` / `web.BadRequest` 这类构造器包，不要绕到 `c.Writer()` 手写。
 - **stdlib 互操作三条路径都要在**：入用 `web.Wrap`，stdlib 中间件进洋葱用 `web.Adapt`，出用 `Engine.Handler()`。删掉任一条、或让其中一条需要手写适配器，都是回归。
-- **响应写出器只承诺 `http.Flusher`**；`Hijacker` / `Pusher` / `FlushError` / `SetWriteDeadline` 不透出。放宽它是 API 决策。
+- **响应写出器的能力面是一份显式的窄清单**：`Flush` / `Hijack` / `SetWriteDeadline` / `EnableFullDuplex` 四个显式实现并转发底层；`Pusher` / `FlushError` 不透出，也不提供 `Unwrap()`（那等于把底层 writer 整个交出去）。加能力是 API 决策，要一并定观测语义（见 `responseWriter.Hijack` 的 godoc）。
 - **可配置处一律 functional options**（`WithSink` / `WithMaxBodyBytes` …）。
 - **不允许逃生舱**：不加 `map[string]any` 式的「额外参数」，不做 vendor 特判，不留无类型属性袋子。
 - **公开 API 必须有 godoc**；中文注释是本仓库常态，改到哪就沿着用同一种语言写，不要顺手翻译。

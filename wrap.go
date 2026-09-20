@@ -1,6 +1,11 @@
 package web
 
-import "net/http"
+import (
+	"bufio"
+	"fmt"
+	"net"
+	"net/http"
+)
 
 // Wrap 把 stdlib http.Handler 适配为本框架的 Handler。
 //
@@ -45,7 +50,8 @@ func Wrap(h http.Handler) Handler {
 //  3. 中间件换掉的 request（r = r.WithContext(...)）**传得下去**——handler 用
 //     c.Request() 读到的就是换过的那一个。
 //
-// http.Flusher 照常透出，SSE 的逐条 flush 不受影响。
+// http.Flusher 照常透出，SSE 的逐条 flush 不受影响；http.Hijacker 同样透出
+// （底层支持时）——挂在 Adapt 之下的路由照样能升级协议，见 responseWriter.Hijack。
 //
 // 中间件与 handler 之间传值走 request context——这是 stdlib 自己的通道，框架
 // 不额外开取值入口：
@@ -72,8 +78,9 @@ func Wrap(h http.Handler) Handler {
 //   - **不解决「收尾型中间件 × error/panic」**：框架的错误映射发生在中间件
 //     返回**之后**，在 next 返回后无条件写响应的中间件（例如自己 defer
 //     zw.Close() 的 gzip）会把状态锁成 200。压缩类默认推外包。
-//   - **不透出 http.Hijacker**：框架对响应写出器的能力承诺只到 http.Flusher，
-//     断言 Hijacker 的中间件（WebSocket 升级）不可用。
+//   - **不透出 http.Pusher / FlushError**：响应写出器的能力面是一份显式的窄清单
+//     （Flush / Hijack / SetWriteDeadline / EnableFullDuplex），HTTP/2 的 Server
+//     Push 与 flush 错误上报不在其中。
 //   - **不保证「同形状就能接」**：依赖特定 router 上下文的中间件照旧不可用——
 //     chi 的 CleanPath 读 chi.RouteContext，经 Adapt 与外包都会 panic。
 //   - **不改中间件的语义**：panic 谁接、错误响应体长什么样，仍由中间件自己
@@ -87,7 +94,7 @@ func Adapt(m func(http.Handler) http.Handler) Middleware {
 	}
 	return func(c *Ctx, next Handler) error {
 		rawW, rawR := c.w.ResponseWriter, c.r
-		proxy := &adaptProxy{ResponseWriter: rawW}
+		proxy := &adaptProxy{ResponseWriter: rawW, target: c.w}
 
 		// 只在底层真的能 Flush 时才把 Flusher 交给中间件：代理一旦无条件带上
 		// Flush 方法，就会替底层虚报能力，Ctx.Flush() 的「不支持」判定被吃掉。
@@ -132,9 +139,14 @@ func Adapt(m func(http.Handler) http.Handler) Middleware {
 // adaptProxy 站在中间件外面，只记录、不改写：它兜住「中间件自己写响应」这条
 // 不经过框架采集层的路径。
 //
-// 刻意**不**实现 http.Flusher——理由见 Adapt 里 handed 的注释。
+// 刻意**不**实现 `http.Flusher`——理由见 Adapt 里 handed 的注释。`Hijack` 的取舍
+// 相反，**无条件实现**：它有返回值，底层不支持时能如实报错，不存在「替底层虚报
+// 能力」的问题；而少了它，挂在 `Use(Adapt(...))` 之下的升级路由会集体失效——
+// handler 手上的 writer 链要穿过这一层。hijack 成功时顺带把框架侧那条记录标上，
+// 那是「这条连接不再归框架管」的唯一凭据（见 responseWriter.Hijack）。
 type adaptProxy struct {
 	http.ResponseWriter
+	target *responseWriter // 框架侧那条 Ctx writer：hijack 时给它留痕
 	status int
 	bytes  int
 	wrote  bool
@@ -155,6 +167,23 @@ func (p *adaptProxy) Write(b []byte) (int, error) {
 	n, err := p.ResponseWriter.Write(b)
 	p.bytes += n
 	return n, err
+}
+
+// Hijack 把连接交给调用方，并让框架知道自己已经管不着这条响应了。
+//
+// 与 responseWriter.Hijack 是同一个契约的两个入口：中间件直接在洋葱里升级、
+// 或洋葱内的 handler 升级，两条路都要记到同一处（`target`）。
+func (p *adaptProxy) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := p.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("web: ResponseWriter does not support Hijack: %w", http.ErrNotSupported)
+	}
+	conn, buf, err := h.Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	p.target.hijacked = true
+	return conn, buf, nil
 }
 
 // adaptFlusher 给 adaptProxy 补上 http.Flusher。只在底层确实实现 Flusher 时

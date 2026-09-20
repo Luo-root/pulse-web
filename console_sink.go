@@ -8,8 +8,9 @@ import (
 	"github.com/Luo-root/pulse/observability"
 )
 
-// 访问日志的属性键（OTel HTTP 语义约定）。engine 写入与出口读取共用同一组
-// 常量——同一批字符串在两处各写一遍，改一处漏一处。
+// 访问日志的属性键。除最后一个是**本框架声明的扩展键**外，其余都是 OTel HTTP
+// 语义约定里的名字。engine 写入与出口读取共用同一组常量——同一批字符串在两处
+// 各写一遍，改一处漏一处。
 const (
 	attrHTTPMethod   = "http.request.method"
 	attrHTTPRoute    = "http.route"
@@ -17,6 +18,12 @@ const (
 	attrHTTPBodySize = "http.response.body.size"
 	attrClientAddr   = "client.address"
 	attrErrorType    = "error.type"
+
+	// attrConnHijacked 标记「这条连接的响应不再由框架掌握」（协议升级，见
+	// responseWriter.Hijack）。semconv 里没有连接层 hijack 的对应字段，所以它是
+	// 一条**声明过的扩展**，不是漏记的近似。它与 attrHTTPBodySize **互斥**：
+	// 连接交出去之后体积不可观测，缺席 + 这个标记就是事实。
+	attrConnHijacked = "connection.hijacked"
 )
 
 // 列宽与版式常量。列宽按**显示宽度**算，不是字节数、也不是 rune 数：`µ` 是

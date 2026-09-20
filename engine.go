@@ -604,7 +604,10 @@ func (e *Engine) withCtx(w http.ResponseWriter, r *http.Request, call func(*Ctx)
 
 // finish 是 Engine 层收尾：错误映射 → 兜底写响应 → 访问日志。
 func (e *Engine) finish(c *Ctx, rw *responseWriter) {
-	if c.err != nil && !rw.wrote {
+	// 连接被 hijack 后框架对这条响应没有处置权：写进去的字节会落到使用方已经
+	// 接管的连接上。所以错误映射与兜底响应一并挡住（落码那一步由
+	// writeHeaderNow 自己的守卫负责）——原始 error 仍进 AccessLog。
+	if c.err != nil && !rw.wrote && !rw.hijacked {
 		if herr := e.mapErrorSafely(c, c.err); herr != nil {
 			// 映射器自身失败：兜底 500（与默认 mapper 同源），
 			// 且不影响 AccessLog 对原始 error 的记录。
@@ -613,7 +616,15 @@ func (e *Engine) finish(c *Ctx, rw *responseWriter) {
 		}
 	}
 
-	// 收尾落码与 Write / Flush 同源（writeHeaderNow）：吃 Status() 提示、缺省 200。
+	// hijack 之后框架可能压根没看见状态码：`coder/websocket` 先经 writer 写 101
+	// 再 hijack（看得到），`gorilla/websocket` 先 hijack 再自己往裸连接写（看不到）。
+	// 看不到的那条路上若照实记 0，访问日志会被读成「没写响应」——按 101 记才是事实。
+	if rw.hijacked && rw.status == 0 {
+		rw.status = http.StatusSwitchingProtocols
+	}
+
+	// 收尾落码与 Write / Flush 同源（writeHeaderNow）：吃 Status() 提示、缺省 200；
+	// 连接已 hijack 时它是 no-op。
 	rw.writeHeaderNow()
 
 	// 路由模板只算一次，喂给 span 与访问记录两边——`Span.Route` 与 `http.route`
@@ -699,7 +710,13 @@ func fillRequestAttrs(c *Ctx, rw *responseWriter, route string, attrs *observabi
 	observability.Set(attrs, attrHTTPMethod, c.r.Method)
 	observability.Set(attrs, attrHTTPRoute, route)
 	observability.Set(attrs, attrURLPath, c.r.URL.Path)
-	observability.Set(attrs, attrHTTPBodySize, int64(rw.bytes))
+	if rw.hijacked {
+		// 连接已交出，响应体积不再是框架能观测的事实。这里**不记**体积（记 0 会被
+		// 读成「响应是空的」），改记一个连接层的标记——它同时解释了体积为什么缺席。
+		observability.Set(attrs, attrConnHijacked, true)
+	} else {
+		observability.Set(attrs, attrHTTPBodySize, int64(rw.bytes))
+	}
 	observability.Set(attrs, attrClientAddr, c.r.RemoteAddr)
 	if c.err != nil {
 		observability.Set(attrs, attrErrorType, errCategory(c.err))

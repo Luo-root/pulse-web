@@ -147,7 +147,7 @@ Built-in constructors: `BadRequest`, `Unauthorized`, `Forbidden`, `NotFound`, `C
 
 ### Streaming (SSE)
 
-Write to `c.Writer()` and call `c.Flush()` to push each chunk out. The response writer is a deliberately narrow interface: it promises `http.Flusher` and nothing else.
+Write to `c.Writer()` and call `c.Flush()` to push each chunk out. The response writer is a deliberately narrow, explicit list: `Flush`, `Hijack`, `SetWriteDeadline` and `EnableFullDuplex` are implemented and forwarded to the underlying writer, while `Pusher`, `FlushError` and `Unwrap()` are not — protocol upgrades (WebSocket) therefore go through `Hijack`, and ecosystem websocket libraries work unchanged.
 
 ```go
 app.GET("/events", func(c *web.Ctx) error {
