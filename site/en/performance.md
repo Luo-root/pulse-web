@@ -2,7 +2,7 @@
 
 This page answers two questions: **what does a request path cost**, and **where does the observability money go**. Every table comes with a command to reproduce it.
 
-**Version**: pulse-web's `main` (no new tag since v0.1.0; depends on pulse v0.2.4). **This section is re-measured whenever the default sink or the request path changes, and at tag time** — and only paired ratios from the same round are compared.
+**Version**: pulse-web's `main` (no new tag since v0.1.0; depends on pulse v0.2.4). **This section is re-measured whenever the default sink or the request path changes, and at tag time** (the next round lands with v0.2.0) — and only paired ratios from the same round are compared.
 
 **This round**: 2026-09-20 · i9-14900HX / 32 logical cores / Go 1.27 / Windows amd64 · **on AC power**.
 

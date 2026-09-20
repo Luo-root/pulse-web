@@ -20,7 +20,9 @@ empty, write "无 / none" rather than deleting it — a reviewer needs to know i
 
 ## 测试 / Testing
 
-<!-- 具体命令 + 观察到的结果。「CI 绿了」是结果，不是测试方案。 -->
+<!-- 具体命令 + 观察到的结果。「CI 绿了」是结果，不是测试方案。
+     下面九条与 .github/workflows/ci.yml 的九个 step 一一对应；最后那三条嵌套 module
+     最容易漏——根 module 的 ./... 不过 module 边界，没人跑就等于静默过期。 -->
 
 - [ ] `go build ./...`
 - [ ] `go vet ./...`
@@ -28,6 +30,9 @@ empty, write "无 / none" rather than deleting it — a reviewer needs to know i
 - [ ] `go test -race ./...`
 - [ ] 分配预算门禁：`go test -run TestRequestPathAllocBudget ./bench/`（**不带** `-race`）
 - [ ] bench 编译检查：`go test -run '^$' -bench '^$' ./bench/`
+- [ ] `loadtest` 嵌套 module：`cd loadtest && go build ./... && go vet ./... && go test ./...`
+- [ ] `otel` 嵌套 module：`cd otel && go build ./... && go vet ./... && go test ./...`
+- [ ] `interop` 嵌套 module：`cd interop && go build ./... && go vet ./... && go test ./...`
 
 ## Review 关注点 / Review focus
 

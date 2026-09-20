@@ -821,9 +821,9 @@ v1 只做当前视图：`app.Debug("/debug/pulse")` 输出 `kernel.FiberSnapshot
 | WebSocket 协议实现 / 自研 `ws` 子包 | 不做——帧、掩码、子协议那一套归生态库，框架只把 `Hijack` 这条能力面打开（见「Ctx」一节），`gorilla/websocket` 与 `coder/websocket` 零改动可用；端到端对照在 `interop/`（进 CI），能力面清单与两条取连接路径的差异见「协议升级可用」验收条 |
 | `AsyncSink`（队列 / Drop / flushTimeout） | **上游已提供**（`observability.NewAsyncSink`，v0.2.1）——web 不另造缓冲层，`WithSink` 接入即可。注意组合语义：`AsyncSink.Flush` 只排空**它自己的**队列、不级联 inner 的 `Flush`，所以异步化的正确组合是 `NewAsyncSink(SlogSink)`；用 `AsyncSink` 包另一个缓冲出口（如 `LineSink`）会留下未落盘的内层缓冲，框架无从代劳 |
 | `Sink.Close`（停协程） | 不做——出口所有权属装配方：`Detach` 允许进程级后台任务继续写同一 Sink，框架在关闭时 `Close` 它会静默丢弃这些记录。关闭时序只负责 flush 并记错误 |
-| 流式双记录（Flush 启发式） | 不做——普通 handler / 中间件的 `Flush()` 会误判；SSE 的语义已由"handler 不返回 ⇒ AccessLog 晚写"覆盖。需要"流开始"再显式另开票 |
+| 流式双记录（Flush 启发式） | 不做——普通 handler / 中间件的 `Flush()` 会误判；SSE 的语义已由"handler 不返回 ⇒ AccessLog 晚写"覆盖，「流开始」在框架侧没有可靠判据 |
 | 响应侧 `traceparent` 回写 | 不做——W3C 没有给响应定义这个绑定，响应侧用 `Server-Timing`（见上）；框架也**不编造 span-id**，没有 span 就不写带 span-id 的那个头 |
-| TTFB / Content-Type 观测 | 不做（TTFB 依赖包装器状态，与"避免额外分配"冲突），另开票 |
+| TTFB / Content-Type 观测 | 不做——TTFB 依赖包装器状态（记它就得在请求路径上多一层），与"请求路径不多一次分配"冲突 |
 | `Detached` 的迷你生命周期（锁 / 懒派生 scope / ErrDetachedDisposed） | 不做——值袋子 + 调用方自理 |
 | 内部 `Router` 接口 | 不做（YAGNI）：要换底层时再抽 |
 | `Debug` 的 loader 历史环形缓冲 | 不做（Bootstrap 已入 Sink） |
@@ -941,7 +941,7 @@ mark 的走势**直接沿用 pulse**（平段 → 上升 → 峰值 → 深谷 �
 - [x] **请求体绑定完整**：`Ctx.Bind` 按 Content-Type 分派（JSON / XML / form-urlencoded / multipart；无 body 落 query），`BindQuery` 显式 query；`WithMaxBodyBytes` 上限对**全部**读取路径生效（超限 → 413 + `body_too_large`）
   证据：`bind_test.go` 19 条——分派（`TestBindJSON` / `TestBindXML` / `TestBindForm` / `TestBindFormQueryIsNotMerged` / `TestBindMultipart` / `TestBindQuery` / `TestBindUnsupportedMediaType` / `TestBindNoContentTypeFallsBackToForm` / `TestBindContentTypeWithParameters` / `TestBindJSONSlice`）、映射（`TestBindMoreScalarKinds`）、上限（`TestBindMaxBodyBytes` 读取闸门 + Content-Length 预检两路径、`TestBindURLEncodedOverLimit` 10 MiB 解析闸有 / 无 CT、`TestBindUserWrappedMaxBytesReader` 用户自包、`TestBindDefaultNoLimit` 默认不限）、健壮性（`TestBindMalformedInputs` / `TestBindJSONTrailingData` / `TestBindTargetErrors` / `TestBindQueryTargetError`）。
 - [x] **按路由 / 分组限请求体**：`BodyLimit(n)` 中间件可挂分组与单条路由，与引擎级 `WithMaxBodyBytes` 叠加时**取最严**（只能收紧、不能放宽）；超限 413 + `body_too_large`，cause 与既有两条超限路径同型（`*http.MaxBytesError`）；补导出构造器 `TooLarge`（#38）
-  证据：`bodylimit_test.go` 10 条——分组（`TestBodyLimitOnGroup`）、路由与分组叠加（`TestBodyLimitOnRoute`）、边界（`TestBodyLimitBoundary`：恰好 n 通过 / n+1 得 413）、声明未知 chunked（`TestBodyLimitChunked`）、只能收紧（`TestBodyLimitCannotLoosen`：引擎级 1 KiB 拦得住路由级 1 MiB）、预检不读 body（`TestBodyLimitPrecheckRejectsDeclaredOverLimit`）、cause 同型两条路径（`TestBodyLimitCauseType`）、`n <= 0` 直通（`TestBodyLimitNonPositiveIsPassThrough`）、构造器（`TestTooLargeConstructor`）、真实连接上「超限关连接」语义不丢（`TestBodyLimitKeepsCloseConnection`：断言响应带 `Connection: close`，即 `MaxBytesReader` 的 `w` 拿到的是原始 writer 而非包装器）。
+  证据：`bodylimit_test.go` 11 条——分组（`TestBodyLimitOnGroup`）、路由与分组叠加（`TestBodyLimitOnRoute`）、边界（`TestBodyLimitBoundary`：恰好 n 通过 / n+1 得 413）、声明未知 chunked（`TestBodyLimitChunked`）、只能收紧（`TestBodyLimitCannotLoosen`：引擎级 1 KiB 拦得住路由级 1 MiB）、预检不读 body（`TestBodyLimitPrecheckRejectsDeclaredOverLimit`）、cause 同型两条路径（`TestBodyLimitCauseType`）、`n <= 0` 直通（`TestBodyLimitNonPositiveIsPassThrough`）、调用方传的 code 不被 cause 的分类吞掉（`TestTooLargeCodeSurvivesDefaultMapper`：`errors.As` 沿 `HTTPError.Unwrap()` 下钻的陷阱）、构造器（`TestTooLargeConstructor`）、真实连接上「超限关连接」语义不丢（`TestBodyLimitKeepsCloseConnection`：断言响应带 `Connection: close`，即 `MaxBytesReader` 的 `w` 拿到的是原始 writer 而非包装器）。
 - [x] **写出 / 错误语义收口**：`c.JSON` 先编码成功才写头（失败 → 500 统一错误体，不再 200 空体）；`c.Flush` 与包装器 `Flush` 同一实现、首刷吃 `Status()`；`panic(web.NotFound(...))` 一律 500（要 4xx 请 return）
   证据：`TestJSONEncodeFailureMappedTo500` / `TestJSONBytesStable`（尾换行保留）/ `TestPanicHTTPErrorMapsTo500`；Flush 三条见上一条。
 - [x] **测试入口与真路径同构**（[#63](https://github.com/Luo-root/pulse-web/issues/63)）：`NewTestContext`（`done(err)` 回灌 handler 返回值 → 走统一错误映射）与 `ServeTest`（handler + 中间件链，连 panic 与请求体闸门一起接管）与真实请求共用 `begin` / `finish`；差别只有 `ServeMux` 不参与——路径参数与路由模板由调用方补在 request 上
