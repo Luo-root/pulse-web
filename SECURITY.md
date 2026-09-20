@@ -49,7 +49,7 @@ Anything in this repository — the framework's own handling of a request, and i
 - request binding: Content-Type dispatch (JSON / XML / form / multipart), the body limit and
   its 413 path;
 - the error model: explicit error → status-code mapping, panic containment;
-- the response writer wrapper: first-write status capture, byte counting, `Flush`;
+- the response writer wrapper: first-write status capture, byte counting, `Flush`, `Hijack`;
 - TraceID generation and the inbound header trust switch;
 - HTML template rendering and static file serving;
 - stdlib interop (`web.Wrap` for stdlib handlers in, `web.Adapt` for stdlib middleware inside
@@ -118,9 +118,10 @@ what is described here, that part is worth reporting.
   escape hatch, so a token, a cookie, a request body or a prompt cannot enter a record by
   construction. `url.query` is not recorded either — both because of its cardinality and
   because it routinely carries sensitive parameters.
-- **The response writer wrapper passes through exactly one optional capability**: `http.Flusher`.
-  `Hijacker`, `Pusher`, `FlushError` and `SetWriteDeadline` are not passed through, so a
-  wrapper can never misreport what the underlying writer supports.
+- **The response writer wrapper forwards an explicit short list**: `Flush`, `Hijack`,
+  `SetWriteDeadline` and `EnableFullDuplex`. `Pusher`, `FlushError` and `Unwrap()` are not
+  passed through — `Unwrap()` would hand the whole underlying writer over, the two above
+  included.
 - **Panics in a handler are contained**: the request is answered with 500 and the process keeps
   serving. The panic is attached to the observation record as a `*web.PanicError` carrying the
   value and the stack trace; the client receives only the status text. `PanicError.Stack` never
@@ -176,7 +177,7 @@ Pulse-Web 目前仍在 1.0 之前（`v0.x`）。本文件说明漏洞上报方�
 - 中间件链：组合顺序与短路语义；
 - 请求绑定：Content-Type 分派（JSON / XML / form / multipart）、body 上限及其 413 路径；
 - 错误模型：显式 error → 状态码映射、panic 兜底；
-- 响应写出器包装：首刷状态码捕获、字节计数、`Flush`；
+- 响应写出器包装：首刷状态码捕获、字节计数、`Flush`、`Hijack`；
 - TraceID 生成与入站链路头的信任开关；
 - HTML 模板渲染与静态文件服务；
 - stdlib 互操作（`web.Wrap` 接 stdlib handler 入、`web.Adapt` 把 stdlib 中间件接入洋葱内、`Engine.Handler()` 出）；
@@ -225,8 +226,9 @@ Pulse-Web 目前仍在 1.0 之前（`v0.x`）。本文件说明漏洞上报方�
 - **头、体、query 都不会进观测记录。** `Record.Attrs` 只接受标量
   （`~string | ~int64 | ~float64 | ~bool`）且没有 `map[string]any` 逃生舱，所以 token、cookie、
   请求体、prompt 在类型上就进不了记录。`url.query` 同样不记——既因为基数，也因为它常带敏感参数。
-- **响应写出器包装只透出一个可选能力**：`http.Flusher`。`Hijacker`、`Pusher`、`FlushError`、
-  `SetWriteDeadline` 都不透出，包装层因此不可能误报底层支持什么。
+- **响应写出器包装只转发一份显式的短清单**：`Flush`、`Hijack`、`SetWriteDeadline`、
+  `EnableFullDuplex`。`Pusher`、`FlushError` 与 `Unwrap()` 都不透出——`Unwrap()` 等于把底层
+  writer 整个交出去，连上面两个一起。
 - **handler 里的 panic 被兜住**：该请求以 500 作答，进程继续服务。panic 以 `*web.PanicError`
   （值 + 栈）挂到观测记录上；客户端只拿到状态文本，`PanicError.Stack` 绝不进响应体。
 - **无 provider、无外呼**：框架自身不发任何出站请求，跑测试集不需要任何凭据。

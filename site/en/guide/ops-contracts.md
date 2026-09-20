@@ -50,7 +50,7 @@ One direct consequence: **by the time the error mapper runs, the scope is gone**
 ### The boundaries of `Ctx`
 
 - **Never crosses goroutines**: it is bound to the request and its response writer. Background work uses `c.Detach()`, which yields a bag of values (`TraceID` / `HostID` / `Sink` / process-level `Root`) rather than a context — see [requests](/en/guide/requests).
-- **The response writer promises `http.Flusher` only**: `Hijacker` / `Pusher` / `FlushError` / `SetWriteDeadline` are not surfaced. That keeps "what streaming can do" visible in the type system instead of depending on a lucky type assertion.
+- **The response writer's capability surface is an explicit short list**: `Flush` / `Hijack` / `SetWriteDeadline` / `EnableFullDuplex` are implemented and forwarded to the underlying writer; `Pusher` / `FlushError` are not surfaced, and neither is `Unwrap()` (that would hand over the whole underlying writer, those two included). Protocol upgrades (WebSocket) go through `Hijack` — once the connection is handed over the framework stops writing this response, and the access log records `101` with a `connection.hijacked` marker and no response size.
 - **The status code locks at the first flush**: `c.Writer().Write`, `c.Flush()`, or the engine's wrap-up after the handler returns — whichever happens first.
 
 ### Error mapper contract

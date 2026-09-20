@@ -86,9 +86,48 @@ app.GET("/raw", func(c *web.Ctx) error {
 
 The wrapper still records the status code and the response size (so `size=` in the access log is just as accurate on this path).
 
-::: warning `Writer()` promises `http.Flusher` and nothing else
-Underlying capabilities (`Hijacker` / `Pusher` / `FlushError` / `SetWriteDeadline`) are **not surfaced** — the embedded interface only promotes `Header` / `Write` / `WriteHeader`. So `http.NewResponseController(c.Writer())` can only `Flush()`; `Hijack()` / `SetWriteDeadline()` return `http.ErrNotSupported`. **To upgrade the protocol (WebSocket), wrap a stdlib handler with `web.Wrap`** — the price is losing `*Ctx`.
+::: warning `Writer()`'s capability surface is an **explicit short list**
+**Four are implemented and forwarded to the underlying writer**: `Flush` / `Hijack` / `SetWriteDeadline` / `EnableFullDuplex`. **Not surfaced**: `Pusher` / `FlushError` — and there is **no `Unwrap()`** either (that would hand the whole underlying writer over, those two included). The embedded `http.ResponseWriter` only promotes `Header` / `Write` / `WriteHeader`; every other capability has to be implemented deliberately — so the list is the whole surface, visible at a glance instead of depending on a lucky assertion.
+
+**Protocol upgrades (WebSocket) go through `Hijack`**: `w := c.Writer().(http.Hijacker)` is that connection, and ecosystem libraries work unchanged (`gorilla/websocket` asserts `w.(http.Hijacker)` directly; `coder/websocket` asserts first and then walks the `Unwrap()` chain — both are satisfied). Once the connection is handed over the framework no longer writes this response (`Write` / `Flush` return `http.ErrHijacked`), and the connection can be **handed over only once** (a second `Hijack` returns the same error); it settles no status and writes no fallback error body; the access log records `101` with a `connection.hijacked` marker (an extension key this framework declares) and **does not** record `http.response.body.size` — the connection is gone, and a 0 would read as "the response was empty".
+
+**Two boundaries**: ① **unavailable over HTTP/2** (the h2 writer is not a `Hijacker`); ② **available inside the onion, but at the mercy of middleware** — the proxy `Adapt` hands out forwards `Hijack` (upgrade routes behind `Use(Adapt(…))` keep working), while middleware that wraps the writer again without forwarding it breaks the same way it would in plain stdlib (see [stdlib middleware](/en/guide/middleware)).
 :::
+
+### WebSocket: a minimal `gorilla/websocket` example
+
+```go
+import (
+    "net/http"
+
+    "github.com/gorilla/websocket"
+)
+
+var upgrader = websocket.Upgrader{
+    CheckOrigin: func(r *http.Request) bool { return true },   // deny-by-default: set your own policy
+}
+
+app.GET("/ws", func(c *web.Ctx) error {
+    conn, err := upgrader.Upgrade(c.Writer(), c.Request(), nil)
+    if err != nil {
+        // gorilla already wrote the error response; just hand the error out
+        return err
+    }
+    defer func() { _ = conn.Close() }()
+
+    for {
+        mt, data, err := conn.ReadMessage()
+        if err != nil {
+            return nil // client gone: ordinary ending
+        }
+        if err := conn.WriteMessage(mt, data); err != nil {
+            return err
+        }
+    }
+})
+```
+
+What `c.Writer()` hands to `Upgrade` is that connection itself — gorilla takes it with `w.(http.Hijacker)`, with no adapter in between. This example mirrors the handshake the repo actually runs (`interop/websocket_test.go`, `TestGorillaWebSocketUpgrade`).
 
 ## Streaming: SSE
 

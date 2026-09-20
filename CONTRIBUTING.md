@@ -119,9 +119,12 @@ is fine there, but nothing that a reviewer needs to see belongs in it.
 - **stdlib interop has three paths, and all three stay** — `web.Wrap` for stdlib handlers in,
   `web.Adapt` for stdlib middleware inside the onion, `Engine.Handler()` for the engine out.
   Keep all three: a change that makes any of them require a hand-rolled adapter is a regression.
-- **The response writer is a deliberately narrow interface.** Only `http.Flusher` is
-  promised; `Hijacker` / `Pusher` / `SetWriteDeadline` are not exposed. Widening it is an API
-  decision, not a convenience.
+- **The response writer is a deliberately narrow, explicit interface.** Exactly four capabilities
+  are implemented and forwarded: `Flush`, `Hijack`, `SetWriteDeadline`, `EnableFullDuplex`.
+  `Pusher` and `FlushError` are not exposed, and neither is `Unwrap()` — that would hand out the
+  underlying writer wholesale, taking the two hidden ones with it. Widening or narrowing this list
+  is an API decision, not a convenience: it comes with an observability contract (see
+  `responseWriter.Hijack`).
 - **Chinese comments and docs are the norm.** When you edit near them, write in the same
   language instead of translating them.
 - **Line endings are LF**, enforced by `.gitattributes`. If your working copy predates that
@@ -258,8 +261,10 @@ gitignore 暂存区——草稿放那里没问题，但 reviewer 需要看的东
   不要绕到 `c.Writer()` 去写。
 - **stdlib 互操作三条路径都要在**——进来的用 `web.Wrap`，stdlib 中间件进洋葱用 `web.Adapt`，
   出去的用 `Engine.Handler()`。删掉任一条、或让其中一条需要手写适配器，就是回归。
-- **响应写出器是**有意**收窄的接口。** 只承诺 `http.Flusher`；`Hijacker` / `Pusher` /
-  `SetWriteDeadline` 不透出。放宽它是 API 决策，不是顺手便利。
+- **响应写出器是一份有意收窄、且显式的能力清单。** 恰好四个显式实现并转发底层：`Flush` /
+  `Hijack` / `SetWriteDeadline` / `EnableFullDuplex`；`Pusher` / `FlushError` 不透出，
+  `Unwrap()` 也不提供（那等于把底层 writer 整个交出去，连上面两个一起）。动它是 API 决策，
+  不是顺手便利——一并要定观测语义（见 `responseWriter.Hijack` 的 godoc）。
 - **中文注释与中文文档是本仓库常态**；在这些内容旁边改动时，用同一种语言写，不要顺手翻译。
 - **行尾是 LF**，由 `.gitattributes` 强制。如果你的工作副本早于该文件，重新检出一次即可。
 - **freeze 契约**（`v0.1.0` 起）：0.x SemVer 下 breaking 只能随 **minor** 发布，patch 内永不破坏，

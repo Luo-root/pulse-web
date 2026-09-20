@@ -1,11 +1,14 @@
 package web
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"mime"
+	"net"
 	"net/http"
 	"time"
 
@@ -148,13 +151,15 @@ func (c *Ctx) SetHeader(key, value string) { c.w.Header().Set(key, value) }
 //
 // 返回的是框架的包装器：状态码与响应体积照常被 AccessLog 采集（写多少字节就记多少）。
 //
-// **能力面是有意的窄口**：包装器显式实现 `http.Flusher`（`Flush()` 落到下层 writer），
-// 底层的 `http.Hijacker` / `http.Pusher` / `interface{ FlushError() error }` /
-// `interface{ SetWriteDeadline(time.Time) error }` **一律不透出**——内嵌 `http.ResponseWriter`
-// 只提升 `Header` / `Write` / `WriteHeader`，其余能力要靠显式实现才有。于是
-// `http.NewResponseController(c.Writer())` 上 `Flush()` 可用，而 `Hijack()` /
-// `SetWriteDeadline()` / `EnableFullDuplex()` 返回 `http.ErrNotSupported`。
-// 要升级协议（WebSocket）需要原始 writer：用 `Wrap` 包一个 stdlib handler（代价是拿不到 `*Ctx`）。
+// **能力面是一份显式的窄清单**：包装器显式实现并转发底层的四个——`Flush`、`Hijack`、
+// `SetWriteDeadline`、`EnableFullDuplex`；`http.Pusher` 与 `interface{ FlushError() error }`
+// **不透出**，也**不提供** `Unwrap() http.ResponseWriter`——那等于把底层 writer 整个
+// 交出去，连上面两个一起。于是 `http.NewResponseController(c.Writer())` 上这四件事都可用，
+// 其余没有（内嵌 `http.ResponseWriter` 只提升 `Header` / `Write` / `WriteHeader`）。
+//
+// 协议升级（WebSocket）走 `Hijack`：生态库零改动可用（`gorilla/websocket` 直接断言
+// `w.(http.Hijacker)`，`coder/websocket` 先断言、再沿 `Unwrap()` 链找），交出连接之后
+// 框架不再写这条响应。前提是底层 writer 支持——HTTP/2 不支持，此时返回明确 error。
 func (c *Ctx) Writer() http.ResponseWriter { return c.w }
 
 // Status 只**设置**状态码，不立即写出；由 JSON / Text、首刷（直接写字节 / Flush）
@@ -273,16 +278,27 @@ func (c *Ctx) Flush() error { return c.w.flush() }
 
 // responseWriter 包装 http.ResponseWriter，采集状态码与响应体积。
 // 首次写入生效：重复 WriteHeader 是 no-op（不产生 superfluous WriteHeader 警告）。
+//
+// # 能力面是一份显式的窄清单
+//
+// 只实现 `Flush` / `Hijack` / `SetWriteDeadline` / `EnableFullDuplex` 四个，且都
+// 转发给底层；`Pusher` / `FlushError` **不透出**。刻意**不**实现
+// `Unwrap() http.ResponseWriter`——那等于把底层 writer 整个交出去（连同上面两个
+// 不承诺的），窄口就白收了；`http.ResponseController` 认的那几个方法这里逐个显式
+// 实现，效果一样而面是可枚举的。
+//
+// 要升级协议（WebSocket）走 `Hijack`，见它的 godoc。
 type responseWriter struct {
 	http.ResponseWriter
 	status     int // 已落定的状态码（AccessLog 采样）
 	statusHint int // Status() 设置的意图：任何隐式落码都用它，0 → 200
 	bytes      int
 	wrote      bool
+	hijacked   bool // 连接已交出（协议升级）：此后不写出、也不统计体积
 }
 
 func (w *responseWriter) WriteHeader(code int) {
-	if w.wrote {
+	if w.wrote || w.hijacked {
 		return
 	}
 	w.wrote = true
@@ -296,7 +312,7 @@ func (w *responseWriter) WriteHeader(code int) {
 // handler 的自然顺序**，若只有 flush 吃提示，`Status(201)` 会被第一次 Write
 // 的隐式 200 吃掉（gin 的 WriteHeaderNow() 是同一语义）。
 func (w *responseWriter) writeHeaderNow() {
-	if w.wrote {
+	if w.wrote || w.hijacked {
 		return
 	}
 	code := w.statusHint
@@ -307,6 +323,10 @@ func (w *responseWriter) writeHeaderNow() {
 }
 
 func (w *responseWriter) Write(b []byte) (int, error) {
+	if w.hijacked {
+		// 连接已交出，框架不再碰它——与 net/http 自己在 hijack 之后的写行为同型。
+		return 0, http.ErrHijacked
+	}
 	w.writeHeaderNow()
 	n, err := w.ResponseWriter.Write(b)
 	w.bytes += n
@@ -322,6 +342,9 @@ func (w *responseWriter) Flush() { _ = w.flush() }
 // 首刷落 Status() 提示（缺省 200）；底层不支持 http.Flusher 时返回明确
 // error，且不写任何内容（显式失败不产生副作用）。
 func (w *responseWriter) flush() error {
+	if w.hijacked {
+		return http.ErrHijacked
+	}
 	f, ok := w.ResponseWriter.(http.Flusher)
 	if !ok {
 		return errors.New("web: ResponseWriter does not support Flush")
@@ -329,4 +352,68 @@ func (w *responseWriter) flush() error {
 	w.writeHeaderNow()
 	f.Flush()
 	return nil
+}
+
+// Hijack 实现 http.Hijacker：把连接连同缓冲读写器交给调用方——协议升级的门，
+// 典型场景是 WebSocket。
+//
+// # 为什么需要它
+//
+// 生态里的 websocket 库都要拿走连接，而拿走的方式只有两条，且都在 net/http 的
+// 语义之内：`gorilla/websocket` 直接断言 `w.(http.Hijacker)`；`coder/websocket`
+// 先断言、找不到再沿 `Unwrap()` 链往下找。此前包装器只实现 `http.Flusher`，
+// 两家都拿不到连接（分别以 500 / 501 结束）。本方法是那条缝的唯一出口，**不打开它
+// 就没有任何变通**：`Wrap` 交出去的仍是这个包装器，`Adapt` 只改中间件的位置、
+// 不改 writer。
+//
+// # 交出去之后
+//
+// 连接不再归框架管：框架写不进、也不该写（此后 `Write` / `Flush` 返回
+// `http.ErrHijacked`），收尾阶段跳过落码。访问日志照写一条，但**状态码与体积
+// 不再是框架能观测的事实**——约定见 fillRequestAttrs：框架侧未落定状态码时按
+// 101 记，并给记录打上 `connection.hijacked` 标记；体积不记（记 0 会被读成
+// 「响应是空的」）。两条库的时序差异（一个先写 101 再 hijack、一个先 hijack
+// 再自己往裸连接写）正是这条约定的由来。
+//
+// 底层不支持 Hijack 时返回明确 error（HTTP/2 就是这种情况，h2 的 writer 不是
+// Hijacker）——不 panic，也不静默放行。连接只能交出去一次：第二次调用同样返回
+// `http.ErrHijacked`，这条判定由本方法自己做（net/http 会给同一个错误，但那是它的
+// 内部实现细节，换一个底层 writer 就没了）。
+func (w *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if w.hijacked {
+		return nil, nil, http.ErrHijacked
+	}
+	h, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("web: ResponseWriter does not support Hijack: %w", http.ErrNotSupported)
+	}
+	conn, buf, err := h.Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	w.hijacked = true
+	return conn, buf, nil
+}
+
+// SetWriteDeadline 转发 http.ResponseController 的写超时设置：底层（net/http 的
+// *response）本来就有这个能力，此前被包装器挡住。
+//
+// 它不改框架的采集状态——超时到期后写失败由调用方的 error 处理负责。
+func (w *responseWriter) SetWriteDeadline(deadline time.Time) error {
+	d, ok := w.ResponseWriter.(interface{ SetWriteDeadline(time.Time) error })
+	if !ok {
+		return fmt.Errorf("web: ResponseWriter does not support SetWriteDeadline: %w", http.ErrNotSupported)
+	}
+	return d.SetWriteDeadline(deadline)
+}
+
+// EnableFullDuplex 转发 http.ResponseController 的全双工开关：默认情况下
+// net/http 会在开始写响应之前把请求体读完，打开它才允许一边读 body 一边写响应
+// （长连接协议、边收边转的场景）。同样的能力此前被包装器挡住。
+func (w *responseWriter) EnableFullDuplex() error {
+	d, ok := w.ResponseWriter.(interface{ EnableFullDuplex() error })
+	if !ok {
+		return fmt.Errorf("web: ResponseWriter does not support EnableFullDuplex: %w", http.ErrNotSupported)
+	}
+	return d.EnableFullDuplex()
 }

@@ -65,7 +65,7 @@ import { withBase } from 'vitepress'
     <div class="pw-cell">
       <span class="pw-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 15c2.5 0 2.5-6 5-6s2.5 6 5 6 2.5-6 5-6 2.5 6 5 6"/></svg></span>
       <h3>流式响应可用</h3>
-      <p>响应写出器只承诺 <code>http.Flusher</code>——SSE 能写能刷，接口有意收窄，不放 Hijacker 那类后门。</p>
+      <p>响应写出器是一份显式的窄清单——<code>Flush</code> / <code>Hijack</code> / <code>SetWriteDeadline</code> / <code>EnableFullDuplex</code> 转发底层，SSE 与 WebSocket 升级都走它；<code>Pusher</code> / <code>FlushError</code> 与 <code>Unwrap()</code> 不放，接口有意收窄。</p>
       <a class="pw-link" :href="withBase('/guide/responses')">看响应 →</a>
     </div>
   </div>

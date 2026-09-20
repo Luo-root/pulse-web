@@ -42,13 +42,13 @@ Call `Use` before registering routes. Do it the other way round and the already-
 2. **When middleware short-circuits (never calls next), the status and byte count it wrote are recorded back into the framework's collection layer** — the access log and traces show the real response, not "nothing was written".
 3. **A request replaced by middleware is passed along** — after `r = r.WithContext(...)`, what the handler reads via `c.Request()` is the replaced one.
 
-Plus: the writer handed to middleware supports `http.Flusher`, so SSE still flushes per event; and it **never overclaims** — if the underlying writer cannot flush, `c.Flush()` still returns an explicit error.
+Plus: the writer handed to middleware supports `http.Flusher` and `http.Hijacker` — SSE still flushes per event, and upgrade routes behind `Use(Adapt(…))` still get their connection. And it **never overclaims**: if the underlying writer cannot flush, `c.Flush()` still returns an explicit error; if it cannot hijack, `Hijack()` returns `http.ErrNotSupported`.
 
 ## What it does not do
 
 1. **It does not move routing.** Route matching still happens before middleware, so a preflight `OPTIONS` never reaches it — register only `GET /api` and ServeMux answers 405 (`Allow: GET, HEAD`) directly. **CORS that must intercept preflight has to be wrapped outside**, or you register an explicit `OPTIONS` route.
 2. **It does not solve "finalizing middleware × error/panic".** The framework's error mapping happens **after** middleware returns, so middleware that unconditionally writes once next returns (e.g. gzip with its own `defer zw.Close()`) locks the status at 200. **Compression is pushed outside by default.**
-3. **It does not expose `http.Hijacker`.** The framework's capability promise for the response writer stops at `http.Flusher`, so middleware asserting `Hijacker` (WebSocket upgrades) is unavailable.
+3. **It does not expose `http.Pusher` or `FlushError`.** The response writer's capability surface is an explicit short list (`Flush` / `Hijack` / `SetWriteDeadline` / `EnableFullDuplex`); HTTP/2 server push and flush-error reporting are not on it.
 4. **It does not guarantee "same shape means it works".** Middleware that depends on a particular router context stays unusable — chi's `CleanPath` reads `chi.RouteContext` and **panics either way**, adapted or wrapped outside.
 5. **It does not change middleware semantics.** Who recovers a panic, and what an error body looks like, is still the middleware's call.
 
@@ -81,7 +81,7 @@ Not exporting a `Ctx` accessor here is deliberate: it would promote "`Ctx` lives
 | Only touches headers / short-circuits / wraps the writer (logger, auth, rate limit, promhttp counters) | Either works; needs the route template or needs short-circuits in the access log → **`Adapt` (inside)** |
 | Rewrites the body and finalizes unconditionally after next (gzip) | **Outside `Handler()`** |
 | Must intercept before routing (CORS preflight) | **Outside `Handler()`** |
-| Asserts `http.Hijacker` | Neither (outside the capability surface) |
+| Asserts `http.Hijacker` (WebSocket upgrades) | Either — `Adapt`'s proxy forwards `Hijack`; only re-wrapping the writer without forwarding breaks it |
 
 promhttp is a good example split in two: **collection** uses `Adapt` around `promhttp.InstrumentHandlerCounter` (needs correct status codes and the route template), while **exposure** goes through `Wrap`, because `promhttp.Handler()` is already an `http.Handler`:
 

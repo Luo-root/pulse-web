@@ -28,7 +28,7 @@
 
 前端界面 / ORM / 策略中间件（认证 / 限流 / 熔断）/ 微服务治理 / 第三方路由库 / `HoldScope` / `RunTLS` / `Recover()` 中间件 / 内部 Router 抽象 / TTFB / 流式双记录 / **框架自己编造 span-id**。
 
-**后续计划：WebSocket**——stdlib 没有 WebSocket 实现（`net/http` 只提供 Hijack / Upgrade 机制，帧协议需自实现），引入它必然带第三方依赖（社区域主流是 `coder/websocket`）。因此作为**可选子包**（`pulse-web/ws`）后续加入，核心保持零依赖。
+**WebSocket / 协议升级**——`net/http` 只提供机制（Hijack / Upgrade），帧协议那一套归生态库，框架既不实现、也**不发自研子包**：`Hijack` 一旦透出（见「Ctx」一节的能力清单），`gorilla/websocket` 与 `coder/websocket` 零改动即可用——两条端到端探针在 `interop/`（进 CI）。
 
 另有一批"评审中被判定为非 v1"的项，列入文末「明确不做」清单（含各自去路）。
 
@@ -165,7 +165,7 @@ g2.GET("/users", h, mw3)
 2. `-benchtime=20000x` 一档整轮约 7 ms，量化误差本身就有几个百分点，与观测到的 5–10% 离散度同量级。**分配计数不受时钟影响**——这是它当判据的又一条理由；要 ns 就上更长 benchtime，并且只跟同轮对照行比。
 
 
-### 表 C：与 gin 的真实负载对比（2026-09-16 重采，采集工程在 `loadtest/`）
+### 表 C：与 gin 的真实负载对比（2026-09-20 重采，采集工程在 `loadtest/`）
 
 设计验收标准『真实负载与 gin 同级』条的落地。口径与结论在这里；采集工程是仓库里的 `loadtest/`
 ——**独立 module**，带 gin 依赖，`replace` 回来比的是当前工作副本（根 module 的 `./...` 不过
@@ -176,9 +176,11 @@ module 边界，依赖判据不受影响）。
 （[#73](https://github.com/Luo-root/pulse-web/issues/73)）：**证据工程待在不参与 CI 的地方，
 迟早会和主干脱节**。
 
-本节 2026-09-14 首采；2026-09-16 换默认出口后重采，**两次独立会话的配对比值逐项吻合**
-（`bare` 0.90x / 0.91x、0.95x / 0.95x；`obs` 0.81x / 0.82x、0.92x / 0.93x）——下面登的是第二次，
-也就是采集工程挪进仓库、选项集收敛之后的那一轮。
+本节 2026-09-14 首采；2026-09-16 换默认出口后重采，那两次独立会话的配对比值逐项吻合
+（`bare` 0.90x / 0.91x、0.95x / 0.95x；`obs` 0.81x / 0.82x、0.92x / 0.93x）；**2026-09-20 因放开
+响应写出器的 `Hijack`（动了请求路径上的 writer）按同一口径第三次重采**（`bare` 0.90x / 0.94x、
+`obs` 0.87x / 0.92x），**同日评审修复（hijack 之后的写保护）又复跑一轮复核**（`bare` 0.89x / 0.95x、
+`obs` 0.85x / 0.91x）——两次落在同一波动带，下面登的是这一轮。
 
 **口径先行**——这类对比最容易变成「谁的数字好看谁赢」，所以先把口径钉死：
 
@@ -196,14 +198,14 @@ module 边界，依赖判据不受影响）。
 
 | 档位 | 并发 | pulse-web RPS | gin RPS | pulse/gin | pulse p99 | gin p99 |
 |---|---|---|---|---|---|---|
-| bare | 64 | 55426 | 61290 | **0.91x** | 4.86ms | 4.63ms |
-| bare | 256 | 63881 | 67156 | **0.95x** | 17.43ms | 21.30ms |
-| obs | 64 | 47946 | 59636 | **0.82x** | 5.33ms | 4.82ms |
-| obs | 256 | 61107 | 65097 | **0.93x** | 17.51ms | 20.92ms |
+| bare | 64 | 27494 | 31043 | **0.89x** | 11.32ms | 11.60ms |
+| bare | 256 | 36036 | 37951 | **0.95x** | 31.18ms | 37.99ms |
+| obs | 64 | 25332 | 29616 | **0.85x** | 11.49ms | 11.63ms |
+| obs | 256 | 33437 | 36882 | **0.91x** | 32.16ms | 39.94ms |
 
-- **裸档同级**：0.91–0.95×；并发 256 时 p99 反而更低（17.43ms vs 21.30ms）。
-- **绝对值只做量级参考**——同一格换一次会话就能从 49k 变到 78k（±20%），所以本表只认同轮配对比值：
-  与表 A / 表 B 的「ns 跨轮漂 2–4×」是同一条纪律。
+- **裸档同级**：0.89–0.95×；两个并发档的 p99 都更低（11.32ms vs 11.60ms、31.18ms vs 37.99ms）。
+- **绝对值只做量级参考**——同一格换一次会话就能从 28k 变到 78k（这一轮的绝对 RPS 只有 2026-09-16
+  那轮的一半左右，纯属机器状态），所以本表只认同轮配对比值：与表 A / 表 B 的「ns 跨轮漂 2–4×」是同一条纪律。
 - **换默认出口的效果**（只与 2026-09-14 那轮比**比值**，不比绝对值）：`obs` 档 0.65x → **0.82x**（c=64）、
   0.88x → **0.93x**（c=256）。方向一致、幅度收窄——省下的是「把 Record 摊平成 `[]any` 再交给 slog」那一步。
 
@@ -211,19 +213,21 @@ module 边界，依赖判据不受影响）。
 
 | 并发 | bare | 关访问日志 | 默认 `ConsoleSink` | `AsyncSink`(默认出口) |
 |---|---|---|---|---|
-| 64 | 55426 | 50706 (−9%) | **47946 (−13%)** | 51955 (−6%) |
-| 256 | 63881 | 62092 (−3%) | **61107 (−4%)** | 60810 (−5%) |
+| 64 | 27494 | 26310 (−4%) | **25332 (−8%)** | 26457 (−4%) |
+| 256 | 36036 | 34503 (−4%) | **33437 (−7%)** | 33645 (−7%) |
 
-- **默认装配的观测开销**：c=64 掉 13%、c=256 掉 4%；关掉访问日志掉 9% / 3%——**记录这条路本身**
+- **默认装配的观测开销**：c=64 掉 8%、c=256 掉 7%；关掉访问日志掉 4% / 4%——**记录这条路本身**
   （TraceID 生成 + 记录组装）的量级就在这儿。
 - **「出口」与「记录框架」的分界落在噪声里，本页不给单独归因。** 把同表内「默认出口」与「关访问日志」
-  两格相减得 4%（c=64）/ 1%（c=256）；上一轮同一算法给的是 7% / 3%。两次算出来不一致、又都小于
-  `obs` 档自身的**轮间极差**（c=64 是 7.5%）——宁可不写，也不给一个看起来精确的假数。
-- **异步出口的倾向**：`AsyncSink(默认)` 在 c=64 是四档里最接近 `bare` 的（−6%，它自己的轮间极差
-  只有 2.3%）；c=256 四档挤在 −3% ~ −5%，分不出来。低并发下把格式化挪出请求路径划算、高并发下
-  队列与调度把那点收益吃掉——这是**倾向**，不是结论。
+  两格相减得 4%（c=64）/ 3%（c=256）；往前数三轮同一算法给的是 3% / 1%、4% / 1%、7% / 3%。四轮
+  算出来不一致、又都小于 `obs` 档自身的**轮间极差**（c=64 是 2.4%）——宁可不写，也不给一个看起来
+  精确的假数。
+- **异步出口的倾向变弱了**：`AsyncSink(默认)` 在 c=64 是四档里最接近 `bare` 的（−4%，它自己的
+  轮间极差 0.4%）；c=256 这一轮与默认出口**同档**（都是 −7%），上一轮它比默认出口还低 2 个点。
+  低并发下把格式化挪出请求路径划算、高并发下队列与调度把那点收益吃掉——这条倾向在减弱，仍是
+  **倾向**，不是结论。
 - **参照**：gin 侧同一档（`gin.Default()` vs `gin.New()`，`Logger` 就是一行文本、没有第二条路可选）
-  掉 **2.7% / 3.1%**（c=64 / c=256，同一张主表内两行相减）。
+  掉 **4.6% / 2.8%**（c=64 / c=256，同一张主表内两行相减）。
 - **选项集只留今天真实存在的**：默认出口，与「默认外面套一层 `AsyncSink`」。历史上的「换 `LineSink`」
   与原型 `fastsink` 两档已从采集工程里删掉——前者的手法被默认出口吸收（`ConsoleSink` 就是行式缓冲
   出口 + 列式版式的合体），后者的实现永远不会发布。**拿它们当选项比较，等于拿基准当选项。**
@@ -375,7 +379,13 @@ func (c *Ctx) Flush() error                // 流式：首刷落 Status() 设置
 
 类型约束：`Key[T]` 与 `kernel.ServiceKey[T]` 是不同类型，误用编译期报错——命名是第一道防线，类型是第二道。
 
-**`Writer()` 的能力边界**（有意的窄口）：返回的是框架包装器，**只显式实现 `http.Flusher`**（`Flush()` 落到下层 writer）；底层的 `Hijacker` / `Pusher` / `FlushError` / `SetWriteDeadline` **不透出**——内嵌 `http.ResponseWriter` 只提升 `Header` / `Write` / `WriteHeader`，其余能力必须显式实现才有。所以 `http.NewResponseController(c.Writer())` 上只有 `Flush()` 可用，`Hijack()` / `SetWriteDeadline()` / `EnableFullDuplex()` 返回 `http.ErrNotSupported`。要升级协议（WebSocket）需要原始 writer：用 `Wrap` 包一个 stdlib handler，代价是拿不到 `*Ctx`。窄口是有意的——让「流式能干什么」在类型层面一眼可见，而不是靠断言碰运气；要放开 `Hijack` 得先想清楚它与 AccessLog 体积统计的交互（另开票）。
+**`Writer()` 的能力面**（一份显式的窄清单）：返回的是框架包装器，**只显式实现四个**并转发到底层——`Flush` / `Hijack` / `SetWriteDeadline` / `EnableFullDuplex`；`Pusher` / `FlushError` **不透出**，也**不提供 `Unwrap()`**（那等于把底层 writer 整个交出去，连上面两个一起）。内嵌 `http.ResponseWriter` 只提升 `Header` / `Write` / `WriteHeader`，其余能力必须显式实现才有——所以清单就是全部，一眼可见，不靠断言碰运气。
+
+`Hijack` 是协议升级（WebSocket）的唯一入口。生态库拿连接的方式只有两条，且都在 net/http 的语义之内：`gorilla/websocket` **直接断言** `w.(http.Hijacker)`；`coder/websocket` 先断言、再沿 `Unwrap()` 链找（`net/http/responsecontroller.go` 的 `rwUnwrapper` 就是这条链）。**只提供 `Unwrap` 不够**——前者不展开链；这也正是这里宁可逐个显式实现、也不放 `Unwrap` 的原因。
+
+交出去之后框架不再掌握这条响应：`Write` / `Flush` 返回 `http.ErrHijacked`，收尾不落码、不写兜底响应（`ErrHijacked` 不当失败）。**连接只能交出去一次**：第二次 `Hijack` 同样返回 `http.ErrHijacked`——这条判定由包装器自己做（net/http 恰好给同一个错误，但那是它的内部实现细节，换一个底层 writer 就没了）。观测口径随之定死：**框架侧未落定状态码时按 `101` 记**，访问日志与 span 带上 `connection.hijacked` 标记（本框架声明的扩展键，semconv 无对应字段），且**不记 `http.response.body.size`**——连接已交出，记 0 会被读成「响应是空的」。两条库的时序差异正是这条口径的由来：coder 先经 writer 写 101 再 hijack（框架看得见），gorilla 先 hijack 再自己往裸连接写（框架什么都看不见）。
+
+边界两条：**HTTP/2 下不可用**（h2 的 writer 不是 `Hijacker`）；**洋葱内可用，但受中间件影响**——`Adapt` 的代理会转发 `Hijack`（所以 `Use(Adapt(...))` 之后的升级路由照常工作），而中间件自己再包一层且不转发时同样会断，这与纯 stdlib 下完全同形。
 
 **关系澄清**：kernel **v0.2.1 起存在** scope 局部服务——`kernel.Provide(scope, key, v, kernel.Local())`：绑定存本层，**本 scope 及其后代**可读（`Get` 沿父链近因优先），父 / 兄弟不可读，随作用域销毁撤除；它**不投递服务变更、不参与 fiber 依赖解析**。所以 `c.Service(key)` ≡ `kernel.Get(c.Kernel(), key)`，会先走局部链再回全局仓库。
 
@@ -449,11 +459,11 @@ func Adapt(mw func(http.Handler) http.Handler) Middleware    // stdlib 中间件
 
 外包 `Handler()`（今天就能用）够不到框架的请求作用域：读不到路由模板 `r.Pattern`，短路的请求框架完全不知情（无访问日志、无 span）。手写适配器（十几行公开 API）则**静默失真**，两条已知失效都是实测：包 ResponseWriter 抓状态码恒为 0（promhttp 计数器全标 `code="0"`）；改写 body 的中间件被绕开（`Content-Encoding: gzip` 配明文 body，客户端报 `gzip: invalid header`）。生态矩阵（chi 8 项 + promhttp + rs/cors，端到端逐项比对）见站点「stdlib 中间件接入」页。
 
-**承诺三条**（都可观测）：① 中间件包 writer 时抓到真实状态码与字节数；② 中间件短路写响应时，状态码与字节数记回采集层；③ 中间件换掉的 request 传得下去。能力面只到 `http.Flusher`，且**不虚报**——底层不能 Flush 时代理**不带** Flush 方法，`Ctx.Flush()` 照旧返回明确 error。
+**承诺三条**（都可观测）：① 中间件包 writer 时抓到真实状态码与字节数；② 中间件短路写响应时，状态码与字节数记回采集层；③ 中间件换掉的 request 传得下去。能力面是 `Flush` / `Hijack` / `SetWriteDeadline` / `EnableFullDuplex` 四项，且**不虚报**——底层不能 Flush 时代理**不带** Flush 方法，`Ctx.Flush()` 照旧返回明确 error；`Hijack` 由代理转发（底层不支持时返回明确 error），理由见 `responseWriter.Hijack`。连接交出之后代理与框架侧**同型拒写**（`Write` 返回 `http.ErrHijacked`、`WriteHeader` 不落码），短路回填也**不回填状态码**——那条请求的状态码列一律是 hijack 的约定值（`101`），见「Ctx」一节的观测口径。
 
 **实现三条**（都是实测撞出来的，不是洁癖）：① 交给中间件的是**调用时**的 `c.w.ResponseWriter`（不是「最底层那一个」），两层 `Adapt` 因此自然叠序；② 还原 `c.w.ResponseWriter` / `c.r` **必须走 defer**——顺序语句会被 panic 跳过，框架收尾写进中间件已收尾的 writer，后果是 **500 整个丢掉、客户端拿到 200 空响应**；③ 短路回填是**累加**（`c.w.bytes += proxy.bytes`），状态码只在**框架侧尚未落定**时取中间件的——外层已写过响应时不能被覆盖。
 
-**明确不做五条**：不搬动路由（预检 `OPTIONS` 到不了中间件，只注册 `GET /api` 时 ServeMux 直接 405 `Allow: GET, HEAD`）→ CORS 类必须外包；不解决「收尾型中间件 × error/panic」（框架错误映射发生在中间件返回**之后**）→ 压缩类推外包；不透出 `http.Hijacker`（能力承诺只到 `Flusher`）；不保证「同形状就能接」（chi `CleanPath` 读 `chi.RouteContext`，经 `Adapt` 与外包**都 panic**）；不改中间件语义（panic 谁接、错误响应体长什么样仍归中间件）。
+**明确不做五条**：不搬动路由（预检 `OPTIONS` 到不了中间件，只注册 `GET /api` 时 ServeMux 直接 405 `Allow: GET, HEAD`）→ CORS 类必须外包；不解决「收尾型中间件 × error/panic」（框架错误映射发生在中间件返回**之后**）→ 压缩类推外包；不透出 `Pusher` / `FlushError`（能力面只到 `Flush` / `Hijack` / `SetWriteDeadline` / `EnableFullDuplex` 四个；`Hijacker` 会透出，`Adapt` 的代理同样转发）；不保证「同形状就能接」（chi `CleanPath` 读 `chi.RouteContext`，经 `Adapt` 与外包**都 panic**）；不改中间件语义（panic 谁接、错误响应体长什么样仍归中间件）。
 
 **传值**：中间件与 handler 之间走 request context，框架**不导出 `Ctx` 取用口**——那会把「`Ctx` 放在 request context 里」这个实现细节升格成契约；洋葱内中间件需要的路由模板本来就在 request 上（`r.Pattern`），不需要新口子。
 
@@ -808,6 +818,7 @@ v1 只做当前视图：`app.Debug("/debug/pulse")` 输出 `kernel.FiberSnapshot
 | 项 | 去路 |
 |---|---|
 | 自研中间件实现（CORS / CSRF / 鉴权 / 限流…） | 不做——框架只给**缝**：`Adapt` 把生态里 stdlib 形状的中间件接进洋葱、`Wrap` 接 stdlib handler。要拦预检的 CORS 必须外包 `Handler()`（路由先于中间件，见「中间件与 stdlib 互操作」）。哪些生态件实测可吸纳、各挂哪个挂载点，见站点「stdlib 中间件接入」；官方要不要出自研件另议（[#61](https://github.com/Luo-root/pulse-web/issues/61)） |
+| WebSocket 协议实现 / 自研 `ws` 子包 | 不做——帧、掩码、子协议那一套归生态库，框架只把 `Hijack` 这条能力面打开（见「Ctx」一节），`gorilla/websocket` 与 `coder/websocket` 零改动可用；端到端对照在 `interop/`（进 CI），能力面清单与两条取连接路径的差异见「协议升级可用」验收条 |
 | `AsyncSink`（队列 / Drop / flushTimeout） | **上游已提供**（`observability.NewAsyncSink`，v0.2.1）——web 不另造缓冲层，`WithSink` 接入即可。注意组合语义：`AsyncSink.Flush` 只排空**它自己的**队列、不级联 inner 的 `Flush`，所以异步化的正确组合是 `NewAsyncSink(SlogSink)`；用 `AsyncSink` 包另一个缓冲出口（如 `LineSink`）会留下未落盘的内层缓冲，框架无从代劳 |
 | `Sink.Close`（停协程） | 不做——出口所有权属装配方：`Detach` 允许进程级后台任务继续写同一 Sink，框架在关闭时 `Close` 它会静默丢弃这些记录。关闭时序只负责 flush 并记错误 |
 | 流式双记录（Flush 启发式） | 不做——普通 handler / 中间件的 `Flush()` 会误判；SSE 的语义已由"handler 不返回 ⇒ AccessLog 晚写"覆盖。需要"流开始"再显式另开票 |
@@ -855,6 +866,9 @@ pulse-web/
 │   └── favicon.svg            # 16px 简化版（5 柱）+ 明暗自适应
 ├── bench/                     # 性能回归基线 + 分配预算门禁（go test ./bench/）
 │   └── muxprobe/              # 路由选型的一次性实测程序（「路由选型的边界」的数据来源）
+├── loadtest/                  # 与 gin 的真实负载对比（**独立 module**；根 module 的 ./... 不过 module 边界）
+├── otel/                      # 官方 OTel 适配（**独立 module**，带 otel-go 依赖）
+├── interop/                   # 生态互操作对照（**独立 module**，带 websocket 等真依赖；站点公布的兼容结论由它守着）
 ├── docs/design/               # 设计文档（本文件）
 ├── LICENSE                    # MIT
 ├── CONTRIBUTING.md            # 贡献流程：Issue 五段 / PR 六段 / 本地门禁 / review 约定（中英双语）
@@ -917,11 +931,13 @@ mark 的走势**直接沿用 pulse**（平段 → 上升 → 峰值 → 深谷 �
 - [x] **span 出口可接**（[#76](https://github.com/Luo-root/pulse-web/issues/76)）：`WithSpanHook` 把请求的 span 身份交给追踪体系（官方适配在 `otel/` nested module）；**框架不编造 span-id**，两个响应头各写各的，入站 `traceparent` 的校验与官方 propagator 同口径
   证据：`span_test.go` 17 条——请求事实与访问日志同源（`TestSpanHookCarriesRequestFacts`）、注入到达中间件与 handler（`TestSpanHookInjectionReachesHandler`）、**404 也保住注入的 context**（`TestSpanInjectionOnUnmatchedRoute`）、`X-Trace-Id` 与 `Server-Timing` 各写各的（`TestSpanTwoResponseHeaders`）、采用 hook 的身份（`TestSpanAdoptsHookIdentity`）、入站 parent 与 flags（`TestSpanParentFromInboundTraceparent`）、严格解析 4 合法 / 10 非法逐条（`TestTraceparentStrictParsing`）、B3 只给 trace-id（`TestB3GivesTraceIDOnly`）、panic 与映射错误后的状态码（`TestSpanOnPanicAndMappedErrors`）、`nil` 装配期 panic（`TestSpanHookNilPanics`）、handler 读得到 span-id（`TestSpanIDIsReadableInHandler`）；`otel/otelweb_test.go` 12 条——server span 形状（`TestServerSpanFromRequest`）、入站父（`TestServerSpanAdoptsInboundParent`）、状态语义四档（`TestStatusSemantics`）、**下游注入的 parent-id 就是本请求 span-id**（`TestDownstreamPropagationUsesServerSpanID`）、记录里的 `span.id` 与导出 span 一致（`TestAccessRecordCarriesSpanID`）、**与官方 propagator 的差分对照 16 条**（`TestParsingAgreesWithOfficialPropagator`）、**span 名永不使用 URI 路径**（`TestSpanNameNeverUsesURIPath`，含 404 的几种形态）、**方法归一三档**（`TestMethodNormalizedPerSemconv`）、**注入的 context 走完边角路径**（`TestContextChainSurvivesEdgePaths`：未匹配路由 / panic / 映射错误 / `Wrap` / 中间件，判据是 span 被正常结束并导出）、**并发不串台**（`TestConcurrentRequestsDoNotCrosstalk`，64 并发 + `-race`）、**没有 span 身份时不编造**（`TestSpanNoIdentityWritesNoSpanID`：不写 `Server-Timing`、记录里没有 `span.id`）、**`Minimal()` 与 span 出口的分工**（`TestMinimalWithSpanHook`）、**`Detached` 带的是发起请求的那个 span**（`TestDetachCarriesSpanIdentity` / `TestDetachWithoutSpanHook`）、**关掉入站头信任后 span 侧同样新起 trace**（`TestUntrustedTraceHeaderSkipsInboundForSpan`）、**tracestate 原样透传**（`TestTraceStatePassedThroughVerbatim`）、**后台任务建 link 而不是父子**（`TestDetachedWorkLinksToRequestSpan`，真 SDK），外加钉住「记录侧保留原始方法」的 `TestRecordKeepsRawMethod`。
 - [x] **标准库兼容**：三条路径都在——`Wrap` 接 stdlib handler 进来、`Adapt` 把 stdlib 中间件接进**洋葱内**、`Handler()` 把引擎导出去；`Wrap` 双向适配
-  证据：`TestWrapStdlibHandler`、`TestEngineUnderStdlibMiddleware`、`TestWrapPanicCaughtByEngine`；`Adapt` 13 条——真实状态码与字节数（`TestAdaptMiddlewareObservesRealStatusAndBytes`）、短路回填采集层（`TestAdaptShortCircuitReachesAccessLog`）、换过的 request 传下去（`TestAdaptReplacedRequestReachesHandler`）、**handler error 穿过适配层**（`TestAdaptPassesHandlerErrorThrough`）、预检到不了中间件（`TestAdaptDoesNotSeePreflight`）、读得到路由模板（`TestAdaptCanReadRouteTemplate`）、body 穿过中间件且体积记压缩前（`TestAdaptBodyRewritingMiddlewareKeepsResponseValid`）、无条件收尾的**已知边界**（`TestAdaptUnconditionalFinalizeLocksStatus`）、Flusher 透出与不虚报（`TestAdaptKeepsFlusher` / `TestAdaptDoesNotOverclaimFlusher`）、panic 时还原 writer（`TestAdaptRestoresCtxOnPanic`）、两层叠序（`TestAdaptLayersNest`）、`Adapt(nil)` 装配期 fail-fast（`TestAdaptNilMiddlewareFailsFast`）。每条守卫都配了变异探针（8 个变异全部被对应用例抓到）。
+  证据：`TestWrapStdlibHandler`、`TestEngineUnderStdlibMiddleware`、`TestWrapPanicCaughtByEngine`；`Adapt` 16 条——真实状态码与字节数（`TestAdaptMiddlewareObservesRealStatusAndBytes`）、短路回填采集层（`TestAdaptShortCircuitReachesAccessLog`）、换过的 request 传下去（`TestAdaptReplacedRequestReachesHandler`）、**handler error 穿过适配层**（`TestAdaptPassesHandlerErrorThrough`）、预检到不了中间件（`TestAdaptDoesNotSeePreflight`）、读得到路由模板（`TestAdaptCanReadRouteTemplate`）、body 穿过中间件且体积记压缩前（`TestAdaptBodyRewritingMiddlewareKeepsResponseValid`）、无条件收尾的**已知边界**（`TestAdaptUnconditionalFinalizeLocksStatus`）、Flusher 透出与不虚报（`TestAdaptKeepsFlusher` / `TestAdaptDoesNotOverclaimFlusher`）、panic 时还原 writer（`TestAdaptRestoresCtxOnPanic`）、两层叠序（`TestAdaptLayersNest`）、`Adapt(nil)` 装配期 fail-fast（`TestAdaptNilMiddlewareFailsFast`）；**hijack 三条**——代理层的两次误写被拦（`TestAdaptHijackStopsProxyWrites`：交出后 `Write` 明确拒绝、服务端不留 net/http 告警、状态码回到 101）、升级发生在洋葱内 handler 时代理同样知道（`TestAdaptProxyYieldsToHandlerHijack`）、短路回填不越权写状态码列（`TestAdaptHijackKeepsStatusColumnConventional`）。每条守卫都配了变异探针（Adapt 面 8 个 + 本轮评审修复 6 个 = 14 个变异全部被对应用例抓到）。
+- [x] **协议升级可用**：`c.Writer()` 实现 `http.Hijacker`——生态 websocket 库零改动直接可用（**断言型**与**沿 `Unwrap()` 链型**两条路都要满足）；hijack 之后框架不再写响应（`Write` / `Flush` 返回 `http.ErrHijacked`）、不写兜底错误响应，访问日志按 `101` 记并带 `connection.hijacked` 标记、不记体积；洋葱内（`Adapt` 之后）同样可用
+  证据：`context_test.go` 六条——`TestHijackHandsConnectionToHandler`（连接真能用 + 交出后写出被拒 + 观测事实对账）、`TestHijackUnsupportedReturnsError`（底层不支持 → 明确 error，不是 panic）、`TestHijackOnlyOnce`（连接只能交出去一次：底层照单全收也照样被挡下）、`TestHijackUnderHTTP2ReturnsError`（真起一个 h2 server，钉住「HTTP/2 下不可用」这条边界）、`TestHijackSkipsErrorMapping`（已 hijack 时不写错误体，原始 error 仍进日志）、`TestResponseWriterCapabilitySurface`（能力清单正反向）；`interop/websocket_test.go` 三条端到端——`TestGorillaWebSocketUpgrade` / `TestCoderWebSocketUpgrade` / `TestUpgradeThroughAdaptMiddleware`，各真跑一次握手 + 消息往返，并断言日志里 `status=101` + `connection.hijacked` + 无体积。
 - [x] **ServerConfig 契约**：6 个默认值 + 「非零覆盖、零值保持默认」+ 配置**真的**落到 `http.Server` 上
   证据：`TestDefaultServerConfigValues`、`TestWithServerMergesNonZeroFields`、`TestServerConfigReachesHTTPServer`（1 KiB 上限下超限请求头被拒 431）。
 - [x] **流式响应可用**：`c.Writer()` + `c.Flush()` 逐段推送（SSE），首刷（= 第一次写出：`Write` / `Flush` / 引擎收尾）落 `Status()` 设置（缺省 200）；底层不支持 `http.Flusher` 时返回明确 error；**仍是一条 AccessLog**（状态码与体积照常采集）
-  证据：`TestCtxFlushStreamsIncrementally`（第一段在 handler 仍挂起时已到达客户端——只有真 flush 做得到；同一条用例断 `Status="200"` 与 `http.response.body.size=18`）、`TestFlushFirstWriteUsesStatus` / `TestFlushFirstWriteDefaultsTo200` / `TestStatusAfterFlushIgnored`（首刷吃 `Status`，首刷后不可改）、`TestStatusAppliedOnFirstWrite` / `TestStatusAfterWriteIgnored`（直接写字节同样是首刷）、`TestCtxFlushWithoutFlusherReturnsError`、`TestResponseWriterKeepsFlusherCapability`（能力边界：`Flusher` ✅，`FlushError` / `Hijacker` / `Pusher` / `SetWriteDeadline` ❌）。
+  证据：`TestCtxFlushStreamsIncrementally`（第一段在 handler 仍挂起时已到达客户端——只有真 flush 做得到；同一条用例断 `Status="200"` 与 `http.response.body.size=18`）、`TestFlushFirstWriteUsesStatus` / `TestFlushFirstWriteDefaultsTo200` / `TestStatusAfterFlushIgnored`（首刷吃 `Status`，首刷后不可改）、`TestStatusAppliedOnFirstWrite` / `TestStatusAfterWriteIgnored`（直接写字节同样是首刷）、`TestCtxFlushWithoutFlusherReturnsError`、`TestResponseWriterCapabilitySurface`（能力清单：`Flusher` / `Hijacker` / `SetWriteDeadline` / `EnableFullDuplex` ✅，`FlushError` / `Pusher` / `Unwrap` ❌）。
 - [x] **请求体绑定完整**：`Ctx.Bind` 按 Content-Type 分派（JSON / XML / form-urlencoded / multipart；无 body 落 query），`BindQuery` 显式 query；`WithMaxBodyBytes` 上限对**全部**读取路径生效（超限 → 413 + `body_too_large`）
   证据：`bind_test.go` 19 条——分派（`TestBindJSON` / `TestBindXML` / `TestBindForm` / `TestBindFormQueryIsNotMerged` / `TestBindMultipart` / `TestBindQuery` / `TestBindUnsupportedMediaType` / `TestBindNoContentTypeFallsBackToForm` / `TestBindContentTypeWithParameters` / `TestBindJSONSlice`）、映射（`TestBindMoreScalarKinds`）、上限（`TestBindMaxBodyBytes` 读取闸门 + Content-Length 预检两路径、`TestBindURLEncodedOverLimit` 10 MiB 解析闸有 / 无 CT、`TestBindUserWrappedMaxBytesReader` 用户自包、`TestBindDefaultNoLimit` 默认不限）、健壮性（`TestBindMalformedInputs` / `TestBindJSONTrailingData` / `TestBindTargetErrors` / `TestBindQueryTargetError`）。
 - [x] **按路由 / 分组限请求体**：`BodyLimit(n)` 中间件可挂分组与单条路由，与引擎级 `WithMaxBodyBytes` 叠加时**取最严**（只能收紧、不能放宽）；超限 413 + `body_too_large`，cause 与既有两条超限路径同型（`*http.MaxBytesError`）；补导出构造器 `TooLarge`（#38）
@@ -932,4 +948,4 @@ mark 的走势**直接沿用 pulse**（平段 → 上升 → 峰值 → 深谷 �
   证据：`testing_test.go` 12 条——逐项对比（`TestNewTestContextMatchesRealPath`：状态码 / 响应体 / `Record.TraceID` 32hex / 属性集逐键相同）、错误映射（`TestNewTestContextMapsHandlerError`）、装了 hook 的 `Server-Timing` 档（`TestNewTestContextWritesServerTimingWithHook`）、body（`TestNewTestContextBindsBody`）、KV（`TestNewTestContextCarriesRequestKV`）、`Detach`（`TestNewTestContextDetachSharesTrace`）、已销毁 engine 的 503（`TestNewTestContextOnDisposedEngine`）、`done` 幂等（`TestNewTestContextDoneIsIdempotent`）、panic 归属（`TestNewTestContextDoesNotSwallowPanic` + `TestServeTestRecoversPanic`）、`Use` 叠链（`TestServeTestChainsGlobalUse`）、体闸门（`TestServeTestEnforcesBodyLimit`）。
 - [x] **性能回归**：请求路径开销进入仓库 bench，作为基线不劣化
   证据：`bench/` 全套基准 + 分配预算门禁 `TestRequestPathAllocBudget`（CI 的 `Alloc budget` 步骤，不带 `-race` 执行）。
-- [x] **真实负载与 gin 同级**（不以 micro-benchmark 胜负作承诺）——**已复采三轮、结论一致**：裸档 0.91× / 0.95×、观测档 0.82× / 0.93×（见「表 C」；采集工程在 `loadtest/`，CI 覆盖它的 build / vet / test）
+- [x] **真实负载与 gin 同级**（不以 micro-benchmark 胜负作承诺）——**已复采五轮、结论一致**：裸档 0.89× / 0.95×、观测档 0.85× / 0.91×（最近一轮 2026-09-20，评审修复 hijack 之后的写保护后复跑；同日放开 `Hijack` 那轮是 0.90× / 0.94×、0.87× / 0.92×；见「表 C」；采集工程在 `loadtest/`，CI 覆盖它的 build / vet / test）

@@ -5,11 +5,14 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ---- stdlib 互操作（设计验收标准『标准库兼容』条）----
@@ -478,6 +481,240 @@ func TestAdaptDoesNotOverclaimFlusher(t *testing.T) {
 	}
 	if !strings.Contains(flushErr.Error(), "does not support Flush") {
 		t.Fatalf("Flush error = %v", flushErr)
+	}
+}
+
+// quietServer 起一个测试服务器，把 net/http 自己的告警收进缓冲。
+//
+// hijack 之后误写响应时，net/http 会往 ErrorLog 打 `http: response.WriteHeader on
+// hijacked connection from …`，行号指向**调用方**——经 Adapt 写的那些调用方一律是
+// 框架的代理层，于是告警看起来像是框架的毛病。这个缓冲就是「框架有没有把噪音留给
+// 使用者」的判据：框架自己挡住时它是空的。
+//
+// ErrorLog 必须在 Start 之前替换：服务器起来之后再改就是和连接 goroutine 抢字段，
+// `-race` 会报。
+func quietServer(t *testing.T, h http.Handler) (*httptest.Server, *bytes.Buffer) {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	srv := httptest.NewUnstartedServer(h)
+	srv.Config.ErrorLog = log.New(buf, "", 0)
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv, buf
+}
+
+// TestAdaptHijackStopsProxyWrites 钉住「连接交出去之后，代理自己也不许再写」——写在
+// 代理层的第二个 Hijack 入口上（中间件自己拿的连接）。
+//
+// 场景：中间件经 Adapt 拿到连接、升级成功，之后（defer 里的兜底、next 返回后的收尾、
+// 或者纯粹写错）又向 writer 写响应。守卫缺失时实测三件事一起发生：
+//
+//	① net/http 打两行 `on hijacked connection` 告警，行号归属 wrap.go——噪音指向
+//	   框架，该去看的却是使用者的中间件；
+//	② 代理把自己记成「写过 200」，Adapt 的短路回填把这条升级请求记成 status=200
+//	   （该记 101），访问日志从「连接已交出」退化成一条看起来正常的 200；
+//	③ 返回值全靠 net/http 兜着（本机实测它确实给 http.ErrHijacked，但那是借来的
+//	   保护——换个底层 writer 就没了）。
+//
+// 判据：Write 明确拒绝且 0 字节、服务端告警为空、客户端只看见裸连接上那份响应、
+// 访问日志回到 101 + connection.hijacked。
+func TestAdaptHijackStopsProxyWrites(t *testing.T) {
+	e, sink := newTestEngine(t)
+
+	written := make(chan writeResult, 1)
+	e.Use(Adapt(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h, ok := w.(http.Hijacker)
+			if !ok {
+				t.Errorf("交给中间件的 writer 不是 http.Hijacker：%T", w)
+				return
+			}
+			conn, buf, err := h.Hijack()
+			if err != nil {
+				t.Errorf("中间件经代理 Hijack 失败：%v", err)
+				return
+			}
+			defer func() { _ = conn.Close() }()
+
+			// 交出之后的两次误写：先写头、再写体。
+			w.WriteHeader(http.StatusInternalServerError)
+			n, err := w.Write([]byte("fallback"))
+			written <- writeResult{n, err}
+
+			// 裸连接上写一份合法响应，让客户端能干净收尾。
+			_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
+			_ = buf.Flush()
+			// 不调 next：短路分支也要一起验（回填就挂在它上面）。
+		})
+	}))
+	e.GET("/ws", func(c *Ctx) error { return nil })
+
+	srv, serverLog := quietServer(t, e)
+
+	resp, err := http.Get(srv.URL + "/ws")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "hi" {
+		t.Fatalf("客户端读到 %q，want %q——裸连接上那份响应必须原样到达，中间没有框架插进来的字节", body, "hi")
+	}
+
+	res := awaitWrite(t, written)
+	if !errors.Is(res.err, http.ErrHijacked) {
+		t.Fatalf("交出连接后 Write = %v，want http.ErrHijacked（代理必须自己挡住）", res.err)
+	}
+	if res.n != 0 {
+		t.Fatalf("交出连接后 Write 写了 %d 字节，want 0", res.n)
+	}
+	if got := serverLog.String(); got != "" {
+		t.Fatalf("服务端出现告警：\n%s（框架自己挡住时这里应当是空的）", got)
+	}
+
+	rec := waitRecord(t, sink, eventHTTPReq)
+	if rec.Status != "101" {
+		t.Fatalf("访问记录 Status = %q，want 101——短路回填把中间件误写的那个码当成事实了", rec.Status)
+	}
+	attrs := attrsOf(rec)
+	if attrs[attrConnHijacked] != true {
+		t.Fatalf("connection.hijacked = %v，want true", attrs[attrConnHijacked])
+	}
+	if v, ok := attrs[attrHTTPBodySize]; ok {
+		t.Fatalf("连接已交出，不该记响应体积，得到 %v", v)
+	}
+}
+
+// writeResult 是中间件那次（应该被拒绝的）写出的返回值，经 channel 送回测试 goroutine
+// ——直接写共享变量会让 `-race` 报竞态，而且那种报告是真的：这次写发生在 handler 已经把
+// 响应 Flush 给客户端之后。
+type writeResult struct {
+	n   int
+	err error
+}
+
+func awaitWrite(t *testing.T, ch <-chan writeResult) writeResult {
+	t.Helper()
+	select {
+	case res := <-ch:
+		return res
+	case <-time.After(3 * time.Second):
+		t.Fatal("中间件没有走到那次误写——判据没有成立")
+		return writeResult{}
+	}
+}
+
+// TestAdaptProxyYieldsToHandlerHijack 钉住代理读的是**框架侧**那份标记：升级发生在
+// 洋葱内的 handler（走 `c.Writer()`，不经过代理），中间件随后照常收尾写响应——代理
+// 必须也知道连接没了。
+//
+// 这是「兜底写响应」型中间件的形状：next 返回后无条件补一个响应。代理只信自己那份
+// 标记时，这一写会落到 net/http 上，打两行归属 wrap.go 的告警（实测），而中间件
+// 作者在自己的代码里看不到任何异常。
+func TestAdaptProxyYieldsToHandlerHijack(t *testing.T) {
+	e, sink := newTestEngine(t)
+
+	written := make(chan writeResult, 1)
+	e.Use(Adapt(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r)
+			n, err := w.Write([]byte("fallback"))
+			written <- writeResult{n, err}
+		})
+	}))
+	e.GET("/ws", func(c *Ctx) error {
+		h, ok := c.Writer().(http.Hijacker)
+		if !ok {
+			t.Errorf("c.Writer() 不是 http.Hijacker")
+			return nil
+		}
+		conn, buf, err := h.Hijack()
+		if err != nil {
+			t.Errorf("handler Hijack 失败：%v", err)
+			return nil
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
+		return buf.Flush()
+	})
+
+	srv, serverLog := quietServer(t, e)
+
+	resp, err := http.Get(srv.URL + "/ws")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "hi" {
+		t.Fatalf("客户端读到 %q，want %q", body, "hi")
+	}
+
+	res := awaitWrite(t, written)
+	if !errors.Is(res.err, http.ErrHijacked) {
+		t.Fatalf("handler 交出连接后，中间件的 Write = %v，want http.ErrHijacked（代理要看见框架侧那份标记）", res.err)
+	}
+	if res.n != 0 {
+		t.Fatalf("交出连接后 Write 写了 %d 字节，want 0", res.n)
+	}
+	if got := serverLog.String(); got != "" {
+		t.Fatalf("服务端出现告警：\n%s（中间件这一写该被框架挡住，而不是交给 net/http 去抱怨）", got)
+	}
+
+	rec := waitRecord(t, sink, eventHTTPReq)
+	if rec.Status != "101" {
+		t.Fatalf("访问记录 Status = %q，want 101", rec.Status)
+	}
+	if got := attrsOf(rec)[attrConnHijacked]; got != true {
+		t.Fatalf("connection.hijacked = %v，want true", got)
+	}
+}
+
+// TestAdaptHijackKeepsStatusColumnConventional 钉住短路回填那条守卫：**连接交出去
+// 之后，状态码列一律是 hijack 的约定值（101）**，不回填中间件写过的任何码。
+//
+// 用「先写一个普通状态码、再交出连接」这个合法但少见的次序把两条路分开：回填守卫
+// 缺失时，这条升级请求在访问日志里显示 418 + connection.hijacked，读者分不清 418 是
+// 真写到线上了还是中间件手滑写早了；守卫在则一律 101，这一列的性质由
+// connection.hijacked 一句话说清（它本来就只是约定值，见 statusHijacked）。
+func TestAdaptHijackKeepsStatusColumnConventional(t *testing.T) {
+	e, sink := newTestEngine(t)
+
+	e.Use(Adapt(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusTeapot) // 先按普通响应落一个码
+			h, ok := w.(http.Hijacker)
+			if !ok {
+				t.Errorf("交给中间件的 writer 不是 http.Hijacker：%T", w)
+				return
+			}
+			conn, _, err := h.Hijack()
+			if err != nil {
+				t.Errorf("中间件经代理 Hijack 失败：%v", err)
+				return
+			}
+			_ = conn.Close() // 交出之后不写任何东西：客户端拿到的是一个残缺响应
+		})
+	}))
+	e.GET("/ws", func(c *Ctx) error { return nil })
+
+	srv, _ := quietServer(t, e)
+	if resp, err := http.Get(srv.URL + "/ws"); err == nil {
+		_ = resp.Body.Close()
+	}
+
+	rec := waitRecord(t, sink, eventHTTPReq)
+	if rec.Status != "101" {
+		t.Fatalf("访问记录 Status = %q，want 101——回填把中间件写的 418 当成这条请求的事实了", rec.Status)
+	}
+	if got := attrsOf(rec)[attrConnHijacked]; got != true {
+		t.Fatalf("connection.hijacked = %v，want true", got)
 	}
 }
 
