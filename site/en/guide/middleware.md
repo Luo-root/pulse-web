@@ -50,7 +50,7 @@ Plus: the writer handed to middleware supports `http.Flusher` and `http.Hijacker
 
 ## What it does not do
 
-1. **It does not move routing.** Route matching still happens before middleware, so a preflight `OPTIONS` never reaches it — register only `GET /api` and ServeMux answers 405 (`Allow: GET, HEAD`) directly. **CORS that must intercept preflight has to be wrapped outside**, or you register an explicit `OPTIONS` route. Requests that match no route (real 404, trailing slash) behave the same way, as do **paths that need cleaning** (`//users`, `/users//42`): ServeMux answers those with a 307 to the clean path **before calling any handler**, so middleware inside the onion never sees them. Note that the access record for such a request has a **non-empty `http.route`** (ServeMux sets the pattern before redirecting), so do not read it as "that handler processed this request".
+1. **It does not move routing.** Route matching still happens before middleware, so a preflight `OPTIONS` never reaches it — register only `GET /api` and ServeMux answers 405 (`Allow: GET, HEAD`) directly. **CORS that must intercept preflight either wraps outside**, or you register `OPTIONS` routes: per route, or one catch-all `OPTIONS /{path...}` — both are verified, see "CORS and CSRF" below. Requests that match no route (real 404, trailing slash) behave the same way, as do **paths that need cleaning** (`//users`, `/users//42`): ServeMux answers those with a 307 to the clean path **before calling any handler**, so middleware inside the onion never sees them. Note that the access record for such a request has a **non-empty `http.route`** (ServeMux sets the pattern before redirecting), so do not read it as "that handler processed this request".
 2. **It does not solve "finalizing middleware × error/panic".** The framework's error mapping happens **after** middleware returns, and that single ordering has consequences in two directions:
    - **On the response**: middleware that unconditionally writes once next returns (e.g. gzip with its own `defer zw.Close()`) locks the status at 200. **Compression is pushed outside by default.**
    - **On observability**: the middleware's own finalizer reads **0** — `chi Logger` records `0 / 0B` on routes that return an error or panic, and a `promhttp` counter files a 404 under `code="200"` (`sanitizeCode(0)`), or records nothing at all for a panic. To log or measure the **real** response, use the framework's own access log and traces.
@@ -87,7 +87,7 @@ Not exporting a `Ctx` accessor here is deliberate: it would promote "`Ctx` lives
 |---|---|
 | Only touches headers / short-circuits / wraps the writer (logger, auth, rate limit, promhttp counters) | Either works; needs the route template or needs short-circuits in the access log → **`Adapt` (inside)**; must log or measure the **real status** → **wrap outside** (inside the onion it cannot see the framework-mapped error/panic response, see "What it does not do" item 2) |
 | Rewrites the body and finalizes unconditionally after next (gzip) | **Outside `Handler()`** |
-| Must intercept before routing (CORS preflight) | **Outside `Handler()`** |
+| Must intercept before routing (CORS preflight) | **Outside `Handler()`**; if the preflight must also be visible to the framework, stay inside the onion and add one catch-all `OPTIONS /{path...}` route (see "CORS and CSRF") |
 | Asserts `http.Hijacker` (WebSocket upgrades) | Either — `Adapt`'s proxy forwards `Hijack`; only re-wrapping the writer without forwarding breaks it |
 
 promhttp is a good example split in two: **collection** uses `Adapt` around `promhttp.InstrumentHandlerCounter` (so the route template `r.Pattern` is readable), while **exposure** goes through `Wrap`, because `promhttp.Handler()` is already an `http.Handler`:
@@ -97,6 +97,97 @@ app.GET("/metrics", web.Wrap(promhttp.Handler()))
 ```
 
 One trade-off in the collection half needs to be said out loud: **the counter's `code` label is wrong on error routes** when it runs inside the onion (a 404 is filed under `code="200"`, a panic is not recorded at all — see "What it does not do" item 2). To count by the real status code, wrap it outside `Handler()` instead — at the cost of `r.Pattern` not being populated yet, so you supply the route label yourself.
+
+## CORS and CSRF: how to wire them up
+
+These two are where "just use an ecosystem piece" usually gets stuck: CORS on **preflights never reaching the onion**, CSRF on **a string of 403s that look like token failures**. Both complete routes are below, and every claim is held by a case in `interop/`.
+
+### CORS
+
+`rs/cors` is zero-dependency and sufficient; the one problem is that **a preflight is dispatched by ServeMux before routing runs** (see "What it does not do" item 1). Three routes:
+
+| Route | Preflight intercepted | Preflight visible to the framework | When to use |
+|---|---|---|---|
+| Wrap `Handler()` | ✅ | ❌ the framework never learns (no trace, no access record) | CORS just has to work; you do not look at preflight traffic |
+| Register `OPTIONS` per route | ✅ | ✅ (`http.route` is the real route) | Few routes, fixed paths |
+| **One catch-all `OPTIONS /{path...}`** | ✅ | ✅ (`http.route` is the catch-all pattern) | The default: one line covers every path, including preflights to unregistered ones |
+
+The catch-all looks like this (`Use` must come **before** routes are registered):
+
+```go
+corsMW := cors.New(cors.Options{
+    AllowedOrigins:   []string{"https://app.example.com"},
+    AllowedMethods:   []string{http.MethodGet, http.MethodPost},
+    AllowedHeaders:   []string{"content-type", "x-csrf-token"},
+    AllowCredentials: true,
+}).Handler
+
+app.Use(web.Adapt(corsMW)) // CORS headers for real requests
+
+// The preflight route: one catch-all OPTIONS route carries the request into the
+// onion; the middleware still writes the response.
+app.OPTIONS("/{path...}", func(c *web.Ctx) error {
+    // Only OPTIONS requests that are NOT preflights reach this — the middleware
+    // short-circuits preflights.
+    return &web.HTTPError{Status: http.StatusMethodNotAllowed, Code: "method_not_allowed"}
+})
+```
+
+What was measured (`TestMatrixRsCorsPreflightCatchAllRoute`, `TestMatrixRsCorsPreflightExplicitRoute`):
+
+- the preflight gets `204` plus `Access-Control-Allow-Origin/Methods/Headers`, **and enters the framework's collection layer**: `http.route` records the catch-all pattern `/{path...}` rather than the target route — the price of the catch-all; per-route registration records the real route;
+- on the wrapped-outside route the preflight carries **no** `X-Trace-Id` and leaves no access record — the "⚠️ framework never learns" square in the table above;
+- a bare `OPTIONS` (no `Access-Control-Request-Method`) is not a preflight and lands on that handler, which answers 405 — change it if you want other semantics;
+- a path with an explicitly registered `OPTIONS /x` still goes to that route (ServeMux prefers the more specific pattern).
+
+### CSRF
+
+`gorilla/csrf`'s `csrf.Protect` is already `func(http.Handler) http.Handler`, so `Adapt` puts it inside the onion:
+
+```go
+app.Use(web.Adapt(csrf.Protect([]byte(key),
+    csrf.Secure(true),                                   // on in production
+    csrf.TrustedOrigins([]string{"app.example.com"}))))  // host[:port], no scheme
+```
+
+Server-rendered forms hand the token to the template (`csrf.TemplateField` produces the hidden input):
+
+```go
+app.GET("/form", func(c *web.Ctx) error {
+    return c.HTML(http.StatusOK, "form", map[string]any{"csrf": csrf.TemplateField(c.Request())})
+})
+```
+
+With a separate front end: `GET` once for the `_gorilla_csrf` cookie and a token (`csrf.Token(r)`, handed to the client), then send `X-CSRF-Token` on every unsafe request — that is the default header name.
+
+**Four traps** (each pinned by a case):
+
+| Symptom | Cause | What to do |
+|---|---|---|
+| 403 `referer not supplied` / `referer invalid` | For unsafe requests the middleware compares Referer/Origin against **https**; a plain-HTTP deployment (including "TLS terminated upstream") fails both ways | Insert a layer **before** CSRF that replaces the request: `next.ServeHTTP(w, csrf.PlaintextHTTPRequest(r))` (mounted through `Adapt` too — promise ③ guarantees the replaced request travels on) |
+| Every cross-origin POST gets 403 `origin invalid` | The `Origin` differs from the request and is not listed in `TrustedOrigins` | `csrf.TrustedOrigins([]string{"app.example.com"})` — it matches the **host[:port], not the scheme**; include the port when it is not the default (`app.example.com:8443`) |
+| 403 `CSRF token not found in request` although the form field was sent | The default form field name is `gorilla.csrf.Token`, not `csrf_token` | Produce it with `csrf.TemplateField`, or set `csrf.FieldName(...)` explicitly |
+| The form field was sent but yields `token invalid` | The token is base64; a bare `+` inside an `application/x-www-form-urlencoded` body is read as a space | Encode per the standard (browsers do; hand-written clients use `url.Values{}.Encode()`) |
+
+A preflight is never blocked by it: `OPTIONS` is a safe method and passes straight through (also covered by a case).
+
+**Observability**: a 403 written by a short-circuit is recorded back into the framework's collection layer (status / route template / size) and carries **no** `error.type` — that response was written by the middleware, not caught by the framework. Wrapped outside, the framework still knows nothing about the request (no record, no trace).
+
+### CORS and CSRF together
+
+Each half owns one thing; drop either and the preflight is a 405:
+
+1. **CSRF letting the preflight through** relies on the safe-method exemption;
+2. **the preflight reaching the onion** relies on CORS's catch-all `OPTIONS /{path...}` route.
+
+The full walkthrough is `TestMatrixGorillaCSRFWithCorsPreflight`: the preflight gets its `204` and enters the record, and the cross-origin POST that follows goes through with its token.
+
+### Two things hand-written clients get wrong
+
+Browsers send these per the standard; hand-written clients (tests included) tend to trip:
+
+- `Access-Control-Request-Headers` must be **lowercase** (the Fetch standard requires it sorted and lowercase): send `X-CSRF-Token` and `rs/cors` rejects it outright, aborting the preflight — the response is still `204`, but with **no CORS headers at all**;
+- form field values must be encoded as `application/x-www-form-urlencoded`: an unencoded `+` in the token is read as a space by the server.
 
 ## Ecosystem pieces already exercised
 
@@ -116,12 +207,12 @@ Face 3 gets its own place because for the short-circuit row the difference is no
 | chi `Recoverer` | Both 500, but the **body differs** (Recoverer writes its own empty body) → use the framework's panic handling | End to end |
 | chi `CleanPath` | **Panics either way**, unusable | End to end |
 | `promhttp.InstrumentHandlerCounter` | `code=200` matches on the normal path; on error routes it files a 404 under `code=200` | End to end |
-| `rs/cors` | Real requests match; **preflight never arrives** (405) → wrap outside, or register an explicit `OPTIONS` route (the matrix covers both, and the workaround is verified to work) | End to end |
+| `rs/cors` | Real requests match; **preflight never arrives** (405) → wrap outside, or register an explicit `OPTIONS` route, or one catch-all `OPTIONS /{path...}` (the matrix covers all three; the latter two are verified to work, and the catch-all records `http.route` as the catch-all pattern) | End to end |
 | `golang-jwt/jwt/v5` | Both seams hold: short-circuit (401) and request replacement | End to end |
 | `httprate` | **Stateful** limiter, one instance per mount point: two 200s, a third request 429 with `Retry-After`, and once exhausted even other routes 429 | End to end |
-| `gorilla/csrf` | All four seams (replaced request / writes headers first / short-circuits / reads the form on demand) line up in the source | **Source review only**, never ran |
+| `gorilla/csrf` | End to end: all four seams hold — writes headers first (`Set-Cookie`), replaced request, short-circuit (403 recorded back, no `error.type`), reads the form on demand; `TrustedOrigins` takes a host, plaintext HTTP needs marking, and the field-name and encoding traps each have a case | End to end |
 
-The last row only means "the shape fits" — **not** "it works". It is a candidate, not a conclusion.
+Every row in that table is now **end to end**: `gorilla/csrf` had only a source review before, and this round added a real-dependency end-to-end run — its four traps and the recipe are in the "CORS and CSRF" section above.
 
 chi's `RealIP` is **not in the table**: it is marked Deprecated in chi v5.3.2 (it mutates `r.RemoteAddr` and can be spoofed — see GHSA-3fxj-6jh8-hvhx and two related advisories). The table runs its replacement `ClientIPFromXFF`, which stores the result in the request context — a shape that tests the adapter surface harder.
 
