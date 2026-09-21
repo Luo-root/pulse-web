@@ -79,8 +79,9 @@ func Wrap(h http.Handler) Handler {
 // # 明确不做什么
 //
 //   - **不搬动路由**：路由匹配仍在中间件之前，预检 OPTIONS 到不了中间件——只
-//     注册了 GET /api 时 ServeMux 直接 405（Allow: GET, HEAD）。要拦预检的
-//     CORS 类中间件请外包 Handler()，或为每条路由显式注册 OPTIONS。
+//     注册了 GET /api 时 ServeMux 直接 405（Allow: GET, HEAD）。CORS 用框架
+//     自带的 Engine.CORS（它按已注册路径补 OPTIONS，把预检送进洋葱）；其余
+//     要拦预检的中间件请外包 Handler()，或为每条路由显式注册 OPTIONS。
 //
 //     没匹配到路由的请求（真 404、尾斜杠）与**需要归一化的路径**（`//users`、
 //     `/users//42`）同理：后者由 ServeMux 在**调用 handler 之前**自己 307 到

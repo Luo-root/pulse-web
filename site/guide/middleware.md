@@ -1,6 +1,6 @@
 # stdlib 中间件接入
 
-生态里的中间件几乎都是 `func(http.Handler) http.Handler` 形状：chi/middleware、rs/cors、promhttp、httprate、gorilla/csrf……这一页讲**怎么把它们接进本框架**，以及每一条路的边界在哪。
+生态里的中间件几乎都是 `func(http.Handler) http.Handler` 形状：chi/middleware、promhttp、httprate、gorilla/csrf……这一页讲**怎么把它们接进本框架**，以及每一条路的边界在哪。**CORS 是例外**——框架自带一个零依赖实现，不用为它引包（见下面「CORS：框架自带」）。
 
 框架自己的中间件（`func(*Ctx, Handler) error`）怎么写、怎么挂，见[路由与中间件](/guide/routing)。
 
@@ -50,7 +50,7 @@ app.Use(web.Adapt(func(next http.Handler) http.Handler {
 
 ## 它不做什么
 
-1. **不搬动路由**。路由匹配仍在中间件之前，预检 `OPTIONS` 到不了中间件——只注册了 `GET /api` 时 ServeMux 直接 405（`Allow: GET, HEAD`）。**要拦预检的 CORS 必须外包**，或为每条路由显式注册 `OPTIONS`。没匹配到路由的请求（真 404、尾斜杠）与**需要归一化的路径**（`//users`、`/users//42`）同理：后者由 ServeMux 在**调用 handler 之前**就 307 到干净路径，洋葱内的中间件看不到它。注意这条请求的访问记录里 `http.route` **是非空的**（ServeMux 在重定向前就把 pattern 写上了），别把它当成「这条请求被那个 handler 处理过」的证据。
+1. **不搬动路由**。路由匹配仍在中间件之前，预检 `OPTIONS` 到不了中间件——只注册了 `GET /api` 时 ServeMux 直接 405（`Allow: GET, HEAD`）。**CORS 用框架自带的 `app.CORS(...)`**：它按已注册路径补 `OPTIONS`，把预检送进洋葱（见下面「CORS：框架自带」一节）。没匹配到路由的请求（真 404、尾斜杠）与**需要归一化的路径**（`//users`、`/users//42`）同理：后者由 ServeMux 在**调用 handler 之前**就 307 到干净路径，洋葱内的中间件看不到它。注意这条请求的访问记录里 `http.route` **是非空的**（ServeMux 在重定向前就把 pattern 写上了），别把它当成「这条请求被那个 handler 处理过」的证据。
 2. **不解决「收尾型中间件 × error/panic」**。框架的错误映射发生在中间件返回**之后**，同一条时序有两个方向上的后果：
    - **响应方向**：在 next 返回后无条件写响应的中间件（例如自己 `defer zw.Close()` 的 gzip）会把状态锁成 200。**压缩类默认推外包**。
    - **观测方向**：中间件自己的收尾逻辑读到的是 **0**——`chi Logger` 在返回 error / panic 的路由上记的是 `0 / 0B`，`promhttp` 计数器把 404 记成 `code="200"`（`sanitizeCode(0)`）、panic 那条一条不记。要按**真实响应**记日志打点，用框架自己的访问日志与 Trace。
@@ -87,7 +87,7 @@ app.GET("/me", func(c *web.Ctx) error {
 |---|---|
 | 只改 header / 短路 / 包 writer（logger、鉴权、限流、promhttp 计数） | 都行；要路由模板、要短路进访问日志 → **`Adapt`（洋葱内）**；要按**真实状态码**记日志 / 打指标 → **外包**（洋葱内看不到框架映射的 error/panic，见「它不做什么」第 2 条） |
 | 动 body 且会在 next 返回后无条件收尾（gzip） | **外包 `Handler()`** |
-| 要在路由之前拦请求（CORS 预检） | **外包 `Handler()`** |
+| 要在路由之前拦请求（CORS 预检） | **用框架自带的 `app.CORS(...)`**（它按已注册路径补 `OPTIONS`，预检照常进观测，见「CORS：框架自带」那节）；外包 `Handler()` 也对，但预检不进框架的观测 |
 | 断言 `http.Hijacker`（WebSocket 升级） | 都行——`Adapt` 的代理会转发 `Hijack`；中间件自己再包一层 writer 且不转发时才会断 |
 
 promhttp 是个拆开看的好例子：**采集**用 `Adapt` 接 `promhttp.InstrumentHandlerCounter`（这样 `r.Pattern` 路由模板读得到），**暴露**走 `Wrap`——因为 `promhttp.Handler()` 本来就是个 `http.Handler`：
@@ -97,6 +97,151 @@ app.GET("/metrics", web.Wrap(promhttp.Handler()))
 ```
 
 但采集这一半有个取舍要当面说清：洋葱内的计数器**在错误路由上 `code` 标签会失真**（把 404 记成 `code="200"`，panic 那条一条不记，见「它不做什么」第 2 条）。按真实状态码计数就把它外包 `Handler()`，代价是那时 `r.Pattern` 还没写、路由标签得自己补。
+
+## CORS：框架自带
+
+```go
+app.CORS(
+    web.CORSAllowOrigins("https://app.example.com"), // 必填；"*" = 任意来源
+    web.CORSAllowMethods(http.MethodGet, http.MethodPost),
+    web.CORSAllowHeaders("content-type", "x-csrf-token"),
+    web.CORSAllowCredentials(),
+    web.CORSExposeHeaders("X-Total-Count"),
+    web.CORSMaxAge(10*time.Minute),
+)
+```
+
+`CORS(opts ...web.CORSOption)` 是主包自己的实现、**零第三方依赖**——CORS 属于 web 本行，不该让人为了它去装包。装配期调用，写在注册业务路由**之前**（与 `Use` 同一规矩），分组同样可用。它做两件事：
+
+1. 把 CORS 中间件压进洋葱——实际请求带 CORS 头；
+2. **为你之后注册的每条路由补一条同名 `OPTIONS`**——预检因此进得了洋葱。
+
+### 为什么得补那条 `OPTIONS`
+
+路由匹配先于中间件（见「它不做什么」第 1 条）：只注册了 `GET /api` 时 `OPTIONS /api` 被 ServeMux 直接 405 掉，中间件根本看不见预检。补出来的那条带着**同一条链**（全局 + 分组中间件），于是：
+
+| 请求 | 没挂 CORS | 挂了 `app.CORS` |
+|---|---|---|
+| `OPTIONS /api`（真预检） | 405，洋葱内看不见 | **204 + CORS 头；进访问记录，`http.route` 就是 `/api`** |
+| `OPTIONS /api`（裸 OPTIONS） | 405 + `Allow: GET, HEAD` | 一样 405 + `Allow: GET, HEAD`，区别是进了洋葱、响应体是框架统一错误体 |
+| `GET /nope`（没匹配到路由） | 404 | **404（不变）** |
+
+最后那一行是**实测纠正过设计**的地方：更省事的写法是注册一条兜底 `OPTIONS /{path...}`，但 `{path...}` 匹配任意路径，ServeMux 会把「路径匹配、方法不匹配」判成 405——**全站未匹配的请求都会从 404 变成 405**。框架因此改成按已注册路径逐条补，`TestCORSUnmatchedRouteHasNoCORSHeaders` 钉着这个 404。
+
+### 语义要点
+
+- **预检被拒是 403**，不是静默少几个头：来源 / 方法 / 请求头任一不在白名单 → `403` + 框架统一错误体（`cors_origin_not_allowed` / `cors_method_not_allowed` / `cors_header_not_allowed`）。对浏览器两种写法都是 CORS 失败，但这一种**对人与监控都看得见**——`error.type` 会进访问记录。
+- **`CORSAllowOrigins("*")` 与 `CORSAllowCredentials()` 不能同时用**：那个组合等于「任何网站都能带凭据访问本服务」，是漏洞而不是配置，装配期 panic 拦下；要开放给多个站点就逐个列出来。
+- 方法默认 `GET` / `POST` / `HEAD`（Fetch 的 simple methods）；请求头默认空——只放行 CORS 安全列表内的头。`CORSAllowHeaders("*")` 放行任意请求头。
+- 来源按字符串比，但大小写与尾斜杠会先规范化（`https://App.Example.com/` 与 `https://app.example.com` 等价）。
+- **只回被问到的东西**：`Access-Control-Allow-Methods` 回本次问的那一个方法，`Allow-Headers` 回被问到的头（规范化、去重）。响应因此最小，也不会把没被问到的能力暴露出去。
+- 预检**不看目标路由是否存在**——这是 CORS 中间件的通行语义，真请求到不到得了那条路由是后话。
+- **`Static` 挂的前缀不用特殊处理**：`<prefix>/` 模式不带方法、本来就吃得住 `OPTIONS`，预检照常由中间件答、照常进访问记录（`TestCORSPreflightOnStaticPrefix`）；框架也不会给它补一条同名 `OPTIONS`（补了会遮蔽 FileServer 自己的 404/405）。
+- 实际请求被拒时**不加 CORS 头、也不报错**，照常放行：浏览器自己会挡住，服务端不替它做决定。
+
+### 想自己接管某条路径的 `OPTIONS`
+
+写在**注册该路径的方法路由之前**，那条路径就不会被补：
+
+```go
+app.CORS(web.CORSAllowOrigins("https://app.example.com"))
+app.OPTIONS("/api/users", myOptions) // 先注册：这条路径的 OPTIONS 语义归你
+app.GET("/api/users", listUsers)     // 不会再补 OPTIONS /api/users
+```
+
+反过来的顺序是**装配期错误**（那条路径的自动 `OPTIONS` 已经挂上去了，ServeMux 不接受同模式重复注册），panic 消息里写清了怎么办。
+
+### 两条边界
+
+- **没匹配到任何路由的请求不进洋葱**，响应自然也不带 CORS 头：跨源请求打到不存在的路径时，浏览器看到的是 CORS 失败而不是那个 404。这是框架「不搬动路由」的既有边界。
+- **预检打到没注册过任何方法的路径**（`OPTIONS /api/nowhere`）时，那条 `OPTIONS` 也没被补出来 → 404。要连它一起覆盖，得让整条路由链搬到中间件之后，那是另一个量级的改动。
+
+### 存量项目：继续用 `rs/cors`
+
+已经用着 `rs/cors` 的项目不必为此换实现，它在预检这条路上只能靠「注册一条 `OPTIONS` 路由」把请求带进洋葱。三种接法：
+
+| 接法 | 预检被拦 | 预检进框架观测 | 什么时候用 |
+|---|---|---|---|
+| 外包 `Handler()` | ✅ | ❌ 框架完全不知情（无 trace、无访问记录） | 只要 CORS 生效、不看预检流量 |
+| 逐条注册 `OPTIONS` | ✅ | ✅（`http.route` 是真路由） | 路由少、路径固定 |
+| 一条兜底 `OPTIONS /{path...}` | ✅ | ✅（`http.route` 是兜底模式） | 一条覆盖全部路径，含未注册路径的预检；**代价是全站未匹配请求从 404 变 405** |
+
+兜底那条长这样（`Use` 必须在注册路由**之前**）：
+
+```go
+corsMW := cors.New(cors.Options{
+    AllowedOrigins:   []string{"https://app.example.com"},
+    AllowedMethods:   []string{http.MethodGet, http.MethodPost},
+    AllowedHeaders:   []string{"content-type", "x-csrf-token"},
+    AllowCredentials: true,
+}).Handler
+
+app.Use(web.Adapt(corsMW)) // 实际请求的 CORS 头
+
+// 预检那条路：一条兜底 OPTIONS 路由把请求送进洋葱，响应仍由中间件写。
+app.OPTIONS("/{path...}", func(c *web.Ctx) error {
+    // 走到这儿的都是**不是预检**的 OPTIONS（预检被中间件短路了）。
+    return &web.HTTPError{Status: http.StatusMethodNotAllowed, Code: "method_not_allowed"}
+})
+```
+
+实测要点（`TestMatrixRsCorsPreflightCatchAllRoute`、`TestMatrixRsCorsPreflightExplicitRoute`）：
+
+- 预检拿到 `204` + `Access-Control-Allow-Origin/Methods/Headers`，**而且进了框架的采集层**：`http.route` 记的是兜底模式 `/{path...}` 而不是目标路由——这是兜底那条路的代价，逐条注册记的是真路由；
+- 外包那条路上预检**没有** `X-Trace-Id`、没有访问记录，正是表格里「框架完全不知情」那一格；
+- 裸 `OPTIONS`（不带 `Access-Control-Request-Method`）不是预检，落到上面那个 handler，由它答 405——要别的语义就改它；
+- 显式注册过 `OPTIONS /x` 的路径仍走那条（ServeMux 更具体的模式优先）。
+
+## CSRF：归业务自己管
+
+CSRF 是业务侧的事——会话怎么存、哪些算状态变更请求、要不要双提交，框架不认识这些前提——所以框架**不出官方件**，只给一条实测过的接法。
+
+`gorilla/csrf` 的 `csrf.Protect` 本来就是 `func(http.Handler) http.Handler`，经 `Adapt` 挂进洋葱即可：
+
+```go
+app.Use(web.Adapt(csrf.Protect([]byte(key),
+    csrf.Secure(true),                                   // 线上开着
+    csrf.TrustedOrigins([]string{"app.example.com"}))))  // 认 host[:port]，不带 scheme
+```
+
+服务端渲染的表单把 token 交给模板（`csrf.TemplateField` 产出隐藏 input）：
+
+```go
+app.GET("/form", func(c *web.Ctx) error {
+    return c.HTML(http.StatusOK, "form", map[string]any{"csrf": csrf.TemplateField(c.Request())})
+})
+```
+
+前后端分离则走「先 GET 拿 cookie 与 token（`csrf.Token(r)` 发给前端），之后非安全请求带 `X-CSRF-Token`」——请求头名默认就是这个。
+
+**四个坑**（全部有用例钉住）：
+
+| 现象 | 原因 | 怎么办 |
+|---|---|---|
+| 403 `referer not supplied` / `referer invalid` | 中间件对非安全请求按 **https** 比 Referer/Origin，明文 HTTP 部署（含「TLS 在上游终止」）两条都过不了 | 在 CSRF **之前**插一层把 request 换掉：`next.ServeHTTP(w, csrf.PlaintextHTTPRequest(r))`（同样用 `Adapt` 挂——承诺 ③ 保证换过的 request 传得下去） |
+| 跨源 POST 一律 403 `origin invalid` | `Origin` 与请求不同源，又没写进 `TrustedOrigins` | `csrf.TrustedOrigins([]string{"app.example.com"})`——**认的是 host[:port]、不认 scheme**；非默认端口要连端口一起写（`app.example.com:8443`） |
+| 403 `CSRF token not found in request`（表单字段明明发了） | 默认表单字段名是 `gorilla.csrf.Token`，不是 `csrf_token` | 用 `csrf.TemplateField` 生成，或显式 `csrf.FieldName(...)` |
+| 表单字段发了却报 `token invalid` | token 是 base64，含 `+` 时裸放进 `application/x-www-form-urlencoded` body 会被读成空格 | 按标准编码（浏览器会自动；手写客户端用 `url.Values{}.Encode()`） |
+
+预检不会被它拦下：`OPTIONS` 在安全方法之列，中间件直接放行（这一条也有用例）。
+
+**观测**：短路写出的 403 会被框架记回采集层（状态码 / 路由模板 / 体积），且**不带** `error.type`——那条响应是中间件写的，不是框架接住的错误。外包挂载时框架照样看不到这条请求（无记录、无 trace）。
+
+## CORS 与 CSRF 同挂
+
+两件事各管一半，缺一个预检就是 405：
+
+1. **CSRF 放行预检**靠安全方法豁免（`OPTIONS` 在安全方法之列）；
+2. **预检进得了洋葱**靠 CORS 给每条路由补的那条 `OPTIONS`。
+
+完整走法见 `TestMatrixGorillaCSRFWithCorsPreflight`：预检 `204` 且进记录，随后的跨源 POST 带 token 正常通过。那条用例跑的是 `rs/cors` + 兜底路由的组合；洋葱内换成本框架自带的 `app.CORS` 是同一件事，少一条要自己维护的路由。
+
+## 手写客户端最容易写错的两处
+
+浏览器按标准发，手写客户端（含测试）常在这两处栽：
+
+- `Access-Control-Request-Headers` 要**小写**（Fetch 标准要求已排序、小写）：写成 `X-CSRF-Token` 时 `rs/cors` 直接判「header 不允许」，预检被动中止——响应仍是 `204`，但**一个 CORS 头都没有**。自带的 `app.CORS` 会把两边都规范化成小写再比，不吃这个亏；
+- 表单字段值要按 `application/x-www-form-urlencoded` 编码：token 里的 `+` 不编码会被服务端读成空格。
 
 ## 已经跑过的生态件
 
@@ -116,12 +261,12 @@ app.GET("/metrics", web.Wrap(promhttp.Handler()))
 | chi `Recoverer` | 两边都 500，但**响应体不同**（Recoverer 写自己的空体）→ panic 兜底用框架自己的 | 端到端 |
 | chi `CleanPath` | 经 `Adapt` 与外包**都 panic**，不可用 | 端到端 |
 | `promhttp.InstrumentHandlerCounter` | 正常路径 `code=200` 一致；错误路径会把 404 记成 `code=200` | 端到端 |
-| `rs/cors` | 普通请求一致；**预检到不了洋葱内**（405）→ 外包，或给该路由显式注册 `OPTIONS`（两条矩阵里都有，后者的绕法实测成立） | 端到端 |
+| `rs/cors` | 普通请求一致；**预检到不了洋葱内**（405）→ 存量项目可继续用它（外包，或给该路由显式注册 `OPTIONS`、或一条兜底 `OPTIONS /{path...}`，三条矩阵里都有；兜底那条的记录里 `http.route` 是兜底模式）；新项目用自带的 `app.CORS`，预检才进得了观测 | 端到端 |
 | `golang-jwt/jwt/v5` | 短路（401）与换 request 两条缝都对得上 | 端到端 |
 | `httprate` | **有状态**限流器两个挂载点各一份实例：前两次 200、第三次 429 带 `Retry-After`，额度耗尽后连别的路由也 429 | 端到端 |
-| `gorilla/csrf` | 四条接缝（换 request / 先写头 / 短路 / 按需读表单）在源码上对得上 | **源码核对**，没跑过 |
+| `gorilla/csrf` | 端到端：先写头（`Set-Cookie`）、换 request、短路（403 记回采集层、不带 `error.type`）、按需读表单四条接缝全对；`TrustedOrigins` 认 host、明文 HTTP 要标记、字段名与编码两个坑各有用例 | 端到端 |
 
-最后一行只是「形状上符合」，**不是「已经能跑」**——它是候选，不是结论。
+表里每一行都跑到了**端到端**：`gorilla/csrf` 早先只做过源码核对，这一轮补上了真依赖端到端——它那四个坑连同配方一起写在上面的「CSRF：归业务自己管」一节。
 
 chi 的 `RealIP` **不在表里**：它在 chi v5.3.2 已标 Deprecated（改写 `r.RemoteAddr`、可被伪造，见 GHSA-3fxj-6jh8-hvhx 等三条），表里跑的是替代写法 `ClientIPFromXFF`——它把结果放进 request context，形状上更考适配面。
 

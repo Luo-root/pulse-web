@@ -278,6 +278,10 @@ type Engine struct {
 	prefix string
 	mw     []Middleware
 
+	// cors 非空 = 这个引擎（或它的某个分组）挂过 CORS，注册路由时要按路径补 OPTIONS。
+	// 指针共享：Group 是浅拷贝，父子的观察表必须是同一份。
+	cors *corsRoutes
+
 	life *lifecycle
 }
 
@@ -432,7 +436,17 @@ func (e *Engine) chainMW(extra []Middleware) []Middleware {
 }
 
 func (e *Engine) register(pattern string, h Handler, mw []Middleware) {
-	chain := compose(e.chainMW(mw), h)
+	// 挂了 CORS 时先让它看一眼：它要按已注册路径逐条补 OPTIONS（预检进洋葱用），
+	// 也要挡下与它撞车的注册。不挂 CORS 的引擎在这里只多一次 nil 判。
+	if e.cors != nil {
+		e.cors.observe(e, pattern, mw)
+	}
+	e.handle(pattern, compose(e.chainMW(mw), h))
+}
+
+// handle 把编译好的链挂到 mux 上。与 register 分开是为了让 CORS 自己补的
+// OPTIONS 路由走同一条装配路径、又不再次触发 CORS 的观察逻辑（那会递归）。
+func (e *Engine) handle(pattern string, chain Handler) {
 	e.mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c := ctxFromRequest(r)
 		if c == nil {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/httprate"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/gorilla/csrf"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/cors"
@@ -63,6 +65,23 @@ import (
 
 // ---- 骨架 ----
 
+// preflight 说明骨架要不要注册 OPTIONS 路由、注册成什么形状。
+//
+// 预检在中间件之前就被 ServeMux 分派（见 TestMatrixUnmatchedRoutesBypassOnion），
+// 不给它一条路由，它就进不了洋葱——两条绕法对应下面两个非零值。
+type preflight int
+
+const (
+	// preflightNone 不注册任何 OPTIONS：预检被 ServeMux 直接 405。
+	preflightNone preflight = iota
+	// preflightPerRoute 给骨架里每条 GET 路由配一条同名 OPTIONS——逐条注册那条绕法。
+	preflightPerRoute
+	// preflightCatchAll 注册一条 `OPTIONS /{path...}` 兜底路由——一条覆盖所有路径，
+	// 连「没有对应路由的路径」的预检也进得了洋葱。代价：记录里的 `http.route` 是这条
+	// 兜底模式本身，不是目标路由；裸 OPTIONS（非预检）也落到它的 handler 上。
+	preflightCatchAll
+)
+
 // mount 描述一个挂载点：中间件本体 + 它自己的旁观测 + 它需要额外注册的路由。
 //
 // 工厂会被**调用两次**（洋葱内 / 外包各一次）。
@@ -74,10 +93,9 @@ type mount struct {
 	// handler 读出来才进得了比对面——观测面只认响应里看得见的事实。
 	// 注册发生在 `Use` 之后，所以这些路由照样在洋葱里。
 	probeRoutes map[string]web.Handler
-	// allowPreflight 给骨架里的每条 GET 路由**同时注册一条 OPTIONS**——预检那条绕法。
-	// 路由匹配先于中间件（见 TestMatrixUnmatchedRoutesBypassOnion），不注册 OPTIONS
-	// 时预检请求根本到不了洋葱内。这条路由只负责把请求送进洋葱，响应仍由中间件写。
-	allowPreflight bool
+	// preflight 说明骨架给预检留不留门（见 preflight 类型）。留门的那条路由只负责把
+	// 请求送进洋葱，响应仍由中间件写。
+	preflight preflight
 	// side 可空：中间件自己的旁观测，返回**自上次调用以来**的新增。
 	side func() string
 }
@@ -152,16 +170,16 @@ func (o obs) String() string {
 }
 
 // routes 造矩阵用的引擎：`sink` 是挂载点专属的采集口（框架侧记录进比对面），
-// `probes` / `allowPreflight` 来自挂载点自己的字段（见 mount）。
-func routes(mw web.Middleware, sink observability.Sink, probes map[string]web.Handler, allowPreflight bool) *web.Engine {
+// `probes` / `preflight` 来自挂载点自己的字段（见 mount）。
+func routes(mw web.Middleware, sink observability.Sink, probes map[string]web.Handler, pf preflight) *web.Engine {
 	app := web.New(web.WithSink(sink))
 	if mw != nil {
 		app.Use(mw)
 	}
-	// 骨架路由统一从这里走：`allowPreflight` 打开时给同一条路径补一条 OPTIONS。
+	// 骨架路由统一从这里走：`preflight` 打开时给同一条路径补一条 OPTIONS。
 	route := func(path string, h web.Handler) {
 		app.GET(path, h)
-		if allowPreflight {
+		if pf == preflightPerRoute {
 			app.OPTIONS(path, func(c *web.Ctx) error { return c.NoContent(http.StatusNoContent) })
 		}
 	}
@@ -177,6 +195,15 @@ func routes(mw web.Middleware, sink observability.Sink, probes map[string]web.Ha
 	})
 	for path, h := range probes {
 		app.GET(path, h)
+	}
+	if pf == preflightCatchAll {
+		// 兜底之外再显式注册一条：ServeMux 更具体的模式优先，那条路径走显式路由，
+		// 兜底只管没被别处接住的 OPTIONS。
+		app.OPTIONS("/ok", func(c *web.Ctx) error { return c.Text(http.StatusOK, "explicit-options") })
+		// 裸 OPTIONS（不是预检）也落在这条上，所以它自己得答得出一个像样的响应。
+		app.OPTIONS("/{path...}", func(c *web.Ctx) error {
+			return &web.HTTPError{Status: http.StatusMethodNotAllowed, Code: "method_not_allowed"}
+		})
 	}
 	return app
 }
@@ -280,8 +307,8 @@ func compareMatrix(t *testing.T, name string, factory mountFactory, reqs []reqSp
 	// 两个挂载点各造一份中间件实例与采集口。
 	inMount, outMount := factory(), factory()
 	inSink, outSink := &recordSink{}, &recordSink{}
-	inHandler := routes(web.Adapt(inMount.mw), inSink, inMount.probeRoutes, inMount.allowPreflight).Handler()
-	outHandler := outMount.mw(routes(nil, outSink, outMount.probeRoutes, outMount.allowPreflight).Handler())
+	inHandler := routes(web.Adapt(inMount.mw), inSink, inMount.probeRoutes, inMount.preflight).Handler()
+	outHandler := outMount.mw(routes(nil, outSink, outMount.probeRoutes, outMount.preflight).Handler())
 
 	run := matrixRun{adapt: map[string]obs{}, outer: map[string]obs{}}
 	for _, spec := range reqs {
@@ -743,7 +770,7 @@ func TestMatrixRsCorsPreflightExplicitRoute(t *testing.T) {
 		spec.name: "外包的 CORS 在引擎之前短路，框架不知情（无 trace 头、无访问记录）；洋葱内是一条普通请求",
 	}
 	run := compareMatrix(t, "rs/cors 预检 + 显式 OPTIONS 路由", func() mount {
-		return mount{mw: corsMW(), allowPreflight: true}
+		return mount{mw: corsMW(), preflight: preflightPerRoute}
 	}, []reqSpec{spec}, known)
 
 	run.need(t, spec.name, "Access-Control-Allow-Origin=https://example.com")
@@ -752,6 +779,373 @@ func TestMatrixRsCorsPreflightExplicitRoute(t *testing.T) {
 	run.need(t, spec.name, `http.response.body.size="0"`)
 	run.needStatus(t, spec.name, http.StatusNoContent)
 	run.outerAbsent(t, spec.name, "X-Trace-Id")
+}
+
+// TestMatrixRsCorsPreflightCatchAllRoute：另一条绕法——**一条 `OPTIONS /{path...}`
+// 兜底路由**。比逐条注册省事，而且多覆盖一格：预检打到**没有对应路由的路径**时照样
+// 拿得到 CORS 头（逐条注册做不到，那条只覆盖已注册的路径）。
+//
+// 代价写进断言里：记录里的 `http.route` 是兜底模式本身（`/{path...}`）而不是目标路由；
+// 裸 OPTIONS（非预检）落到同一条兜底路由的 handler 上，由它答（这里 405）；而**显式
+// 注册过 OPTIONS 的路径仍走显式那条**（ServeMux 更具体的模式优先，兜底只管剩下的）。
+func TestMatrixRsCorsPreflightCatchAllRoute(t *testing.T) {
+	preflight := func(name, path string) reqSpec {
+		return reqSpec{name, http.MethodOptions, path, map[string]string{
+			"Origin":                        "https://example.com",
+			"Access-Control-Request-Method": http.MethodGet,
+		}}
+	}
+	specs := []reqSpec{
+		preflight("OPTIONS /ok (预检，显式 OPTIONS 优先)", "/ok"),
+		preflight("OPTIONS /users/42 (预检，走兜底路由)", "/users/42"),
+		preflight("OPTIONS /nope (预检，未注册路径)", "/nope"),
+		{"OPTIONS /users/42 (裸 OPTIONS，非预检)", http.MethodOptions, "/users/42", nil},
+		{"GET /nope (未匹配路径，装了兜底路由之后)", http.MethodGet, "/nope", nil},
+	}
+	known := map[string]string{
+		specs[0].name: "外包的 CORS 在引擎之前短路，框架不知情（无 trace 头、无访问记录）；洋葱内是一条普通请求",
+		specs[1].name: "同上；这一格是兜底路由多出来的：逐条注册覆盖不到未注册路径",
+		specs[2].name: "同上；未注册路径同样只被兜底路由接住",
+		specs[4].name: "兜底路由的代价：`GET /nope` 本该是 404，但 `{path...}` 匹配任意路径，" +
+			"ServeMux 把「路径匹配、方法不匹配」判成 405——装了兜底路由的全站未匹配请求都变成 405",
+	}
+	run := compareMatrix(t, "rs/cors 预检 + 兜底 OPTIONS 路由", func() mount {
+		return mount{mw: corsMW(), preflight: preflightCatchAll}
+	}, specs, known)
+
+	// 兜底路由的正面判据：预检真的过了中间件、真的进了洋葱。
+	run.need(t, specs[0].name, "Access-Control-Allow-Origin=https://example.com")
+	run.need(t, specs[0].name, `http.route="/ok"`)
+	run.needStatus(t, specs[0].name, http.StatusNoContent)
+	run.need(t, specs[1].name, "Access-Control-Allow-Origin=https://example.com")
+	run.need(t, specs[1].name, `http.route="/{path...}"`)
+	run.need(t, specs[1].name, `status="204"`)
+	run.need(t, specs[1].name, `http.response.body.size="0"`)
+	run.needStatus(t, specs[1].name, http.StatusNoContent)
+	run.need(t, specs[2].name, "Access-Control-Allow-Origin=https://example.com")
+	run.needStatus(t, specs[2].name, http.StatusNoContent)
+	// 裸 OPTIONS 不短路：兜底 handler 返回 error，走框架自己的错误映射。
+	run.needStatus(t, specs[3].name, http.StatusMethodNotAllowed)
+	run.need(t, specs[3].name, `error.type="http_4xx"`)
+	// 兜底路由的代价，正面钉住：未匹配的普通请求被 405 掉（对照框架自带件那条路：
+	// 它按已注册路径逐条补 OPTIONS，同一请求仍是 404，见 cors_test.go）。
+	run.needStatus(t, specs[4].name, http.StatusMethodNotAllowed)
+	run.need(t, specs[4].name, `http.request.method="GET"`)
+	run.outerAbsent(t, specs[0].name, "X-Trace-Id")
+}
+
+// ---- CSRF：gorilla/csrf ----
+
+// csrfKey 是 32 字节 auth key（gorilla/csrf 的要求；线上要跨重启持久，写死在代码里
+// 只为了测试可复现）。
+const csrfKey = "0123456789abcdef0123456789abcdef"
+
+// csrfFieldName 是 gorilla/csrf **默认**的表单字段名——它的 requestToken 先看请求头
+// `X-CSRF-Token`，再看这个字段；名字不是 `csrf_token`，写错了会得到
+// `CSRF token not found in request`。
+const csrfFieldName = "gorilla.csrf.Token"
+
+// newCSRFMount 造一个受 CSRF 保护的小应用：`GET /form` 吐 token、`POST /form` 是
+// 「状态变更」。
+//
+//   - `outer=false` 把中间件挂在洋葱内（`Adapt`）、`true` 包在 `Handler()` 外面；
+//   - `trusted` 非空时配 `csrf.TrustedOrigins`（它认的是 host[:port]，不认 scheme）；
+//   - `plaintext` 打开时在 CSRF **之前**插一层，把 request 换成
+//     `PlaintextHTTPRequest` 标记过的那一个（上游终止 TLS 的部署）。
+func newCSRFMount(outer bool, trusted []string, plaintext bool) (*recordSink, http.Handler) {
+	opts := []csrf.Option{csrf.Secure(false), csrf.Path("/")}
+	if trusted != nil {
+		opts = append(opts, csrf.TrustedOrigins(trusted))
+	}
+	protect := csrf.Protect([]byte(csrfKey), opts...)
+	markPlaintext := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, csrf.PlaintextHTTPRequest(r))
+		})
+	}
+
+	sink := &recordSink{}
+	app := web.New(web.WithSink(sink))
+	if !outer {
+		if plaintext {
+			app.Use(web.Adapt(markPlaintext))
+		}
+		app.Use(web.Adapt(protect))
+	}
+	app.GET("/form", func(c *web.Ctx) error {
+		return c.Text(http.StatusOK, "token="+csrf.Token(c.Request()))
+	})
+	app.POST("/form", func(c *web.Ctx) error { return c.Text(http.StatusOK, "saved") })
+	h := app.Handler()
+	if outer {
+		if plaintext {
+			return sink, markPlaintext(protect(h))
+		}
+		return sink, protect(h)
+	}
+	return sink, h
+}
+
+// csrfToken 走一遍 `GET /form` 拿 token 与 cookie（两者每次都不同，只比「拿得到」）。
+func csrfToken(t *testing.T, h http.Handler, sink *recordSink, hdr map[string]string) (token, cookie, trace string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/form", nil)
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	sink.drain()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("拿 token 的 GET /form 返回 %d，body=%q", rec.Code, rec.Body.String())
+	}
+	token = strings.TrimPrefix(strings.TrimSpace(rec.Body.String()), "token=")
+	if sc := rec.Header().Get("Set-Cookie"); sc != "" {
+		cookie = strings.SplitN(sc, ";", 2)[0]
+	}
+	return token, cookie, rec.Header().Get("X-Trace-Id")
+}
+
+// csrfResp 是一次 POST 的观测：响应面 + 框架侧记录。
+type csrfResp struct {
+	status int
+	body   string
+	size   int
+	trace  string
+	rec    string
+}
+
+func csrfPost(h http.Handler, sink *recordSink, cookie, token, form string, hdr map[string]string) csrfResp {
+	req := httptest.NewRequest(http.MethodPost, "/form", strings.NewReader(form))
+	if form != "" {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	if cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+	if token != "" {
+		req.Header.Set("X-CSRF-Token", token)
+	}
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return csrfResp{rec.Code, strings.TrimSpace(rec.Body.String()), rec.Body.Len(),
+		rec.Header().Get("X-Trace-Id"), sink.drain()}
+}
+
+// TestMatrixGorillaCSRF：gorilla/csrf 端到端（这一条此前只做过**源码核对**）。
+//
+// 判据照矩阵三面来：**响应面**两个挂载点逐项相同（行为归中间件）；差别只在**框架侧**
+// ——中间件短路写 403 时，洋葱内那侧把它记回采集层（状态码 / 路由模板 / 体积），外包
+// 那侧完全不知情（无 trace 头、无访问记录）。短路写出的响应**不带** `error.type`：
+// 框架没接住错误，那条 403 是中间件自己写的——这一格别与「框架映射的 error」混同。
+//
+// 顺带把上游那四条接缝跑实：先写头（GET 的 Set-Cookie）、换 request（见下面配方那条）、
+// 短路、按需读表单（表单字段带 token 那条）。
+func TestMatrixGorillaCSRF(t *testing.T) {
+	const appOrigin = "https://app.example.com"
+	inSink, in := newCSRFMount(false, []string{"app.example.com"}, false)
+	outSink, out := newCSRFMount(true, []string{"app.example.com"}, false)
+
+	inTok, inCookie, inTrace := csrfToken(t, in, inSink, map[string]string{"Origin": appOrigin})
+	outTok, outCookie, outTrace := csrfToken(t, out, outSink, map[string]string{"Origin": appOrigin})
+	if inTok == "" || inCookie == "" || outTok == "" || outCookie == "" {
+		t.Fatalf("GET /form 没拿到 token/cookie：in(%q,%q) out(%q,%q)", inTok, inCookie, outTok, outCookie)
+	}
+	if inTrace == "" || outTrace == "" {
+		t.Errorf("GET /form 是**通过路径**，两个挂载点的框架侧都该有 trace（in=%q out=%q）", inTrace, outTrace)
+	}
+
+	for _, c := range []struct {
+		name     string
+		tok      string // "" = 不带；"good" = 用本挂载点的 token；其余按字面值当错 token
+		cookie   bool
+		form     bool // true = 走表单字段而不是请求头
+		origin   string
+		want     int
+		wantBody string
+		short    bool // 中间件短路写响应 → 框架侧两侧不同
+	}{
+		{"同源 Origin + 正确 header token", "good", true, false, appOrigin, http.StatusOK, "saved", false},
+		{"同源 Origin + 正确表单字段 token", "good", true, true, appOrigin, http.StatusOK, "saved", false},
+		{"同源 Origin + 无 token", "", true, false, appOrigin, http.StatusForbidden,
+			"Forbidden - CSRF token not found in request", true},
+		{"同源 Origin + 错 token", "deadbeef", true, false, appOrigin, http.StatusForbidden,
+			"Forbidden - CSRF token invalid", true},
+		{"同源 Origin + 无 cookie", "good", false, false, appOrigin, http.StatusForbidden,
+			"Forbidden - CSRF token invalid", true},
+		{"跨源 Origin（不在 TrustedOrigins）", "good", true, false, "https://evil.example.com", http.StatusForbidden,
+			"Forbidden - origin invalid", true},
+	} {
+		// args 把「用哪个 token」翻译成一次的实参：走表单字段还是走请求头。
+		//
+		// 表单那条要用 `url.Values` 编码：token 是 base64，含 `+` 时裸着放进 body 会被
+		// 服务端解成空格（浏览器不会犯这个错，手写客户端会）。
+		args := func(good string) (tok, form string) {
+			formOf := func(v string) string { return url.Values{csrfFieldName: {v}}.Encode() }
+			switch {
+			case c.form && c.tok == "good":
+				return "", formOf(good)
+			case c.form:
+				return "", formOf(c.tok)
+			case c.tok == "good":
+				return good, ""
+			case c.tok == "":
+				return "", ""
+			default:
+				return c.tok, ""
+			}
+		}
+		cookieOf := func(v string) string {
+			if !c.cookie {
+				return ""
+			}
+			return v
+		}
+		inTokArg, inFormArg := args(inTok)
+		inGot := csrfPost(in, inSink, cookieOf(inCookie), inTokArg, inFormArg, map[string]string{"Origin": c.origin})
+		outTokArg, outFormArg := args(outTok)
+		outGot := csrfPost(out, outSink, cookieOf(outCookie), outTokArg, outFormArg, map[string]string{"Origin": c.origin})
+
+		if inGot.status != c.want || inGot.body != c.wantBody {
+			t.Errorf("%s：经 Adapt 的响应 = %d %q，want %d %q", c.name, inGot.status, inGot.body, c.want, c.wantBody)
+		}
+		if outGot.status != c.want || outGot.body != c.wantBody {
+			t.Errorf("%s：外包的响应 = %d %q，want %d %q", c.name, outGot.status, outGot.body, c.want, c.wantBody)
+		}
+		if inGot.trace == "" {
+			t.Errorf("%s：洋葱内那侧应当带 X-Trace-Id", c.name)
+		}
+
+		if !c.short {
+			if inGot.rec == "" || outGot.rec == "" {
+				t.Errorf("%s：通过路径两侧框架都该有记录（in=%q out=%q）", c.name, inGot.rec, outGot.rec)
+			}
+			continue
+		}
+		want := fmt.Sprintf(`status="%d" http.request.method="POST" http.route="/form" http.response.body.size="%d"`,
+			c.want, inGot.size)
+		if !strings.Contains(inGot.rec, want) {
+			t.Errorf("%s：洋葱内的记录里没有 %q\n  实际: %s", c.name, want, inGot.rec)
+		}
+		if strings.Contains(inGot.rec, "error.type") {
+			t.Errorf("%s：短路写出的 403 不该带 error.type（框架没接住错误）\n  实际: %s", c.name, inGot.rec)
+		}
+		if outGot.rec != "" || outGot.trace != "" {
+			t.Errorf("%s：外包那侧框架不该知情（记录=%q trace=%q）", c.name, outGot.rec, outGot.trace)
+		}
+	}
+}
+
+// TestMatrixGorillaCSRFRecipe：配方里两条容易踩空的接线。
+//
+// ① **跨源 SPA 要写 `TrustedOrigins`，认的是 host[:port]、不带 scheme**——不写就是
+// 403 `origin invalid`（这条与 CORS 是同一次跨源请求的两半，见下面 CORS 那条）。
+// ② **明文 HTTP 部署（含「TLS 在上游终止」）得先插一层把 request 换成
+// `PlaintextHTTPRequest` 标记过的那一个**——不标记时中间件按 https 比 referer：没带
+// Referer 报 `referer not supplied`、带了 http Referer 报 `referer invalid`，两条都是
+// 403。标记那一层用 `Adapt` 挂在 CSRF 之前即可（**换过的 request 传得下去**，承诺 ③）。
+func TestMatrixGorillaCSRFRecipe(t *testing.T) {
+	const appOrigin = "https://app.example.com"
+
+	// ① TrustedOrigins
+	for _, c := range []struct {
+		name    string
+		trusted []string
+		want    int
+		body    string
+	}{
+		{"未配 TrustedOrigins", nil, http.StatusForbidden, "Forbidden - origin invalid"},
+		{"配了 host", []string{"app.example.com"}, http.StatusOK, "saved"},
+	} {
+		sink, h := newCSRFMount(false, c.trusted, false)
+		tok, cookie, _ := csrfToken(t, h, sink, map[string]string{"Origin": appOrigin})
+		got := csrfPost(h, sink, cookie, tok, "", map[string]string{"Origin": appOrigin})
+		if got.status != c.want || got.body != c.body {
+			t.Errorf("TrustedOrigins / %s：响应 = %d %q，want %d %q", c.name, got.status, got.body, c.want, c.body)
+		}
+	}
+
+	// ② 明文 HTTP：标记与不标记各两条（带 / 不带 Referer）
+	for _, c := range []struct {
+		name      string
+		plaintext bool
+		referer   string
+		want      int
+		body      string
+	}{
+		{"未标记 + http Referer", false, "http://example.com/form", http.StatusForbidden, "Forbidden - referer invalid"},
+		{"未标记 + 无 Referer", false, "", http.StatusForbidden, "Forbidden - referer not supplied"},
+		{"标记 + http Referer", true, "http://example.com/form", http.StatusOK, "saved"},
+		{"标记 + 无 Referer", true, "", http.StatusOK, "saved"},
+	} {
+		sink, h := newCSRFMount(false, nil, c.plaintext)
+		tok, cookie, _ := csrfToken(t, h, sink, nil)
+		hdr := map[string]string{}
+		if c.referer != "" {
+			hdr["Referer"] = c.referer
+		}
+		got := csrfPost(h, sink, cookie, tok, "", hdr)
+		if got.status != c.want || got.body != c.body {
+			t.Errorf("明文 HTTP / %s：响应 = %d %q，want %d %q", c.name, got.status, got.body, c.want, c.body)
+		}
+	}
+}
+
+// TestMatrixGorillaCSRFWithCorsPreflight：CORS 与 CSRF 同挂时**预检**这条路的完整走法。
+//
+// 两件事各管一半：CSRF 放行预检靠的是「安全方法豁免」（OPTIONS 不在检查范围里），而
+// 预检要进得了洋葱靠的是 CORS 那条兜底 `OPTIONS /{path...}` 路由——少任何一半，预检
+// 都在路由层被 ServeMux 405 掉。
+func TestMatrixGorillaCSRFWithCorsPreflight(t *testing.T) {
+	const appOrigin = "https://app.example.com"
+	corsMiddleware := cors.New(cors.Options{
+		AllowedOrigins:   []string{appOrigin},
+		AllowedMethods:   []string{http.MethodGet, http.MethodPost},
+		AllowedHeaders:   []string{"content-type", "x-csrf-token"},
+		AllowCredentials: true,
+	}).Handler
+
+	sink := &recordSink{}
+	app := web.New(web.WithSink(sink))
+	app.Use(web.Adapt(corsMiddleware))
+	app.Use(web.Adapt(csrf.Protect([]byte(csrfKey),
+		csrf.Secure(false), csrf.Path("/"), csrf.TrustedOrigins([]string{"app.example.com"}))))
+	app.GET("/form", func(c *web.Ctx) error {
+		return c.Text(http.StatusOK, "token="+csrf.Token(c.Request()))
+	})
+	app.POST("/form", func(c *web.Ctx) error { return c.Text(http.StatusOK, "saved") })
+	app.OPTIONS("/{path...}", func(c *web.Ctx) error {
+		return &web.HTTPError{Status: http.StatusMethodNotAllowed, Code: "method_not_allowed"}
+	})
+	h := app.Handler()
+
+	// 预检：请求头按 Fetch 标准写小写（浏览器就是这么发的）。
+	req := httptest.NewRequest(http.MethodOptions, "/form", nil)
+	req.Header.Set("Origin", appOrigin)
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	req.Header.Set("Access-Control-Request-Headers", "x-csrf-token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	got := sink.drain()
+	if rec.Code != http.StatusNoContent {
+		t.Errorf("预检状态码 = %d，want 204", rec.Code)
+	}
+	if v := rec.Header().Get("Access-Control-Allow-Origin"); v != appOrigin {
+		t.Errorf("预检的 Access-Control-Allow-Origin = %q，want %q", v, appOrigin)
+	}
+	if !strings.Contains(got, `status="204"`) || !strings.Contains(got, `http.route="/{path...}"`) {
+		t.Errorf("预检应当进洋葱并记进采集层，实际记录: %q", got)
+	}
+
+	// 实际请求：跨源 POST 带 token → 通过，且响应带 CORS 头。
+	tok, cookie, _ := csrfToken(t, h, sink, map[string]string{"Origin": appOrigin})
+	post := csrfPost(h, sink, cookie, tok, "", map[string]string{"Origin": appOrigin})
+	if post.status != http.StatusOK || post.body != "saved" {
+		t.Errorf("跨源 POST 带 token：响应 = %d %q，want 200 saved", post.status, post.body)
+	}
 }
 
 // ---- 鉴权：golang-jwt/jwt/v5 ----
@@ -877,8 +1271,8 @@ func TestMatrixUnmatchedRoutesBypassOnion(t *testing.T) {
 		{"GET /ok/ (trailing slash, no route)", http.MethodGet, "/ok/", nil},
 	} {
 		inSink, outSink := &recordSink{}, &recordSink{}
-		in := observe(routes(web.Adapt(sawHeader), inSink, nil, false).Handler(), spec, inSink)
-		out := observe(sawHeader(routes(nil, outSink, nil, false).Handler()), spec, outSink)
+		in := observe(routes(web.Adapt(sawHeader), inSink, nil, preflightNone).Handler(), spec, inSink)
+		out := observe(sawHeader(routes(nil, outSink, nil, preflightNone).Handler()), spec, outSink)
 
 		// 响应本身两边一样：都是 ServeMux 自己写的 404。
 		if in.status != http.StatusNotFound || out.status != http.StatusNotFound {
@@ -923,8 +1317,8 @@ func TestMatrixUncleanedPathRedirectsBeforeOnion(t *testing.T) {
 		{"GET /users/./42 (dot segment)", http.MethodGet, "/users/./42", nil},
 	} {
 		inSink, outSink := &recordSink{}, &recordSink{}
-		in := observe(routes(web.Adapt(sawHeader), inSink, nil, false).Handler(), spec, inSink)
-		out := observe(sawHeader(routes(nil, outSink, nil, false).Handler()), spec, outSink)
+		in := observe(routes(web.Adapt(sawHeader), inSink, nil, preflightNone).Handler(), spec, inSink)
+		out := observe(sawHeader(routes(nil, outSink, nil, preflightNone).Handler()), spec, outSink)
 
 		// 响应本身两边一样：ServeMux 自己写的 307 与 Location。
 		for side, got := range map[string]obs{"经 Adapt": in, "外包": out} {

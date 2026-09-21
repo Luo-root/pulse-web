@@ -102,6 +102,20 @@ app.Use(auth)                                   // global
 app.POST("/admin/purge", purge, BodyLimit(1<<10)) // per route
 ```
 
+### CORS
+
+CORS ships in the box: `app.CORS(...)` adds no third-party dependency, and it does the one thing an ecosystem piece cannot — alongside every route you register it also registers the matching `OPTIONS` route, so a browser preflight actually reaches the onion and shows up in the access log and trace like any other request.
+
+```go
+app.CORS(
+	web.CORSAllowOrigins("https://app.example.com"),
+	web.CORSAllowCredentials(),
+	web.CORSMaxAge(10*time.Minute),
+)
+```
+
+Call it at assembly time, before your routes (the same rule as `Use`); it works on groups too. A preflight rejected by the allow-list is a `403` with the framework's error body rather than a silently thinner response, so rejections are visible to your monitoring. CSRF, auth and rate limiting are **not** in this box — those stay ecosystem pieces.
+
 ### Request binding and body limits
 
 `c.Bind` dispatches on `Content-Type` (JSON, XML, form-urlencoded, multipart) and falls back to the query string when the request has no body. Failures come back as mapped errors: 400 `invalid_body`, 413 `body_too_large`, 415 `unsupported_media_type`.
@@ -242,7 +256,7 @@ app.Use(web.Adapt(chiMW.Logger))                                 // ecosystem mi
 http.Handle("/app/", http.StripPrefix("/app", app.Handler()))    // the engine out, as an http.Handler
 ```
 
-All three directions are **seams**, not implementations: `Wrap` takes stdlib handlers, `Adapt` brings `func(http.Handler) http.Handler` ecosystem middleware (logger, auth, rate limiting, metrics counters, …) inside the onion, and `Handler()` exports the engine. Which middleware belongs inside and which belongs wrapped outside `Handler()` (CORS that has to intercept preflight, for instance) follows the criteria in [the stdlib middleware guide](https://luo-root.github.io/pulse-web/en/guide/middleware).
+All three directions are **seams**, not implementations: `Wrap` takes stdlib handlers, `Adapt` brings `func(http.Handler) http.Handler` ecosystem middleware (logger, auth, rate limiting, metrics counters, …) inside the onion, and `Handler()` exports the engine. Which middleware belongs inside and which belongs wrapped outside `Handler()` follows the criteria in [the stdlib middleware guide](https://luo-root.github.io/pulse-web/en/guide/middleware). **CORS is the exception**: it ships with the framework (`app.CORS(...)`) because a preflight is dispatched by the router before any middleware runs, and that is a seam only the framework itself can close.
 
 What it is not: a batteries-included micro-framework with a large middleware catalogue. If you want an ecosystem of community middleware and maximum familiarity for a team, gin, chi or echo are the obvious picks. Pulse-Web aims at services that would rather keep the dependency surface at "standard library plus two packages" and get first-class observability out of the box.
 

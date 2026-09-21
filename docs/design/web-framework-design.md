@@ -23,10 +23,11 @@
 10. **静态文件**——`Static(prefix, dir)`，**静态资源同样经过全局与分组中间件**（与普通路由共用注册路径）
 11. **流式响应**——`c.Writer()` 直接写字节 + `c.Flush()` 逐段推送（SSE / chunked / 大文件），仍是一条 AccessLog
 12. **HTML 模板**——`c.HTML()`，薄封装 stdlib `html/template`（生产缓存 / 开发热重载）
+13. **CORS**——**自带零依赖实现**（`app.CORS(...)` + `CORSAllow*` / `CORSExposeHeaders` / `CORSMaxAge` 选项）；按已注册路径补 `OPTIONS` 把预检送进洋葱，被拒的预检是 403 + 统一错误体（对人与监控都可见）。CSRF / 鉴权 / 限流仍归生态件（见 [#61](https://github.com/Luo-root/pulse-web/issues/61)）
 
 ## 不做什么（v1 明确排除）
 
-前端界面 / ORM / 策略中间件（认证 / 限流 / 熔断）/ 微服务治理 / 第三方路由库 / `HoldScope` / `RunTLS` / `Recover()` 中间件 / 内部 Router 抽象 / TTFB / 流式双记录 / **框架自己编造 span-id**。
+前端界面 / ORM / 策略中间件（认证 / CSRF / 限流 / 熔断——CORS 是例外，见上面第 13 条）/ 微服务治理 / 第三方路由库 / `HoldScope` / `RunTLS` / `Recover()` 中间件 / 内部 Router 抽象 / TTFB / 流式双记录 / **框架自己编造 span-id**。
 
 **WebSocket / 协议升级**——`net/http` 只提供机制（Hijack / Upgrade），帧协议那一套归生态库，框架既不实现、也**不发自研子包**：`Hijack` 一旦透出（见「Ctx」一节的能力清单），`gorilla/websocket` 与 `coder/websocket` 零改动即可用——两条端到端探针在 `interop/`（进 CI）。
 
@@ -465,21 +466,52 @@ func Adapt(mw func(http.Handler) http.Handler) Middleware    // stdlib 中间件
 
 外包 `Handler()`（今天就能用）够不到框架的请求作用域：读不到路由模板 `r.Pattern`，短路的请求框架完全不知情（无访问日志、无 span）。手写适配器（十几行公开 API）则**静默失真**，两条已知失效都是实测：包 ResponseWriter 抓状态码恒为 0（promhttp 计数器全标 `code="0"`）；改写 body 的中间件被绕开（`Content-Encoding: gzip` 配明文 body，客户端报 `gzip: invalid header`）。
 
-**生态矩阵在 `interop/middleware_test.go`**（嵌套 module，进 CI，与 `otel/` 同款）：chi `RequestID` / `ClientIPFromXFF` / `Logger` / `Compress` / `Timeout` / `Recoverer` / `CleanPath` 七项、`promhttp.InstrumentHandlerCounter`、`rs/cors`、`golang-jwt/jwt/v5`、`httprate`，端到端逐项比对**三个面**——响应（状态码 + 响应头 + body）、中间件自己的旁观测（日志行 / 指标标签）、框架侧记下的访问记录。第三面单独列是因为「中间件短路」的差别恰好不在响应上（两边都 401）而在「框架知不知道」；`gorilla/csrf` 只做**源码核对**（不进矩阵）。结论与逐行边界见站点「stdlib 中间件接入」页。
+**生态矩阵在 `interop/middleware_test.go`**（嵌套 module，进 CI，与 `otel/` 同款）：chi `RequestID` / `ClientIPFromXFF` / `Logger` / `Compress` / `Timeout` / `Recoverer` / `CleanPath` 七项、`promhttp.InstrumentHandlerCounter`、`rs/cors`、`golang-jwt/jwt/v5`、`httprate`、`gorilla/csrf`（[#61](https://github.com/Luo-root/pulse-web/issues/61) 这一轮从**源码核对**补成端到端），端到端逐项比对**三个面**——响应（状态码 + 响应头 + body）、中间件自己的旁观测（日志行 / 指标标签）、框架侧记下的访问记录。第三面单独列是因为「中间件短路」的差别恰好不在响应上（两边都 401）而在「框架知不知道」。CORS 与 CSRF 的完整接法见站点「stdlib 中间件接入」：CORS 那一半是本轮新加的**自带件**（见下面「CORS」一节，框架按已注册路径补 `OPTIONS`），站点同页留着 `rs/cors` 的**存量接法**（含兜底 `OPTIONS /{path...}` 路由，以及它把全站未匹配请求从 404 变成 405 的代价）；CSRF 那一半是业务侧配方与四个坑（「CSRF：归业务自己管」一节）。
 
-矩阵之外的**前提与边界**各有独立用例：两条绕不开的边界是 `TestMatrixUnmatchedRoutesBypassOnion`（真 404 与尾斜杠）与 `TestMatrixUncleanedPathRedirectsBeforeOnion`（`//users`、`/users//42` 这类需要归一化的路径由 ServeMux 在调用 handler **之前**就 307，记录里的 `http.route` 却非空）；矩阵自身的时序前提（访问记录是 `ServeHTTP` 收尾**同步**写出的，drain 紧跟上就没有窗口）由 `TestRecordSinkOneRecordPerRequest` 钉住。**13 个变异探针**覆盖「观测面 × 维度」的每一格——响应（状态码 / 响应头 / body）、中间件旁观测、框架记录（状态码 / 路由模板 / 体积 / 错误类别 / 方法 / 错误对象），全部以「目标用例真变红」判定，不靠编译失败。
+矩阵之外的**前提与边界**各有独立用例：两条绕不开的边界是 `TestMatrixUnmatchedRoutesBypassOnion`（真 404 与尾斜杠）与 `TestMatrixUncleanedPathRedirectsBeforeOnion`（`//users`、`/users//42` 这类需要归一化的路径由 ServeMux 在调用 handler **之前**就 307，记录里的 `http.route` 却非空）；矩阵自身的时序前提（访问记录是 `ServeHTTP` 收尾**同步**写出的，drain 紧跟上就没有窗口）由 `TestRecordSinkOneRecordPerRequest` 钉住。**13 个变异探针**覆盖「观测面 × 维度」的每一格——响应（状态码 / 响应头 / body）、中间件旁观测、框架记录（状态码 / 路由模板 / 体积 / 错误类别 / 方法 / 错误对象），全部以「目标用例真变红」判定，不靠编译失败。[#61](https://github.com/Luo-root/pulse-web/issues/61) 这一轮为新增的 CORS / CSRF 用例又跑了 3 个探针（短路回填整段失效、换过的 request 不再传下去、兜底 OPTIONS 路由换成不注册），其中前两个把既有两个维度在新用例上再验一遍，第三个钉住的是**那条配方本身**。
 
 **承诺三条**（都可观测）：① 中间件包 writer 时抓到 handler 真正写出的状态码与字节数（**边界**：框架自己映射出来的 error / panic 响应它看不到——映射发生在中间件返回之后）；② 中间件短路写响应时，状态码与字节数记回采集层；③ 中间件换掉的 request 传得下去。能力面是 `Flush` / `Hijack` / `SetWriteDeadline` / `EnableFullDuplex` 四项，且**不虚报**——底层不能 Flush 时代理**不带** Flush 方法，`Ctx.Flush()` 照旧返回明确 error；`Hijack` 由代理转发（底层不支持时返回明确 error），理由见 `responseWriter.Hijack`。连接交出之后代理与框架侧**同型拒写**（`Write` 返回 `http.ErrHijacked`、`WriteHeader` 不落码），短路回填也**不回填状态码**——那条请求的状态码列一律是 hijack 的约定值（`101`），见「Ctx」一节的观测口径。
 
 **实现三条**（都是实测撞出来的，不是洁癖）：① 交给中间件的是**调用时**的 `c.w.ResponseWriter`（不是「最底层那一个」），两层 `Adapt` 因此自然叠序；② 还原 `c.w.ResponseWriter` / `c.r` **必须走 defer**——顺序语句会被 panic 跳过，框架收尾写进中间件已收尾的 writer，后果是 **500 整个丢掉、客户端拿到 200 空响应**；③ 短路回填是**累加**（`c.w.bytes += proxy.bytes`），状态码只在**框架侧尚未落定**时取中间件的——外层已写过响应时不能被覆盖。
 
-**明确不做五条**：不搬动路由（预检 `OPTIONS` 到不了中间件，只注册 `GET /api` 时 ServeMux 直接 405 `Allow: GET, HEAD`；**没匹配到路由的请求同样不经洋葱**，**需要归一化的路径**——`//users`、`/users//42`——则由 ServeMux 在调用 handler 之前就 307 到干净路径）→ CORS 类必须外包；不解决「收尾型中间件 × error/panic」（框架错误映射发生在中间件返回**之后**）→ 压缩类推外包；不透出 `Pusher` / `FlushError`（能力面只到 `Flush` / `Hijack` / `SetWriteDeadline` / `EnableFullDuplex` 四个；`Hijacker` 会透出，`Adapt` 的代理同样转发）；不保证「同形状就能接」（chi `CleanPath` 读 `chi.RouteContext`，经 `Adapt` 与外包**都 panic**）；不改中间件语义（panic 谁接、错误响应体长什么样仍归中间件）。
+**明确不做五条**：不搬动路由（预检 `OPTIONS` 到不了中间件，只注册 `GET /api` 时 ServeMux 直接 405 `Allow: GET, HEAD`；**没匹配到路由的请求同样不经洋葱**，**需要归一化的路径**——`//users`、`/users//42`——则由 ServeMux 在调用 handler 之前就 307 到干净路径）→ CORS 由框架自带（见下面「CORS」一节：按已注册路径补 `OPTIONS`，预检进得来），其余策略中间件要么外包、要么接生态件；不解决「收尾型中间件 × error/panic」（框架错误映射发生在中间件返回**之后**）→ 压缩类推外包；不透出 `Pusher` / `FlushError`（能力面只到 `Flush` / `Hijack` / `SetWriteDeadline` / `EnableFullDuplex` 四个；`Hijacker` 会透出，`Adapt` 的代理同样转发）；不保证「同形状就能接」（chi `CleanPath` 读 `chi.RouteContext`，经 `Adapt` 与外包**都 panic**）；不改中间件语义（panic 谁接、错误响应体长什么样仍归中间件）。
 
 **「错误映射在中间件之后」这条时序，矩阵逐条钉住了它的三个后果**（都是实测，见站点同一页）：① 中间件自己的收尾读到 **0**——chi `Logger` 在返回 error / panic 的路由上记 `0 / 0B`，promhttp 计数器把 404 记成 `code="200"`（`sanitizeCode(0)`）、panic 那条一条不记；要按**真实响应**记日志打点就用框架自己的访问日志与 Trace。② 反过来，中间件在 next **外面**写响应时（`Recoverer` 接住 panic 写 500）框架的记录**向代理对齐**：状态码与体积取中间件写出的那份，而不是收尾时的缺省 200——此前记成 200，等于把一条 5xx 从监控面板上抹掉（[#96](https://github.com/Luo-root/pulse-web/issues/96) 修掉，矩阵那一行转为回归守卫）。这条路上记录里**没有** `error.type` / 错误对象：响应不是框架接住的，编一个类别就是假信息；**有待映射的 error 时不收**（即下面③那条），否则会跳过错误映射、错误体整个丢掉。③ 压缩类中间件（在 next 返回后无条件收尾）在 error / panic 路径上两边的响应就不同了：洋葱内退化成明文，外包仍是合法 gzip。
 
 **传值**：中间件与 handler 之间走 request context，框架**不导出 `Ctx` 取用口**——那会把「`Ctx` 放在 request context 里」这个实现细节升格成契约；洋葱内中间件需要的路由模板本来就在 request 上（`r.Pattern`），不需要新口子。
 
 **`Adapt(nil)` 装配期 panic**（同 `NewConsoleSink(nil)` 的先例）：nil 中间件是编程错误，装配期暴露胜过每个请求 nil-deref 成 500。
+
+### CORS
+
+```go
+func (e *Engine) CORS(opts ...CORSOption)             // 装配期调用，与 Use 同一规矩；分组同样可用
+func CORSAllowOrigins(origins ...string) CORSOption   // 必填（否则装配期 panic）；"*" = 任意来源
+func CORSAllowMethods(methods ...string) CORSOption   // 默认 GET / POST / HEAD（Fetch simple methods）
+func CORSAllowHeaders(headers ...string) CORSOption   // 默认空 = 只放行 CORS 安全列表内的头
+func CORSExposeHeaders(headers ...string) CORSOption  // Access-Control-Expose-Headers
+func CORSAllowCredentials() CORSOption                // 与 CORSAllowOrigins("*") 互斥（装配期 panic）
+func CORSMaxAge(d time.Duration) CORSOption           // 秒；<= 0 不写这个头
+```
+
+**为什么自带**（[#61](https://github.com/Luo-root/pulse-web/issues/61)）：CORS 是 web 本行的事，而「预检进观测」这条缝只有框架自己补得上——生态件（`rs/cors` 等）只能靠外面包一层或自己注册 `OPTIONS` 路由，前者让框架对预检完全不知情、后者要么逐条重复、要么用会波及全站 404 的兜底模式。项目所有者拍板，原话：「这些 web 部分的内容要引用别的包才能解决，我觉得不是一个好的形式……我们自己实现一下能直接使用会比较好」。同一轮里 **CSRF 判为业务侧的事**（会话怎么存、哪些算状态变更，框架不认识这些前提），只给实测过的配方、不出官方件；鉴权与限流继续归生态件。判据不靠「自研更香」：**自带件必须做到生态件做不到的那件事**（这里是预检进观测），否则只是多一个要维护的实现。
+
+**两个动作**：① 把 CORS 中间件压进洋葱；② 从那时起**每次注册方法路由都顺带给同一路径补一条 `OPTIONS`**，挂在同一条链上（全局与分组中间件照常参与）。第二条是「路由匹配先于中间件」这条边界在 CORS 上的落点：只注册 `GET /api` 时 `OPTIONS /api` 被 ServeMux 直接 405 掉，预检根本到不了中间件。实现上是 `Engine.cors` 观察表 + `register` 钩子；`register` 与 `handle` 拆开，是为了让补出来的 `OPTIONS` 走同一条装配路径、又不再次触发观察逻辑（否则递归）。
+
+**实测纠正过的设计（兜底路由）**：第一版照生态件的通行做法注册一条兜底 `OPTIONS /{path...}`。实测：`{path...}` 匹配任意路径 → ServeMux 把「路径匹配、方法不匹配」判成 405 → **全站未匹配请求从 404 变成 405**（`GET /nope` 返回 405，被本轮自己的用例当场抓到）。改成按已注册路径逐条补之后未匹配请求照旧 404；代价是「预检打到没注册过任何方法的路径」也答 404（`TestCORSPreflightOnUnregisteredPathIs404`）——要覆盖它得让整条路由链搬到中间件之后，那是另一个量级的改动。守住「没退回兜底」这条的是 `TestCORSUnmatchedRouteHasNoCORSHeaders`（404 且不带 CORS 头）。
+
+**语义**：
+
+- 判据全在请求头上（`OPTIONS` + `Access-Control-Request-Method` 才算预检），**不看目标路由是否存在**——CORS 中间件的通行语义；`Vary: Origin` / `Access-Control-Request-Method` / `Access-Control-Request-Headers` 三个都写，缓存不串桶。
+- **只回被问到的东西**：`Allow-Methods` 回本次问的那一个方法，`Allow-Headers` 回被问到的头（规范化小写、去重）。响应最小，也不把没被问到的能力暴露出去。
+- **预检被拒是 403 + 统一错误体**（`cors_origin_not_allowed` / `cors_method_not_allowed` / `cors_header_not_allowed`），而不是生态件那种「静默少几个头」：对浏览器两种都是 CORS 失败，但这一种让 `error.type` 进访问记录，**拒绝对监控可见**。是哪个值不在白名单走 error 的 cause（只进日志、不进响应体）。
+- **实际请求被拒不加 CORS 头也不报错**，照常放行——浏览器自己挡，服务端不替它决定。
+- `CORSAllowOrigins("*")` 与 `CORSAllowCredentials()` **装配期 panic**：那个组合等于允许任何网站带凭据访问本服务，是漏洞不是配置。来源字段按**字符串**比（大小写与尾斜杠先规范化），**不做通配符子域匹配**（`https://*.example.com` 是字面量、永远匹配不上）——多站点就逐个列。
+- 补出来的裸 `OPTIONS`（不带预检头）答 **405 + `Allow`**（方法列表按当下注册的方法现算），与不挂 CORS 时 ServeMux 给的答案一致；差别是这条请求进了洋葱、响应体走统一错误体。要别的语义就在注册该路径的方法路由**之前**自己注册 `OPTIONS /具体路径`（之后的顺序是装配期 panic，消息里写了怎么办）。
+- **不搬动路由**：没匹配到任何路由的请求仍不经洋葱，那条响应也不带 CORS 头（既有边界的同一处）。
+- **补只发生在带方法的模式上**：`Static` 挂的 `"<prefix>/"` 不带方法，本来就吃得住 `OPTIONS`（由 FileServer 自己答），预检照常由中间件在洋葱内答掉、照常进访问记录（`TestCORSPreflightOnStaticPrefix`）——那条路径不需要、也不会被补一条同名 `OPTIONS`（补了会遮蔽 FileServer 自己的 404/405 语义）。
+
+**它不做什么**：不管 CSRF、鉴权与限流；不改 `OPTIONS` 之外的方法语义；不解析 `Origin` 之外的东西。接生态件（`rs/cors` 等）的路照旧留着、文档也留着（存量项目多），只是新项目不再需要它。
 
 ### HTML 模板
 
@@ -829,7 +861,7 @@ v1 只做当前视图：`app.Debug("/debug/pulse")` 输出 `kernel.FiberSnapshot
 
 | 项 | 去路 |
 |---|---|
-| 自研中间件实现（CORS / CSRF / 鉴权 / 限流…） | 不做——框架只给**缝**：`Adapt` 把生态里 stdlib 形状的中间件接进洋葱、`Wrap` 接 stdlib handler。要拦预检的 CORS 必须外包 `Handler()`（路由先于中间件，见「中间件与 stdlib 互操作」）。哪些生态件实测可吸纳、各挂哪个挂载点，见站点「stdlib 中间件接入」；官方要不要出自研件另议（[#61](https://github.com/Luo-root/pulse-web/issues/61)） |
+| 自研中间件实现（CSRF / 鉴权 / 限流…） | 不做——框架只给**缝**：`Adapt` 把生态里 stdlib 形状的中间件接进洋葱、`Wrap` 接 stdlib handler；哪些生态件实测可吸纳、各挂哪个挂载点、CSRF 的四个坑与完整配方，见站点「stdlib 中间件接入」。**CORS 是唯一的例外**（[#61](https://github.com/Luo-root/pulse-web/issues/61) 拍板自带，见「CORS」一节）：它卡在「预检进不了洋葱」这条**框架自己的**边界上，生态件补不了那条缝——判据是「自带件必须做到生态件做不到的那件事」（自带件给出预检的访问记录与 Trace；`rs/cors` 那条路只能外包，框架对预检完全不知情）。其余三类候选都只是换个实现，因此不出官方件：CSRF 归业务（会话怎么存、哪些算状态变更，框架不认识这些前提），鉴权与限流归生态 |
 | WebSocket 协议实现 / 自研 `ws` 子包 | 不做——帧、掩码、子协议那一套归生态库，框架只把 `Hijack` 这条能力面打开（见「Ctx」一节），`gorilla/websocket` 与 `coder/websocket` 零改动可用；端到端对照在 `interop/`（进 CI），能力面清单与两条取连接路径的差异见「协议升级可用」验收条 |
 | `AsyncSink`（队列 / Drop / flushTimeout） | **上游已提供**（`observability.NewAsyncSink`，v0.2.1）——web 不另造缓冲层，`WithSink` 接入即可。注意组合语义：`AsyncSink.Flush` 只排空**它自己的**队列、不级联 inner 的 `Flush`，所以异步化的正确组合是 `NewAsyncSink(SlogSink)`；用 `AsyncSink` 包另一个缓冲出口（如 `LineSink`）会留下未落盘的内层缓冲，框架无从代劳 |
 | `Sink.Close`（停协程） | 不做——出口所有权属装配方：`Detach` 允许进程级后台任务继续写同一 Sink，框架在关闭时 `Close` 它会静默丢弃这些记录。关闭时序只负责 flush 并记错误 |
@@ -946,7 +978,9 @@ mark 的走势**直接沿用 pulse**（平段 → 上升 → 峰值 → 深谷 �
 - [x] **标准库兼容**：三条路径都在——`Wrap` 接 stdlib handler 进来、`Adapt` 把 stdlib 中间件接进**洋葱内**、`Handler()` 把引擎导出去；`Wrap` 双向适配
   证据：`TestWrapStdlibHandler`、`TestEngineUnderStdlibMiddleware`、`TestWrapPanicCaughtByEngine`；`Adapt` 17 条——真实状态码与字节数（`TestAdaptMiddlewareObservesRealStatusAndBytes`）、短路回填采集层（`TestAdaptShortCircuitReachesAccessLog`）、换过的 request 传下去（`TestAdaptReplacedRequestReachesHandler`）、**handler error 穿过适配层**（`TestAdaptPassesHandlerErrorThrough`）、预检到不了中间件（`TestAdaptDoesNotSeePreflight`）、读得到路由模板（`TestAdaptCanReadRouteTemplate`）、body 穿过中间件且体积记压缩前（`TestAdaptBodyRewritingMiddlewareKeepsResponseValid`）、无条件收尾的**已知边界**（`TestAdaptUnconditionalFinalizeLocksStatus`）、**中间件在 next 外面写响应时记录向代理对齐**（`TestAdaptMiddlewareWritingOutsideNextReachesAccessLog`，[#96](https://github.com/Luo-root/pulse-web/issues/96)）、Flusher 透出与不虚报（`TestAdaptKeepsFlusher` / `TestAdaptDoesNotOverclaimFlusher`）、panic 时还原 writer（`TestAdaptRestoresCtxOnPanic`）、两层叠序（`TestAdaptLayersNest`）、`Adapt(nil)` 装配期 fail-fast（`TestAdaptNilMiddlewareFailsFast`）；**hijack 三条**——代理层的两次误写被拦（`TestAdaptHijackStopsProxyWrites`：交出后 `Write` 明确拒绝、服务端不留 net/http 告警、状态码回到 101）、升级发生在洋葱内 handler 时代理同样知道（`TestAdaptProxyYieldsToHandlerHijack`）、短路回填不越权写状态码列（`TestAdaptHijackKeepsStatusColumnConventional`）。每条守卫都配了变异探针（Adapt 面 8 个 + 本轮评审修复 6 个 = 14 个变异全部被对应用例抓到）。
 
-  **真依赖那半在 `interop/middleware_test.go`**（#92，嵌套 module 进 CI）：14 条矩阵用例，同一中间件、同一条路由，经 `Adapt` 与外包 `Handler()` 逐项比对响应 / 中间件旁观测 / 框架访问记录三个面；覆盖 chi 七项、promhttp、rs/cors（含预检与显式 `OPTIONS` 绕法）、`golang-jwt/jwt/v5`、httprate，外加一条「未匹配路由不经洋葱」的边界用例。6 个变异探针（不给代理 / 不传换过的 request / 短路回填失效 / 不写路由模板 / 状态码恒记 200 / 不记体积）全部被目标用例抓到。本轮同时抓到框架侧一处缺陷（[#96](https://github.com/Luo-root/pulse-web/issues/96)：中间件在 next 外面写响应时记录记成缺省 200），该缺陷随后单独修掉——矩阵里那一行由「按现状钉住」转为回归守卫。
+  **真依赖那半在 `interop/middleware_test.go`**（#92，嵌套 module 进 CI）：19 条 `TestMatrix*`（[#61](https://github.com/Luo-root/pulse-web/issues/61) 这一轮加了 4 条：CORS 兜底 `OPTIONS /{path...}` 路由——这条守的是**存量 `rs/cors` 路径**，框架自带件不吃这条路、`GET /nope` 那一格正面钉住兜底的 404→405 代价、CSRF 端到端流程、CSRF 配方（`TrustedOrigins` / 明文 HTTP 标记）、CORS 与 CSRF 同挂时的预检），同一中间件、同一条路由，经 `Adapt` 与外包 `Handler()` 逐项比对响应 / 中间件旁观测 / 框架访问记录三个面；覆盖 chi 七项、promhttp、rs/cors（含预检、逐条 `OPTIONS` 与兜底 `OPTIONS` 两条绕法）、`golang-jwt/jwt/v5`、httprate、gorilla/csrf（从源码核对补成端到端），外加「未匹配路由不经洋葱」与「路径归一化在洋葱之前」两条边界用例。矩阵那半的 6 个变异探针（不给代理 / 不传换过的 request / 短路回填失效 / 不写路由模板 / 状态码恒记 200 / 不记体积）全部被目标用例抓到，这一轮新增用例另有 3 个探针同样全部抓到。本轮同时抓到框架侧一处缺陷（[#96](https://github.com/Luo-root/pulse-web/issues/96)：中间件在 next 外面写响应时记录记成缺省 200），该缺陷随后单独修掉——矩阵里那一行由「按现状钉住」转为回归守卫。
+- [x] **CORS 自带且预检进观测**（[#61](https://github.com/Luo-root/pulse-web/issues/61)）：`app.CORS(...)` 零第三方依赖（主模块依赖图不变，见「设计红线」的判据）；按已注册路径补 `OPTIONS`——预检拿到 `204` + CORS 头**且进访问记录与 Trace**（`http.route` 是真路由）；被拒的预检是 403 + 统一错误体（`error.type` 可见）；`CORSAllowOrigins("*")` 与 `CORSAllowCredentials()` 装配期 panic；**不注册兜底 `OPTIONS /{path...}`**——未匹配请求照旧 404
+  证据：`cors_test.go` 18 条——预检允许与三类拒绝（`TestCORSPreflightAllowed` / `TestCORSPreflightDenied`）、实际请求三态（`TestCORSActualRequest`）、通配来源（`TestCORSWildcardOrigin`）、裸 `OPTIONS` 与 `Allow` 现算（`TestCORSBareOptions` / `TestCORSBareOptionsAllowListsEveryMethod`）、通配路由与分组（`TestCORSPreflightOnWildcardRoute` / `TestCORSOnGroup`）、`Static` 前缀（`TestCORSPreflightOnStaticPrefix`）、自定义 `OPTIONS` 优先与晚注册 panic（`TestCORSSpecificOptionsRouteWins` / `TestCORSUserOptionsAfterRoutePanics`）、重复挂载 panic（`TestCORSRegisteredTwicePanics`）、请求头列表脏形态容错（`TestCORSHeaderListTolerance`）、默认方法（`TestCORSMethodDefault`）、来源大小写与尾斜杠（`TestCORSOriginTrailingSlashAndCase`）、**两条边界**（`TestCORSUnmatchedRouteHasNoCORSHeaders`：未匹配仍 404 且不带 CORS 头——这条同时是「没退回兜底路由」的回归守卫 / `TestCORSPreflightOnUnregisteredPathIs404`）、装配期 panic（`TestCORSAssemblyPanics`）。**9 个变异探针全部以「目标用例真变红」抓到**（裸 `OPTIONS` 改答 200 / 预检不校验来源 / `Allow-Methods` 回全量 / 来源不规范化 / 实际请求被拒仍加头 / 装配期不拦「无来源」/ **退回兜底 `OPTIONS /{path...}`**——这条一次性点红 11 条用例、两版站点删掉 `CORSOption` / interop 配方不挂兜底路由），无 BUILD-ONLY。
 - [x] **协议升级可用**：`c.Writer()` 实现 `http.Hijacker`——生态 websocket 库零改动直接可用（**断言型**与**沿 `Unwrap()` 链型**两条路都要满足）；hijack 之后框架不再写响应（`Write` / `Flush` 返回 `http.ErrHijacked`）、不写兜底错误响应，访问日志按 `101` 记并带 `connection.hijacked` 标记、不记体积；洋葱内（`Adapt` 之后）同样可用
   证据：`context_test.go` 六条——`TestHijackHandsConnectionToHandler`（连接真能用 + 交出后写出被拒 + 观测事实对账）、`TestHijackUnsupportedReturnsError`（底层不支持 → 明确 error，不是 panic）、`TestHijackOnlyOnce`（连接只能交出去一次：底层照单全收也照样被挡下）、`TestHijackUnderHTTP2ReturnsError`（真起一个 h2 server，钉住「HTTP/2 下不可用」这条边界）、`TestHijackSkipsErrorMapping`（已 hijack 时不写错误体，原始 error 仍进日志）、`TestResponseWriterCapabilitySurface`（能力清单正反向）；`interop/websocket_test.go` 三条端到端——`TestGorillaWebSocketUpgrade` / `TestCoderWebSocketUpgrade` / `TestUpgradeThroughAdaptMiddleware`，各真跑一次握手 + 消息往返，并断言日志里 `status=101` + `connection.hijacked` + 无体积。
 - [x] **ServerConfig 契约**：6 个默认值 + 「非零覆盖、零值保持默认」+ 配置**真的**落到 `http.Server` 上
