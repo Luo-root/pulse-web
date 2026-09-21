@@ -44,7 +44,10 @@ func Wrap(h http.Handler) Handler {
 //
 // # 承诺什么
 //
-//  1. 中间件包 ResponseWriter 时，抓到的是**真实**的状态码与字节数（不是 0）。
+//  1. 中间件包 ResponseWriter 时，抓到的是**handler 真正写出的**状态码与字节数
+//     （不是 0）——promhttp 计数器、chi Logger 这类直接成立。边界：框架自己映射出
+//     来的 error / panic 响应它**看不到**（映射发生在中间件返回之后），那两条路上
+//     它读到的是 0，见「明确不做什么」第 2 条。
 //  2. 中间件短路（不调 next）时，它写出的状态码与字节数**记回框架的采集层**，
 //     访问日志与观测看到的是真实响应。
 //  3. 中间件换掉的 request（r = r.WithContext(...)）**传得下去**——handler 用
@@ -75,19 +78,39 @@ func Wrap(h http.Handler) Handler {
 //   - **不搬动路由**：路由匹配仍在中间件之前，预检 OPTIONS 到不了中间件——只
 //     注册了 GET /api 时 ServeMux 直接 405（Allow: GET, HEAD）。要拦预检的
 //     CORS 类中间件请外包 Handler()，或为每条路由显式注册 OPTIONS。
+//
+//     没匹配到路由的请求（真 404、尾斜杠）与**需要归一化的路径**（`//users`、
+//     `/users//42`）同理：后者由 ServeMux 在**调用 handler 之前**自己 307 到
+//     干净路径，洋葱内的中间件看不到它。注意这时访问记录里的 `http.route`
+//     **是非空的**（ServeMux 在重定向前就把 pattern 写上了），别把它当成
+//     「这条请求被那个 handler 处理过」的证据。
+//
 //   - **不解决「收尾型中间件 × error/panic」**：框架的错误映射发生在中间件
 //     返回**之后**，在 next 返回后无条件写响应的中间件（例如自己 defer
 //     zw.Close() 的 gzip）会把状态锁成 200。压缩类默认推外包。
+//
+//     同一条时序在观测面上还有两个后果（都是实测，矩阵里有对应行）：① **中间件
+//     自己的收尾读到的是 0**——chi Logger 在返回 error / panic 的路由上记
+//     `0 / 0B`，promhttp 计数器把 404 记成 `code="200"`（`sanitizeCode(0)`），
+//     panic 那条干脆一条不记。要按**真实响应**记日志打点就用框架自己的访问日志
+//     与 Trace；② 反过来，中间件在 next 外面写响应时（Recoverer 接住 panic 写
+//     500 就是这样）框架记下的状态码是它自己的缺省 200，而客户端拿到的是中间件
+//     写的 500——已知缺陷，见 [#96](https://github.com/Luo-root/pulse-web/issues/96)。
+//
 //   - **不透出 http.Pusher / FlushError**：响应写出器的能力面是一份显式的窄清单
 //     （Flush / Hijack / SetWriteDeadline / EnableFullDuplex），HTTP/2 的 Server
 //     Push 与 flush 错误上报不在其中。
+//
 //   - **不保证「同形状就能接」**：依赖特定 router 上下文的中间件照旧不可用——
 //     chi 的 CleanPath 读 chi.RouteContext，经 Adapt 与外包都会 panic。
+//
 //   - **不改中间件的语义**：panic 谁接、错误响应体长什么样，仍由中间件自己
 //     决定（chi Recoverer 写出的 500 与框架兜底就不是同一个响应体）。
 //
 // 中间件该挂洋葱内还是外包 `Handler()`、以及各生态件的实测结论，见站点指南
-// 「stdlib 中间件接入」（`site/guide/middleware.md`）。
+// 「stdlib 中间件接入」（`site/guide/middleware.md`）；**对照矩阵本体**在
+// `interop/middleware_test.go`（嵌套 module，进 CI）——同一条路由两个挂载点逐项
+// 比对三个面：响应、中间件自己的旁观测、框架侧记下的那条访问记录。
 func Adapt(m func(http.Handler) http.Handler) Middleware {
 	if m == nil {
 		panic("web: Adapt requires a non-nil middleware")
