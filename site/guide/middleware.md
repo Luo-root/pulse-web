@@ -43,7 +43,7 @@ app.Use(web.Adapt(func(next http.Handler) http.Handler {
 ## 它承诺什么
 
 1. **中间件包 ResponseWriter 时，抓到的是真实的状态码与字节数**（不是 0）——promhttp 计数器、chi Logger 这类直接成立。
-2. **中间件短路（不调 next）时，它写出的状态码与字节数记回框架的采集层**——访问日志与 Trace 看到的是真实响应，而不是「没写响应」。
+2. **中间件短路（不调 next）、或者调了 next 但在它外面写响应时，它写出的状态码与字节数记回框架的采集层**——访问日志与 Trace 看到的是真实响应，而不是「没写响应」。后一种就是 `Recoverer` / 兜底 404 那一格；那种记录里没有 `error.type`，因为框架没接住错误、不知道这份响应怎么来的。
 3. **中间件换掉的 request 传得下去**——`r = r.WithContext(...)` 之后，handler 用 `c.Request()` 读到的就是换过的那一个。
 
 外加：交给中间件的 writer 支持 `http.Flusher` 与 `http.Hijacker`——SSE 逐条 flush 照常，挂在 `Use(Adapt(…))` 之后的升级路由也照常拿得到连接。且**不虚报**：底层不能 Flush 时 `c.Flush()` 照旧返回明确 error，底层不能 Hijack 时 `Hijack()` 返回 `http.ErrNotSupported`。
@@ -54,7 +54,7 @@ app.Use(web.Adapt(func(next http.Handler) http.Handler {
 2. **不解决「收尾型中间件 × error/panic」**。框架的错误映射发生在中间件返回**之后**，同一条时序有两个方向上的后果：
    - **响应方向**：在 next 返回后无条件写响应的中间件（例如自己 `defer zw.Close()` 的 gzip）会把状态锁成 200。**压缩类默认推外包**。
    - **观测方向**：中间件自己的收尾逻辑读到的是 **0**——`chi Logger` 在返回 error / panic 的路由上记的是 `0 / 0B`，`promhttp` 计数器把 404 记成 `code="200"`（`sanitizeCode(0)`）、panic 那条一条不记。要按**真实响应**记日志打点，用框架自己的访问日志与 Trace。
-   - 反过来还有一格：中间件在 next **外面**写响应时（`Recoverer` 接住 panic 写 500 就是这样），框架记下的状态码是它自己的缺省 200，而客户端拿到的是中间件写的 500——已知缺陷（[#96](https://github.com/Luo-root/pulse-web/issues/96)），矩阵里按现状钉着。
+   - 反过来还有一格：中间件在 next **外面**写响应时（`Recoverer` 接住 panic 写 500 就是这样），框架记的是**它写出的那份**状态码与体积（客户端真正收到的那份），不是收尾时的缺省 200——这条由 [#96](https://github.com/Luo-root/pulse-web/issues/96) 修掉。记录里**没有** `error.type` / 错误对象：响应不是框架接住的，它不知道原因，编一个出来就是假信息。唯一例外是**已经挂着待映射的 error** 时（即上面「响应方向」那条边界）：收下中间件的状态码会让框架跳过错误映射、错误体整个丢掉，所以那种情况照旧交给映射器。
 3. **不透出 `http.Pusher` / `FlushError`**。响应写出器的能力面是一份显式的窄清单（`Flush` / `Hijack` / `SetWriteDeadline` / `EnableFullDuplex`），HTTP/2 的 Server Push 与 flush 错误上报不在其中。
 4. **不保证「同形状就能接」**。依赖特定 router 上下文的照旧不可用——chi 的 `CleanPath` 读 `chi.RouteContext`，经 `Adapt` 与外包**都 panic**。
 5. **不改中间件语义**。panic 谁接、错误响应体长什么样，仍由中间件自己决定。

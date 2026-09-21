@@ -48,8 +48,11 @@ func Wrap(h http.Handler) Handler {
 //     （不是 0）——promhttp 计数器、chi Logger 这类直接成立。边界：框架自己映射出
 //     来的 error / panic 响应它**看不到**（映射发生在中间件返回之后），那两条路上
 //     它读到的是 0，见「明确不做什么」第 2 条。
-//  2. 中间件短路（不调 next）时，它写出的状态码与字节数**记回框架的采集层**，
-//     访问日志与观测看到的是真实响应。
+//  2. 中间件短路（不调 next）、或者**调了 next 但在它外面写响应**（`Recoverer` 接住
+//     panic 写 500 就是这样）时，它写出的状态码与字节数**记回框架的采集层**，访问
+//     日志与观测看到的就是客户端收到的那份响应。这条路上记录里**没有** `error.type`
+//     与错误对象——响应不是框架接住的，它不知道原因，编一个出来就是假信息。
+//     唯一的例外见「明确不做什么」第 2 条末尾（有待映射的 error 时不收）。
 //  3. 中间件换掉的 request（r = r.WithContext(...)）**传得下去**——handler 用
 //     c.Request() 读到的就是换过的那一个。
 //
@@ -93,9 +96,11 @@ func Wrap(h http.Handler) Handler {
 //     自己的收尾读到的是 0**——chi Logger 在返回 error / panic 的路由上记
 //     `0 / 0B`，promhttp 计数器把 404 记成 `code="200"`（`sanitizeCode(0)`），
 //     panic 那条干脆一条不记。要按**真实响应**记日志打点就用框架自己的访问日志
-//     与 Trace；② 反过来，中间件在 next 外面写响应时（Recoverer 接住 panic 写
-//     500 就是这样）框架记下的状态码是它自己的缺省 200，而客户端拿到的是中间件
-//     写的 500——已知缺陷，见 [#96](https://github.com/Luo-root/pulse-web/issues/96)。
+//     与 Trace；② 反过来，中间件在 next 外面写响应时（`Recoverer` 接住 panic 写
+//     500 就是这样）记录**向代理对齐**：状态码与体积取中间件写出的那份（#96 之
+//     前记的是框架自己的缺省 200，等于把一条 5xx 从面板上抹掉），但**不收**它的
+//     响应——框架有待映射的 error 时（收尾型中间件 × error 那条路）收下状态码会
+//     跳过错误映射、错误体整个丢掉，所以那种情况照旧交给映射器。
 //
 //   - **不透出 http.Pusher / FlushError**：响应写出器的能力面是一份显式的窄清单
 //     （Flush / Hijack / SetWriteDeadline / EnableFullDuplex），HTTP/2 的 Server
@@ -144,6 +149,19 @@ func Adapt(m func(http.Handler) http.Handler) Middleware {
 		inner.ServeHTTP(handed, rawR)
 
 		if called {
+			// 「调了 next，但在 next **外面**写响应」——`Recoverer` 接住 panic 写 500 就是
+			// 这一格（兜底 404、自研 recovery 同形）。框架自己的 writer 一个字节都没写，
+			// 客户端却已经收到中间件写的那份响应：唯一看见它的是代理，记录向它对齐（#96）。
+			//
+			// 判据用局部 `err` 而不是 `c.err`：`c.err` 由路由包装器在整条链返回**之后**才写
+			// （engine.go 的 register），在这一层恒为 nil，拿它当闸门等于没判——实测过。
+			//
+			// **有待映射的 error 就不收**：返回 error 那条路上，收尾型中间件也会在 next
+			// 外面写（gzip 落的那段尾），收下它的状态码会让框架**跳过错误映射**、错误体
+			// 整个丢掉——那是把响应弄得更糟（见 TestAdaptUnconditionalFinalizeLocksStatus）。
+			if err == nil && proxy.wrote && !c.w.wrote && !c.w.hijacked {
+				c.w.status, c.w.bytes, c.w.wrote = proxy.status, proxy.bytes, true
+			}
 			return err
 		}
 		// 短路：中间件写的是 proxy，没经过框架的采集层，把观测补回去。

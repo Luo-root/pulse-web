@@ -461,29 +461,21 @@ func TestMatrixChiClientIPFromXFF(t *testing.T) {
 // 两边都 500，但 body 不同——这正是站点那句「panic 兜底用框架自己的」，也是 `Adapt`
 // godoc 里「不改中间件语义」的实例。
 //
-// 这一行还带出**框架侧的一个已知缺陷**（见 [#96](https://github.com/Luo-root/pulse-web/issues/96)）：
-// 中间件在 `next` 外面写了响应时，框架侧那条访问记录写的是 200（框架自己的 writer 一个字节
-// 都没写，收尾落了缺省值），而客户端拿到的是 500。下面那条断言**把缺陷的现状钉住**：
-//
-//   - 它是一份**可执行的**缺陷记录——#96 修好那天它会红，提醒改成 `status="500"` 并删掉
-//     `known` 里那条申报，而不是让缺陷悄悄溜过去；
-//   - 之所以不改成 `known` 里的申报：`known` 的粒度是**整条观测**（两侧不一样就申报），
-//     它说不出「不一样的是哪一格」。这一行恰恰是「响应一样（都 500）、记录不一样」，
-//     只有正面断言能把「记录写成 200」单独钉住。
+// 这一行同时是 **#96 的回归守卫**：Recoverer 属于「调了 next、但在 next **外面**写响应」
+// 那一格，框架自己的 writer 一个字节都没写。修复前访问记录记的是收尾时的缺省 200（响应
+// 却是 500——等于把一条 5xx 从监控面板上抹掉），修复后记录向代理对齐、记 500，而记录里
+// **没有** `error.type` / 错误对象：框架没接住任何错误，不知道这份响应怎么来的。
 func TestMatrixChiRecoverer(t *testing.T) {
 	known := map[string]string{
-		"GET /panic": "Recoverer 在洋葱内先接住 panic，写它自己的空体 500；外包时框架的 recover 先接住，写统一错误体",
+		"GET /panic": "Recoverer 在洋葱内先接住 panic，写它自己的空体 500（框架那侧不知道原因）；" +
+			"外包时框架的 recover 先接住，写统一错误体。状态码两边都是 500，差的是响应体与错误类别",
 	}
 	run := compareMatrix(t, "chi middleware.Recoverer", once(middleware.Recoverer), nil, known)
 	run.need(t, "GET /err", `status="404"`)
-	// 响应面：客户端拿到的是 500（Recoverer 自己写的那条）。这条与下面 #96 的断言合成
-	// 一对——**响应是对的，错的是记录**。
+	// 响应面：客户端拿到的是 500（Recoverer 自己写的那条）。
 	run.needStatus(t, "GET /panic", http.StatusInternalServerError)
-	// 已知缺陷 #96 的现状（修好后：断言 status="500"，并删掉上面 known 里那条申报）。
-	if got := run.adapt["GET /panic"]; !strings.Contains(got.rec, `status="200"`) {
-		t.Errorf("已知缺陷 #96 的现状变了：洋葱内 Recoverer 写的 500 本应被框架记成 200，实际记的是 %q"+
-			"（#96 若已修好：这里改成断言 status=\"500\"，并删掉 known 里 GET /panic 那条申报）", got.rec)
-	}
+	// 记录面（#96）：记的是客户端真正收到的那个状态码，不是框架收尾的缺省 200。
+	run.need(t, "GET /panic", `status="500"`)
 }
 
 // logRecorder 是 chi Logger 的旁观测。用自定义 LogFormatter 而不是它自带的那个：默认
