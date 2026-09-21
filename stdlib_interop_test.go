@@ -426,6 +426,57 @@ func TestAdaptUnconditionalFinalizeLocksStatus(t *testing.T) {
 	}
 }
 
+// TestAdaptMiddlewareWritingOutsideNextReachesAccessLog 是 #96 的最小复现：中间件
+// **调了 next**，但在 next **外面**写响应（`Recoverer` 形状：自己的 recover 接住 panic、
+// 补一个 500；兜底 404、自研 recovery 同形）。
+//
+// 框架自己的 writer 一个字节都没写（handler 直接 panic），而响应已经在客户端那边落定。
+// 代理是唯一看见它的地方——记录必须跟着记 500，而不是收尾时的缺省 200。记成 200 的后果
+// 不是「数字不准」，是**把一条 5xx 从监控面板上抹掉**：降级、告警、错误率全跟着错。
+//
+// 与上一条 TestAdaptUnconditionalFinalizeLocksStatus 是一对：那条是「返回 error +
+// 收尾型中间件」的既有边界（记录仍交给错误映射器），这条是「没有 error 待映射」时
+// 记录向代理对齐。两条一起说明闸门为什么是 `err == nil`。
+//
+// 记录里**没有** `error.type` / 错误对象：框架没接住任何错误，它不知道这份响应怎么来的
+// ——编一个出来就是假信息。这是这条路上有意的观测语义。
+func TestAdaptMiddlewareWritingOutsideNextReachesAccessLog(t *testing.T) {
+	e, sink := newTestEngine(t)
+	e.Use(Adapt(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer func() {
+				if p := recover(); p != nil {
+					http.Error(w, "fallback", http.StatusServiceUnavailable)
+				}
+			}()
+			next.ServeHTTP(w, r)
+		})
+	}))
+	e.GET("/panic", func(c *Ctx) error { panic("boom") })
+
+	// 状态码与**字节数**都要收回：只补状态码的写法在体积那一列留下的还是 0，
+	// 而客户端明明收到了 9 字节。
+	rec := doReq(e, "GET", "/panic", nil)
+	if rec.Code != http.StatusServiceUnavailable || rec.Body.String() != "fallback\n" {
+		t.Fatalf("响应 = %d %q，want 503 %q（中间件自己写的那份）",
+			rec.Code, rec.Body.String(), "fallback\n")
+	}
+	logRec := waitRecord(t, sink, eventHTTPReq)
+	if logRec.Status != "503" {
+		t.Fatalf("访问记录 Status = %q，want 503（#96：记成缺省 200 等于把一条 5xx 抹掉）", logRec.Status)
+	}
+	if got := attrsOf(logRec)[attrHTTPBodySize]; got != int64(len("fallback\n")) {
+		t.Fatalf("访问记录 body.size = %v，want %d（只补状态码的写法在这里留下 0）",
+			got, len("fallback\n"))
+	}
+	if got, ok := attrsOf(logRec)["error.type"]; ok {
+		t.Fatalf("error.type = %v，want 缺席——框架没接住错误，不该编一个类别出来", got)
+	}
+	if logRec.Err != nil {
+		t.Fatalf("记录里的 Err = %v，want nil（同上）", logRec.Err)
+	}
+}
+
 // TestAdaptKeepsFlusher 钉住能力面：交给中间件的 writer 支持 http.Flusher，
 // SSE 的逐条 flush 在洋葱内照常工作。
 func TestAdaptKeepsFlusher(t *testing.T) {
