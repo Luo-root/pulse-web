@@ -90,6 +90,28 @@ func enginePathAppBodyLimit(tb testing.TB) (*web.Engine, func()) {
 	return app, func() { app.Root().Dispose() }
 }
 
+// passThroughMW 是最简的 stdlib 形状中间件（收到什么就转给 next）——生态里最常见的
+// 那种形状。用它量的是**适配层本身**的每请求成本，而不是某个特定中间件的成本。
+func passThroughMW(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { next.ServeHTTP(w, r) })
+}
+
+// enginePathAppAdapt 同上，但整条路由外面挂了一层 `web.Adapt` —— 把「经生态适配层」
+// 这条路径纳入基线。
+//
+// 单独一档的理由：`Adapt` 是生态中间件进洋葱的**唯一入口**，宿主一旦接了生态件，
+// 请求就走这条路；而其余各档都没挂它。没有这一档时，适配层自身的每请求分配变化
+// 门禁抓不到——「门禁零变化」只说明**被门禁覆盖的那些路径**没变（与 c.JSON /
+// BodyLimit 那两档同一类问题，[#89](https://github.com/Luo-root/pulse-web/issues/89)
+// 验收第 5 条）。门禁与 benchmark 共用它，保证两处量的是同一条路。
+func enginePathAppAdapt(tb testing.TB) (*web.Engine, func()) {
+	tb.Helper()
+	app := web.New(web.WithSink(nopSink{}))
+	app.Use(web.Adapt(passThroughMW))
+	app.GET("/ping", func(c *web.Ctx) error { return c.Text(http.StatusOK, "pong") })
+	return app, func() { app.Root().Dispose() }
+}
+
 // iterateRequestPath 是「一次请求」的循环体本身：benchmark 与分配预算门禁共用。
 //
 // 循环体单独抽出来，是因为两边的迭代数来源不同——benchmark 用 `b.N`（由
@@ -161,6 +183,17 @@ func BenchmarkEngineRequestPathMinimal(b *testing.B) {
 // 由 bench/budget_test.go 的 `default+body-limit` 档断言。
 func BenchmarkEngineRequestPath_BodyLimit(b *testing.B) {
 	app, cleanup := enginePathAppBodyLimit(b)
+	b.Cleanup(cleanup)
+	runRequestPath(b, app)
+}
+
+// BenchmarkEngineRequestPath_Adapt 对照：整条路由外面挂一层 web.Adapt。
+//
+// 与 BenchmarkEngineRequestPath 的 `plugins=0` 档**同轮跑取差值**：差值是适配层自身的
+// 每请求成本（[#89](https://github.com/Luo-root/pulse-web/issues/89) 验收第 5 条），
+// 由 bench/budget_test.go 的 `default+adapt` 档断言分配计数。
+func BenchmarkEngineRequestPath_Adapt(b *testing.B) {
+	app, cleanup := enginePathAppAdapt(b)
 	b.Cleanup(cleanup)
 	runRequestPath(b, app)
 }

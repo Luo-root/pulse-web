@@ -82,7 +82,20 @@ const (
 	// 纳入基线（review 提出，PR #45）。B/op 不断言：+1 alloc 的字节数随
 	// maxBytesReader 结构大小走，卡它只会带来假红。
 	budgetBodyLimitAllocs = 23
-	budgetSlackBytes      = 8
+	// 生态适配层那一档（#89 验收第 5 条）：整条路由外面挂一层 `web.Adapt`。
+	// **实测 +5 allocs/op**（22 → 27）——票面预期的是 +2，实测多出三次，拆解来自
+	// `-gcflags=-m` 的逃逸分析（不是推测）：① `&adaptProxy{}`（请求级状态，
+	// `125:12 escapes to heap`）；② 交给中间件的内层 `http.HandlerFunc` 闭包
+	// （`136:31 func literal escapes to heap`）；③④ 它捕获的 `called` / `err`
+	// 各自装箱（`134:3 / 135:7 moved to heap`）；⑤ 中间件自己那层包装器
+	// （pass-through 形状每次构造都重建闭包；用 `return next` 的对照档实测 -1，
+	// 即适配层本身是 4）。`defer` 还原闭包**不分配**（`143:10 does not escape`）——
+	// 「还原必须走 defer」那条纪律因此不额外收费。
+	//
+	// B/op 不断言：这一档的字节差里含中间件自身分配的份额，随中间件形状走，
+	// 卡它只会带来假红（与 body-limit 档同理）。
+	budgetAdaptAllocs = 27
+	budgetSlackBytes  = 8
 )
 
 // budgetBytesPerCase 是五个断言档的 B/op 基线。
@@ -192,6 +205,10 @@ func TestRequestPathAllocBudget(t *testing.T) {
 		// 路由级闸门那一档：挂 BodyLimit 的路由每请求多一次分配（MaxBytesReader
 		// 包装器），把这条路径也钉住。
 		{"default+body-limit", enginePathAppBodyLimit, budgetBodyLimitAllocs, 0},
+		// 生态适配层那一档：整条路由外面挂一层 Adapt（最简 pass-through 中间件）。
+		// Adapt 是生态中间件进洋葱的唯一入口，宿主接了生态件请求就走它，而其余
+		// 各档都没挂——这一档把适配层自身的每请求成本纳入基线（#89 验收第 5 条）。
+		{"default+adapt", enginePathAppAdapt, budgetAdaptAllocs, 0},
 	}
 
 	for _, c := range cases {
