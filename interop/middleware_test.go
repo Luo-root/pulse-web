@@ -54,7 +54,9 @@ import (
 //   - **每行都要有非空断言**（`matrixRun.need`）：矩阵只比两侧，比不出「两边都没
 //     生效」——「都加了同一个头」与「都没加」在比对里长得一样。
 //   - **申报了差异，还要钉住差异的内容**：`known` 只说「这里会不一样」，至于不一样
-//     的是不是我们说的那件事，靠 `need` / `outerAbsent` 正面断言。
+//     的是不是我们说的那件事，靠 `need` / `outerAbsent` / `needStatus` 正面断言。
+//     要注意**申报过的行不再逐项比对**，所以那几行客户端收到的状态码得用 `needStatus`
+//     单独钉住——否则「中间件记错了」与「响应也错了」在这张矩阵里长得一样。
 //
 // 未匹配路由（真 404）与尾斜杠**不在** `defaultReqs()` 里：它们压根到不了洋葱内的
 // 中间件，那个边界由 TestMatrixUnmatchedRoutesBypassOnion 单独断言。
@@ -67,9 +69,15 @@ import (
 type mount struct {
 	// mw 是 stdlib 形状的中间件。
 	mw func(http.Handler) http.Handler
-	// extra 可空：两个挂载点都额外注册的路由（读中间件注入的值、给预检显式
-	// 注册 OPTIONS 时用）。注册发生在 `Use` 之后，所以照样在洋葱里。
-	extra func(*web.Engine)
+	// probeRoutes 可空：把中间件注入的值读出来、写进 body 的路由（路径 → handler，
+	// 注册成 GET）。中间件放进 request context（或换过的 request）里的东西，只有被
+	// handler 读出来才进得了比对面——观测面只认响应里看得见的事实。
+	// 注册发生在 `Use` 之后，所以这些路由照样在洋葱里。
+	probeRoutes map[string]web.Handler
+	// allowPreflight 给骨架里的每条 GET 路由**同时注册一条 OPTIONS**——预检那条绕法。
+	// 路由匹配先于中间件（见 TestMatrixUnmatchedRoutesBypassOnion），不注册 OPTIONS
+	// 时预检请求根本到不了洋葱内。这条路由只负责把请求送进洋葱，响应仍由中间件写。
+	allowPreflight bool
 	// side 可空：中间件自己的旁观测，返回**自上次调用以来**的新增。
 	side func() string
 }
@@ -112,13 +120,13 @@ func defaultReqs() []reqSpec {
 // id / cookie 每条请求都换，比字面值等于自找假阴性。
 //
 // `X-Interop-Saw` 是边界用例自己塞的标记（未匹配路由那条，见文件末尾）——放进同一张
-// 清单，它才进得了比对面。
+// 清单，它才进得了比对面；`Location` 只有「路径需要归一化」那条会带。
 var watchHeaders = []string{
 	"Access-Control-Allow-Credentials", "Access-Control-Allow-Methods",
 	"Access-Control-Allow-Origin", "Access-Control-Max-Age", "Allow",
-	"Content-Encoding", "Content-Type", "Retry-After", "Set-Cookie", "Vary",
-	"WWW-Authenticate", "X-Content-Type-Options", "X-Interop-Saw", "X-Real-Ip",
-	"X-Request-Id", "X-Trace-Id",
+	"Content-Encoding", "Content-Type", "Location", "Retry-After", "Set-Cookie",
+	"Vary", "WWW-Authenticate", "X-Content-Type-Options", "X-Interop-Saw",
+	"X-Real-Ip", "X-Request-Id", "X-Trace-Id",
 }
 
 var volatileHeader = map[string]bool{
@@ -143,24 +151,32 @@ func (o obs) String() string {
 	return b.String()
 }
 
-// routes 造矩阵用的引擎：`sink` 是挂载点专属的采集口（框架侧记录进比对面）。
-func routes(mw web.Middleware, sink observability.Sink, extra func(*web.Engine)) *web.Engine {
+// routes 造矩阵用的引擎：`sink` 是挂载点专属的采集口（框架侧记录进比对面），
+// `probes` / `allowPreflight` 来自挂载点自己的字段（见 mount）。
+func routes(mw web.Middleware, sink observability.Sink, probes map[string]web.Handler, allowPreflight bool) *web.Engine {
 	app := web.New(web.WithSink(sink))
 	if mw != nil {
 		app.Use(mw)
 	}
-	app.GET("/ok", func(c *web.Ctx) error {
+	// 骨架路由统一从这里走：`allowPreflight` 打开时给同一条路径补一条 OPTIONS。
+	route := func(path string, h web.Handler) {
+		app.GET(path, h)
+		if allowPreflight {
+			app.OPTIONS(path, func(c *web.Ctx) error { return c.NoContent(http.StatusNoContent) })
+		}
+	}
+	route("/ok", func(c *web.Ctx) error {
 		return c.JSON(http.StatusOK, map[string]string{"a": "b"})
 	})
-	app.GET("/err", func(c *web.Ctx) error { return web.NotFound("nope", nil) })
-	app.GET("/panic", func(c *web.Ctx) error { panic("boom") })
-	app.GET("/users/{id}", func(c *web.Ctx) error { return c.Text(http.StatusOK, "user:"+c.Path("id")) })
-	app.GET("/slow", func(c *web.Ctx) error {
+	route("/err", func(c *web.Ctx) error { return web.NotFound("nope", nil) })
+	route("/panic", func(c *web.Ctx) error { panic("boom") })
+	route("/users/{id}", func(c *web.Ctx) error { return c.Text(http.StatusOK, "user:"+c.Path("id")) })
+	route("/slow", func(c *web.Ctx) error {
 		time.Sleep(150 * time.Millisecond)
 		return c.Text(http.StatusOK, "slow")
 	})
-	if extra != nil {
-		extra(app)
+	for path, h := range probes {
+		app.GET(path, h)
 	}
 	return app
 }
@@ -239,6 +255,19 @@ func (r matrixRun) outerAbsent(t *testing.T, req, want string) {
 	}
 }
 
+// needStatus 断言经 Adapt 那一侧的**响应状态码**（客户端真正收到的那个）。
+//
+// 为什么不能只靠 `need(status="…")`：那个 `status=` 是**框架记录**里的字段，不是响应
+// 本身。而两侧响应的逐项比对在 `known` 申报过的行上会被跳过——短路、错误、panic 那几
+// 行恰恰全是申报过的，于是「响应状态码」这一个维度没有任何正面判据：把中间件写的状态
+// 码吞掉（响应只剩 body 带来的缺省 200）也能全绿。
+func (r matrixRun) needStatus(t *testing.T, req string, want int) {
+	t.Helper()
+	if got := r.adapt[req]; got.status != want {
+		t.Errorf("经 Adapt 的 %s 响应状态码 = %d，want %d\n  实际: %s", req, got.status, want, got)
+	}
+}
+
 // compareMatrix 是矩阵本体：两个挂载点各观测一遍，逐条比对。
 //
 // `known` 把「两边本就该不同」的条目写成 `请求名 -> 为什么`；申报了却一致同样报错。
@@ -251,8 +280,8 @@ func compareMatrix(t *testing.T, name string, factory mountFactory, reqs []reqSp
 	// 两个挂载点各造一份中间件实例与采集口。
 	inMount, outMount := factory(), factory()
 	inSink, outSink := &recordSink{}, &recordSink{}
-	inHandler := routes(web.Adapt(inMount.mw), inSink, inMount.extra).Handler()
-	outHandler := outMount.mw(routes(nil, outSink, outMount.extra).Handler())
+	inHandler := routes(web.Adapt(inMount.mw), inSink, inMount.probeRoutes, inMount.allowPreflight).Handler()
+	outHandler := outMount.mw(routes(nil, outSink, outMount.probeRoutes, outMount.allowPreflight).Handler())
 
 	run := matrixRun{adapt: map[string]obs{}, outer: map[string]obs{}}
 	for _, spec := range reqs {
@@ -285,9 +314,35 @@ func compareMatrix(t *testing.T, name string, factory mountFactory, reqs []reqSp
 
 // ---- 框架侧记录 ----
 
-// eventHTTPReq 是访问记录的事件名（engine.go 的 eventHTTPReq）。内核启动期的记录
-// （fiber_state 等）也会流进 Sink，靠它挡在外面——那些记录什么时候到是不确定的。
+// eventHTTPReq 是访问记录的事件名（框架内部同名常量未导出，这里照抄一份——名字漂了
+// 这条过滤就会把记录面整个滤空，但**不会静默**：记录面的断言全是正面断言
+// （`need` 那一批），滤空时它们先红，见 TestRecordSinkOneRecordPerRequest）。
+//
+// 为什么要过滤：内核启动期的记录（fiber_state 等）也会流进 Sink——内核被第一条请求懒
+// 加载时冒出来，**什么时候到是不确定的**，而框架的访问记录是同步写出的。两者用事件名
+// 分开，语义上就不是一类东西。
 const eventHTTPReq = "http.request"
+
+// TestRecordSinkOneRecordPerRequest 钉住采集口的**时序边界**：访问记录是框架在
+// `ServeHTTP` 收尾时**同步**写出来的，所以 drain 紧跟在返回之后就能拿到，既不需要等待、
+// 也不会有「上一条的残留被算进下一条」。这条边界是整套矩阵的前提——它不是同步的，
+// 逐请求比对就无意义（`context_test.go` 那条 `waitRecord` 存在的理由，是那边走真
+// socket，客户端读完响应时服务端收尾可能还没跑完）。
+func TestRecordSinkOneRecordPerRequest(t *testing.T) {
+	sink := &recordSink{}
+	app := web.New(web.WithSink(sink))
+	app.GET("/ok", func(c *web.Ctx) error { return c.Text(http.StatusOK, "ok") })
+	h := app.Handler()
+
+	for i := 1; i <= 3; i++ {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/ok", nil))
+		got := sink.drain()
+		if n := strings.Count(got, "; ") + 1; got == "" || n != 1 {
+			t.Errorf("第 %d 条请求 drain 出 %d 行（%q）——访问记录要么没同步落盘、"+
+				"要么混进了别的行（内核记录的事件名与 %q 相同？）", i, n, got, eventHTTPReq)
+		}
+	}
+}
 
 // recordSink 接住框架写出的访问记录。只挑与中间件语义有关的字段：trace id 与耗时
 // 每条请求都不同，比它们等于自找假阴性。值一律加引号——**空值（未匹配路由的
@@ -349,19 +404,17 @@ func TestMatrixChiRequestID(t *testing.T) {
 	run := compareMatrix(t, "chi middleware.RequestID", func() mount {
 		return mount{
 			mw: middleware.RequestID,
-			extra: func(app *web.Engine) {
-				app.GET("/rid", func(c *web.Ctx) error {
-					id := middleware.GetReqID(c.Request().Context())
-					switch {
-					case id == "":
-						return c.Text(http.StatusOK, "rid:absent")
-					case strings.HasPrefix(id, "inbound-"):
-						return c.Text(http.StatusOK, "rid:"+id)
-					default:
-						return c.Text(http.StatusOK, "rid:generated")
-					}
-				})
-			},
+			probeRoutes: map[string]web.Handler{"/rid": func(c *web.Ctx) error {
+				id := middleware.GetReqID(c.Request().Context())
+				switch {
+				case id == "":
+					return c.Text(http.StatusOK, "rid:absent")
+				case strings.HasPrefix(id, "inbound-"):
+					return c.Text(http.StatusOK, "rid:"+id)
+				default:
+					return c.Text(http.StatusOK, "rid:generated")
+				}
+			}},
 		}
 	}, []reqSpec{
 		{"GET /rid (inbound id)", http.MethodGet, "/rid", map[string]string{"X-Request-Id": "inbound-123"}},
@@ -389,11 +442,9 @@ func TestMatrixChiClientIPFromXFF(t *testing.T) {
 	run := compareMatrix(t, "chi middleware.ClientIPFromXFF", func() mount {
 		return mount{
 			mw: middleware.ClientIPFromXFF("10.0.0.0/8"),
-			extra: func(app *web.Engine) {
-				app.GET("/ip", func(c *web.Ctx) error {
-					return c.Text(http.StatusOK, "ip:"+middleware.GetClientIP(c.Request().Context()))
-				})
-			},
+			probeRoutes: map[string]web.Handler{"/ip": func(c *web.Ctx) error {
+				return c.Text(http.StatusOK, "ip:"+middleware.GetClientIP(c.Request().Context()))
+			}},
 		}
 	}, cases, nil)
 
@@ -410,17 +461,28 @@ func TestMatrixChiClientIPFromXFF(t *testing.T) {
 // 两边都 500，但 body 不同——这正是站点那句「panic 兜底用框架自己的」，也是 `Adapt`
 // godoc 里「不改中间件语义」的实例。
 //
-// 这一行还带出**框架侧的一个已知缺陷**（见 #96）：中间件在 `next` 外面写了响应时，
-// 框架记下的状态码是 200（它自己的 writer 什么都没写，收尾落了缺省值），而客户端拿到
-// 的是 500。测试把它按现状钉住，修好那天这条断言会红——那时改成 500 并删掉申报。
+// 这一行还带出**框架侧的一个已知缺陷**（见 [#96](https://github.com/Luo-root/pulse-web/issues/96)）：
+// 中间件在 `next` 外面写了响应时，框架侧那条访问记录写的是 200（框架自己的 writer 一个字节
+// 都没写，收尾落了缺省值），而客户端拿到的是 500。下面那条断言**把缺陷的现状钉住**：
+//
+//   - 它是一份**可执行的**缺陷记录——#96 修好那天它会红，提醒改成 `status="500"` 并删掉
+//     `known` 里那条申报，而不是让缺陷悄悄溜过去；
+//   - 之所以不改成 `known` 里的申报：`known` 的粒度是**整条观测**（两侧不一样就申报），
+//     它说不出「不一样的是哪一格」。这一行恰恰是「响应一样（都 500）、记录不一样」，
+//     只有正面断言能把「记录写成 200」单独钉住。
 func TestMatrixChiRecoverer(t *testing.T) {
 	known := map[string]string{
 		"GET /panic": "Recoverer 在洋葱内先接住 panic，写它自己的空体 500；外包时框架的 recover 先接住，写统一错误体",
 	}
 	run := compareMatrix(t, "chi middleware.Recoverer", once(middleware.Recoverer), nil, known)
 	run.need(t, "GET /err", `status="404"`)
+	// 响应面：客户端拿到的是 500（Recoverer 自己写的那条）。这条与下面 #96 的断言合成
+	// 一对——**响应是对的，错的是记录**。
+	run.needStatus(t, "GET /panic", http.StatusInternalServerError)
+	// 已知缺陷 #96 的现状（修好后：断言 status="500"，并删掉上面 known 里那条申报）。
 	if got := run.adapt["GET /panic"]; !strings.Contains(got.rec, `status="200"`) {
-		t.Errorf("已知缺陷 #96 的现状变了：洋葱内 Recoverer 写的 500 本应被框架记成 200，实际记的是 %q", got.rec)
+		t.Errorf("已知缺陷 #96 的现状变了：洋葱内 Recoverer 写的 500 本应被框架记成 200，实际记的是 %q"+
+			"（#96 若已修好：这里改成断言 status=\"500\"，并删掉 known 里 GET /panic 那条申报）", got.rec)
 	}
 }
 
@@ -481,6 +543,15 @@ func TestMatrixChiLogger(t *testing.T) {
 	run := compareMatrix(t, "chi middleware.Logger", factory, nil, known)
 	run.need(t, "GET /ok", "status=200 bytes=10")
 	run.need(t, "GET /err", "status=0 bytes=0")
+	// 响应面：这两行都在 `known` 里（申报过就不逐项比对了），所以客户端看到的状态码
+	// 得正面钉住——不然「中间件记错了」与「响应也错了」在这里长得一样。
+	run.needStatus(t, "GET /err", http.StatusNotFound)
+	run.needStatus(t, "GET /panic", http.StatusInternalServerError)
+	// 记录面的另外三格：`error.type` 的**分类**（`http_4xx` / `panic` 两个不同取值，
+	// 不是恒定值）与错误对象本身——只看状态码看不出错误类别记错了。
+	run.need(t, "GET /err", `error.type="http_4xx"`)
+	run.need(t, "GET /panic", `error.type="panic"`)
+	run.need(t, "GET /err", "err=<present>")
 	// 框架记录里的路由模板（`/users/{id}` 而不是 `/users/42`）——中间件看不到它，
 	// 这正是「要路由模板就挂洋葱内」的理由，也是记录面的一条可失败判据。
 	run.need(t, "GET /users/42", `http.route="/users/{id}"`)
@@ -502,6 +573,9 @@ func TestMatrixChiCompress(t *testing.T) {
 	run := compareMatrix(t, "chi middleware.Compress(5)", once(middleware.Compress(5)), nil, known)
 	run.need(t, "GET /ok", "Content-Encoding=gzip")
 	run.need(t, "GET /err", `status="404"`)
+	// 响应面：申报过的行不比响应，正面钉住客户端看到的两个状态码。
+	run.needStatus(t, "GET /err", http.StatusNotFound)
+	run.needStatus(t, "GET /panic", http.StatusInternalServerError)
 }
 
 // TestMatrixChiTimeout：收尾型中间件里**两边一致**的那个——它在超时后补写 504，而响应
@@ -513,16 +587,31 @@ func TestMatrixChiTimeout(t *testing.T) {
 }
 
 // TestMatrixChiCleanPath：**已知边界**——它读 chi 自己的路由上下文，挂在 pulse-web 上
-// 两边都没有那个上下文，所以两个挂载点**都 panic**。
+// 两边都没有那个上下文，所以两个挂载点都会 panic。差别在**谁接住**：
 //
-// 这里断言的不是「能用」，而是「两边一样不能用」：适配层没有把它变得更糟，也没有假装
-// 能用。要路径规范化，用 `http.ServeMux` 自己那一套。
+//   - 洋葱内：panic 落在 Engine 的 recover 里，兜成框架的统一 500，还记了一条访问
+//     记录（`error.type="panic"`）
+//   - 外包：panic 在 Engine 之外，直接逃到调用方——没有响应、没有记录
+//
+// 两边都不能用，适配层也没有把它变得更糟、更没有假装能用。要路径规范化用
+// `http.ServeMux` 自己那一套——**未归一的路径它在洋葱之前就 307 掉**，
+// 见 TestMatrixUncleanedPathRedirectsBeforeOnion。
 func TestMatrixChiCleanPath(t *testing.T) {
+	why := "chi.CleanPath 需要 chi 的路由上下文，两个挂载点都 panic；差别是谁接住：" +
+		"洋葱内由 Engine 兜成 500 + 记录，外包那侧逃到调用方（无响应、无记录）"
 	known := map[string]string{}
 	for _, spec := range defaultReqs() {
-		known[spec.name] = "chi.CleanPath 需要 chi 的路由上下文，两个挂载点都 panic"
+		known[spec.name] = why
 	}
-	compareMatrix(t, "chi middleware.CleanPath", once(middleware.CleanPath), nil, known)
+	run := compareMatrix(t, "chi middleware.CleanPath", once(middleware.CleanPath), nil, known)
+
+	// 申报了差异就要钉住差异的内容（见文件头的第三条纪律）。
+	run.need(t, "GET /ok", `error.type="panic"`)
+	run.needStatus(t, "GET /ok", http.StatusInternalServerError)
+	run.outerAbsent(t, "GET /ok", `status="500"`)
+	if run.outer["GET /ok"].panicked == "" {
+		t.Errorf("外包那侧本该 panic 逃到调用方，实际观测：%s", run.outer["GET /ok"])
+	}
 }
 
 // ---- 指标：promhttp ----
@@ -639,6 +728,7 @@ func TestMatrixRsCorsPreflight(t *testing.T) {
 	}
 	run := compareMatrix(t, "rs/cors 预检", once(corsMW()), []reqSpec{spec}, known)
 	run.need(t, spec.name, "405")
+	run.needStatus(t, spec.name, http.StatusMethodNotAllowed)
 	run.outerAbsent(t, spec.name, "405")
 }
 
@@ -648,6 +738,10 @@ func TestMatrixRsCorsPreflight(t *testing.T) {
 // 差异落在框架那一面：外包的 CORS 在引擎之前就短路了，这条请求框架**不知情**（没有
 // trace 头、没有访问记录）；洋葱内的那侧是一条普通请求。这正是站点表格里
 // 「外包 ⚠️ 框架完全不知情」那一格的实测。
+//
+// 这条同时是「**部分短路**」那一格：CORS 对预检是**只写状态码、不写 body** 的短路
+// （204、零字节，注册的那条路由只负责把请求送进洋葱，handler 根本没跑）。所以下面
+// 除了状态码还钉住体积 `0`——短路回填要同时把状态码与字节数记回去，只补一个也算坏。
 func TestMatrixRsCorsPreflightExplicitRoute(t *testing.T) {
 	spec := reqSpec{"OPTIONS /ok (preflight, explicit route)", http.MethodOptions, "/ok", map[string]string{
 		"Origin":                        "https://example.com",
@@ -657,16 +751,14 @@ func TestMatrixRsCorsPreflightExplicitRoute(t *testing.T) {
 		spec.name: "外包的 CORS 在引擎之前短路，框架不知情（无 trace 头、无访问记录）；洋葱内是一条普通请求",
 	}
 	run := compareMatrix(t, "rs/cors 预检 + 显式 OPTIONS 路由", func() mount {
-		return mount{
-			mw: corsMW(),
-			extra: func(app *web.Engine) {
-				app.OPTIONS("/ok", func(c *web.Ctx) error { return c.NoContent(http.StatusNoContent) })
-			},
-		}
+		return mount{mw: corsMW(), allowPreflight: true}
 	}, []reqSpec{spec}, known)
 
 	run.need(t, spec.name, "Access-Control-Allow-Origin=https://example.com")
+	run.need(t, spec.name, `http.request.method="OPTIONS"`)
 	run.need(t, spec.name, `status="204"`)
+	run.need(t, spec.name, `http.response.body.size="0"`)
+	run.needStatus(t, spec.name, http.StatusNoContent)
 	run.outerAbsent(t, spec.name, "X-Trace-Id")
 }
 
@@ -710,12 +802,10 @@ func TestMatrixJWT(t *testing.T) {
 	run := compareMatrix(t, "golang-jwt/jwt/v5", func() mount {
 		return mount{
 			mw: jwtMW(secret),
-			extra: func(app *web.Engine) {
-				app.GET("/me", func(c *web.Ctx) error {
-					sub, _ := c.Request().Context().Value(subjectKey{}).(string)
-					return c.Text(http.StatusOK, "sub:"+sub)
-				})
-			},
+			probeRoutes: map[string]web.Handler{"/me": func(c *web.Ctx) error {
+				sub, _ := c.Request().Context().Value(subjectKey{}).(string)
+				return c.Text(http.StatusOK, "sub:"+sub)
+			}},
 		}
 	}, []reqSpec{
 		{"GET /me (valid token)", http.MethodGet, "/me", map[string]string{"Authorization": "Bearer " + signed}},
@@ -731,7 +821,12 @@ func TestMatrixJWT(t *testing.T) {
 	run.need(t, "GET /me (valid token)", "sub:u-42")
 	// 短路那条：401 是中间件写的，而且它**进了框架的记录**——外包那侧没有。
 	run.need(t, "GET /me (no token)", `status="401"`)
+	run.needStatus(t, "GET /me (no token)", http.StatusUnauthorized)
+	run.needStatus(t, "GET /me (garbage token)", http.StatusUnauthorized)
 	run.outerAbsent(t, "GET /me (no token)", "X-Trace-Id")
+	// 记录里的方法必须是**这一条请求的**方法（这一行是唯一的非 GET 请求）——方法恒定
+	// 记成 GET 的写法在别的行上看不出来，因为两侧一样错。
+	run.need(t, "POST /me (valid token)", `http.request.method="POST"`)
 }
 
 // ---- 限流：httprate ----
@@ -758,10 +853,20 @@ func TestMatrixHttprate(t *testing.T) {
 
 	run.need(t, "GET /ok #3", "429")
 	run.need(t, "GET /ok #3", "Retry-After=")
+	run.needStatus(t, "GET /ok #3", http.StatusTooManyRequests)
 	run.need(t, "GET /err #1 (exhausted)", `status="429"`)
 }
 
 // ---- 边界：到不了洋葱的请求 ----
+
+// sawHeader 是边界用例用的极简中间件：只留一个「我看过这条请求」的标记。它对所有请求
+// 都生效，用来区分「中间件参与了」与「中间件没参与」。
+func sawHeader(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Interop-Saw", "yes")
+		next.ServeHTTP(w, r)
+	})
+}
 
 // TestMatrixUnmatchedRoutesBypassOnion：**已知边界**，与具体中间件无关——`Use` 挂在
 // 路由注册里，所以**没匹配到路由的请求根本不经洋葱**。
@@ -775,20 +880,13 @@ func TestMatrixHttprate(t *testing.T) {
 // 这条**不在** `defaultReqs()` 里：把它塞进每条矩阵会让每个中间件都多一条「其实与本
 // 中间件无关」的申报。
 func TestMatrixUnmatchedRoutesBypassOnion(t *testing.T) {
-	hdr := func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("X-Interop-Saw", "yes")
-			next.ServeHTTP(w, r)
-		})
-	}
-
 	for _, spec := range []reqSpec{
 		{"GET /nope (no route)", http.MethodGet, "/nope", nil},
 		{"GET /ok/ (trailing slash, no route)", http.MethodGet, "/ok/", nil},
 	} {
 		inSink, outSink := &recordSink{}, &recordSink{}
-		in := observe(routes(web.Adapt(hdr), inSink, nil).Handler(), spec, inSink)
-		out := observe(hdr(routes(nil, outSink, nil).Handler()), spec, outSink)
+		in := observe(routes(web.Adapt(sawHeader), inSink, nil, false).Handler(), spec, inSink)
+		out := observe(sawHeader(routes(nil, outSink, nil, false).Handler()), spec, outSink)
 
 		// 响应本身两边一样：都是 ServeMux 自己写的 404。
 		if in.status != http.StatusNotFound || out.status != http.StatusNotFound {
@@ -812,6 +910,52 @@ func TestMatrixUnmatchedRoutesBypassOnion(t *testing.T) {
 			if !strings.Contains(got.rec, `http.route=""`) {
 				t.Errorf("%s / %s：未匹配的路由模板该是**空值**（%s）", spec.name, side, got.rec)
 			}
+		}
+	}
+}
+
+// TestMatrixUncleanedPathRedirectsBeforeOnion：路径需要归一化时（`/users//42`、`//users/42`、
+// `/users/./42`），**ServeMux 在调用路由 handler 之前就自己 307 到干净路径**——它与「未匹
+// 配路由」（404）是同一条边界（路由先于中间件）：洋葱内的中间件看不到这条请求，外包的看
+// 得到。两处实测细节值得钉住：
+//
+//   - 状态码是 **307**（`Location` 指向干净路径），响应体是 ServeMux 自带的
+//     `<a href="…">` 那一段；
+//   - 记录里的 **`http.route` 非空**（`/users/{id}`）——ServeMux 在重定向前就把 pattern
+//     写上了。所以「记录里 `http.route` 非空」**不等于**「这条请求真的被那个 handler 处
+//     理过」，读记录的人别把它当处理过的证据。
+func TestMatrixUncleanedPathRedirectsBeforeOnion(t *testing.T) {
+	for _, spec := range []reqSpec{
+		{"GET /users//42 (double slash)", http.MethodGet, "/users//42", nil},
+		{"GET //users/42 (leading double slash)", http.MethodGet, "//users/42", nil},
+		{"GET /users/./42 (dot segment)", http.MethodGet, "/users/./42", nil},
+	} {
+		inSink, outSink := &recordSink{}, &recordSink{}
+		in := observe(routes(web.Adapt(sawHeader), inSink, nil, false).Handler(), spec, inSink)
+		out := observe(sawHeader(routes(nil, outSink, nil, false).Handler()), spec, outSink)
+
+		// 响应本身两边一样：ServeMux 自己写的 307 与 Location。
+		for side, got := range map[string]obs{"经 Adapt": in, "外包": out} {
+			if got.status != http.StatusTemporaryRedirect {
+				t.Errorf("%s / %s：应当是 ServeMux 自己的 307（%s）", spec.name, side, got)
+			}
+			if !strings.Contains(got.headers, "Location=/users/42") {
+				t.Errorf("%s / %s：该 307 到干净路径（%s）", spec.name, side, got)
+			}
+		}
+		if in.body != out.body {
+			t.Errorf("%s：两侧的重定向文本就不一样了\n  经 Adapt: %s\n  外包    : %s", spec.name, in, out)
+		}
+		// 差的是中间件有没有参与。
+		if !strings.Contains(out.headers, "X-Interop-Saw=yes") {
+			t.Errorf("%s：外包的中间件没看见这条请求（%s）——这条边界的前提不成立了", spec.name, out)
+		}
+		if strings.Contains(in.headers, "X-Interop-Saw=yes") {
+			t.Errorf("%s：洋葱内的中间件竟然看见了——重定向不再是「在洋葱之前」了（%s）", spec.name, in)
+		}
+		// 记录面：非空的 pattern，但 handler 没跑过。
+		if !strings.Contains(in.rec, `http.route="/users/{id}"`) {
+			t.Errorf("%s：重定向前 ServeMux 已经把 pattern 写上了，记录里该是非空路由（%s）", spec.name, in.rec)
 		}
 	}
 }

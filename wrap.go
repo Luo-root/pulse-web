@@ -79,6 +79,12 @@ func Wrap(h http.Handler) Handler {
 //     注册了 GET /api 时 ServeMux 直接 405（Allow: GET, HEAD）。要拦预检的
 //     CORS 类中间件请外包 Handler()，或为每条路由显式注册 OPTIONS。
 //
+//     没匹配到路由的请求（真 404、尾斜杠）与**需要归一化的路径**（`//users`、
+//     `/users//42`）同理：后者由 ServeMux 在**调用 handler 之前**自己 307 到
+//     干净路径，洋葱内的中间件看不到它。注意这时访问记录里的 `http.route`
+//     **是非空的**（ServeMux 在重定向前就把 pattern 写上了），别把它当成
+//     「这条请求被那个 handler 处理过」的证据。
+//
 //   - **不解决「收尾型中间件 × error/panic」**：框架的错误映射发生在中间件
 //     返回**之后**，在 next 返回后无条件写响应的中间件（例如自己 defer
 //     zw.Close() 的 gzip）会把状态锁成 200。压缩类默认推外包。
