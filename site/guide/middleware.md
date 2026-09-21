@@ -111,10 +111,20 @@ app.CORS(
 )
 ```
 
-`CORS(opts ...web.CORSOption)` 是主包自己的实现、**零第三方依赖**——CORS 属于 web 本行，不该让人为了它去装包。装配期调用，写在注册业务路由**之前**（与 `Use` 同一规矩），分组同样可用。它做两件事：
+`CORS(opts ...web.CORSOption)` 是主包自己的实现、**零第三方依赖**——CORS 属于 web 本行，不该让人为了它去装包。它做两件事：
 
 1. 把 CORS 中间件压进洋葱——实际请求带 CORS 头；
 2. **为你之后注册的每条路由补一条同名 `OPTIONS`**——预检因此进得了洋葱。
+
+**挂载口径（一个 mux 一份白名单）**：
+
+| 想要的效果 | 怎么写 |
+|---|---|
+| 整站一份 | 先 `app.CORS(...)`，再 `Group` / 注册路由 |
+| 只覆盖某个前缀 | **只**在那个分组上挂：`api := app.Group("/api")` 之后 `api.CORS(...)`，父上不挂 |
+| 已经挂过 CORS 的节点 | 从它派生的子组再调是**装配期 panic**——父子共享同一个 mux，两份策略只会打架 |
+
+与 `Use` 同款：**先 `Group` 再 `CORS` 不生效**（分组在 `Group` 时就拷走了当时的中间件与观察者）。另有一条顺序建议：把 `CORS(...)` 写在其它 `Use` **之前**——它自己就是一次 `Use`，谁在前谁在外层，想让预检不被鉴权之类的全局中间件挡下就先挂它。
 
 ### 为什么得补那条 `OPTIONS`
 
@@ -126,13 +136,14 @@ app.CORS(
 | `OPTIONS /api`（裸 OPTIONS） | 405 + `Allow: GET, HEAD` | 一样 405 + `Allow: GET, HEAD`，区别是进了洋葱、响应体是框架统一错误体 |
 | `GET /nope`（没匹配到路由） | 404 | **404（不变）** |
 
-最后那一行是**实测纠正过设计**的地方：更省事的写法是注册一条兜底 `OPTIONS /{path...}`，但 `{path...}` 匹配任意路径，ServeMux 会把「路径匹配、方法不匹配」判成 405——**全站未匹配的请求都会从 404 变成 405**。框架因此改成按已注册路径逐条补，`TestCORSUnmatchedRouteHasNoCORSHeaders` 钉着这个 404。
+最后那一行是**实测纠正过设计**的地方：更省事的写法是注册一条兜底 `OPTIONS /{path...}`，但它有两条硬伤——① `{path...}` 匹配任意路径，ServeMux 会把「路径匹配、方法不匹配」判成 405，**全站未匹配的请求都会从 404 变成 405**；② 它与 `Static` 挂的 `<prefix>/` **在 ServeMux 上直接冲突**（`<prefix>/` 匹配的方法更多、`/{path...}` 的路径更具体，谁都不比谁更具体），两条都注册就是**装配期 panic**，两个注册顺序都一样。框架因此按已注册路径逐条补，`TestCORSUnmatchedRouteHasNoCORSHeaders` 钉着这个 404。
 
 ### 语义要点
 
 - **预检被拒是 403**，不是静默少几个头：来源 / 方法 / 请求头任一不在白名单 → `403` + 框架统一错误体（`cors_origin_not_allowed` / `cors_method_not_allowed` / `cors_header_not_allowed`）。对浏览器两种写法都是 CORS 失败，但这一种**对人与监控都看得见**——`error.type` 会进访问记录。
 - **`CORSAllowOrigins("*")` 与 `CORSAllowCredentials()` 不能同时用**：那个组合等于「任何网站都能带凭据访问本服务」，是漏洞而不是配置，装配期 panic 拦下；要开放给多个站点就逐个列出来。
-- 方法默认 `GET` / `POST` / `HEAD`（Fetch 的 simple methods）；请求头默认空——只放行 CORS 安全列表内的头。`CORSAllowHeaders("*")` 放行任意请求头。
+- 方法默认 `GET` / `POST` / `HEAD`（Fetch 的 simple methods）；**请求头默认 `Accept` / `Content-Type`**——`application/json` 不在 CORS 安全列表里（安全列表只认 form-urlencoded / multipart / text/plain），浏览器对 JSON POST 会带 `Access-Control-Request-Headers: content-type` 发预检，所以只配来源的 JSON API 挂上就能用，不必再写 `CORSAllowHeaders`。`CORSAllowHeaders("*")` 放行任意请求头。
+- **补出来的 `OPTIONS` 只走全局 + 分组中间件**，不带那条触发它的业务路由的 per-route 中间件：`OPTIONS` 不是 `GET` / `POST` 的替身，`GET /x` 上的鉴权守卫不会把 `OPTIONS /x` 挡掉。
 - 来源按字符串比，但大小写与尾斜杠会先规范化（`https://App.Example.com/` 与 `https://app.example.com` 等价）。
 - **只回被问到的东西**：`Access-Control-Allow-Methods` 回本次问的那一个方法，`Allow-Headers` 回被问到的头（规范化、去重）。响应因此最小，也不会把没被问到的能力暴露出去。
 - 预检**不看目标路由是否存在**——这是 CORS 中间件的通行语义，真请求到不到得了那条路由是后话。
@@ -164,7 +175,7 @@ app.GET("/api/users", listUsers)     // 不会再补 OPTIONS /api/users
 |---|---|---|---|
 | 外包 `Handler()` | ✅ | ❌ 框架完全不知情（无 trace、无访问记录） | 只要 CORS 生效、不看预检流量 |
 | 逐条注册 `OPTIONS` | ✅ | ✅（`http.route` 是真路由） | 路由少、路径固定 |
-| 一条兜底 `OPTIONS /{path...}` | ✅ | ✅（`http.route` 是兜底模式） | 一条覆盖全部路径，含未注册路径的预检；**代价是全站未匹配请求从 404 变 405** |
+| 一条兜底 `OPTIONS /{path...}` | ✅ | ✅（`http.route` 是兜底模式） | 一条覆盖全部路径，含未注册路径的预检。**两条代价**：全站未匹配请求从 404 变 405；**与 `Static` 的前缀模式冲突**（同时注册 = 装配期 panic）——挂了静态目录就别选这条 |
 
 兜底那条长这样（`Use` 必须在注册路由**之前**）：
 
@@ -190,7 +201,8 @@ app.OPTIONS("/{path...}", func(c *web.Ctx) error {
 - 预检拿到 `204` + `Access-Control-Allow-Origin/Methods/Headers`，**而且进了框架的采集层**：`http.route` 记的是兜底模式 `/{path...}` 而不是目标路由——这是兜底那条路的代价，逐条注册记的是真路由；
 - 外包那条路上预检**没有** `X-Trace-Id`、没有访问记录，正是表格里「框架完全不知情」那一格；
 - 裸 `OPTIONS`（不带 `Access-Control-Request-Method`）不是预检，落到上面那个 handler，由它答 405——要别的语义就改它；
-- 显式注册过 `OPTIONS /x` 的路径仍走那条（ServeMux 更具体的模式优先）。
+- 显式注册过 `OPTIONS /x` 的路径仍走那条（ServeMux 更具体的模式优先）；
+- 兜底那条**不能与 `Static` 共存**：`Static` 注册的是 `<prefix>/`，与 `OPTIONS /{path...}` 在 ServeMux 上互不更具体，两条都注册是**装配期 panic**（两个注册顺序都一样）。挂了静态目录就选「逐条注册」，或者直接换框架自带的 `app.CORS(...)`。
 
 ## CSRF：归业务自己管
 

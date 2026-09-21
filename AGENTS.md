@@ -39,7 +39,8 @@ Windows PowerShell 下格式门禁写成：
 ```
 go.mod                  # module github.com/Luo-root/pulse-web（package web）
 doc.go                  # 包文档：定位 / 快速开始 / 运行时契约
-engine.go               # Engine、选项、路由与分组、Static、ServeHTTP 时序、Run / Serve、Handler
+engine.go               # Engine、选项、路由与分组、Static、ServeHTTP 时序、Run / Serve、Handler、包内 routeObserver 缝
+cors.go                 # 一方 CORS：Engine.CORS + CORSOption 选项 + 按已注册路径补 OPTIONS 把预检送进洋葱
 context.go              # Ctx、请求级 KV、响应写出（Writer / Flush / JSON / Text / Hijack）、responseWriter 包装
 bind.go                 # 请求体 / query 绑定：Content-Type 分派 + form / query 映射器
 errors.go               # HTTPError / StatusCoder / PanicError / 默认 mapper

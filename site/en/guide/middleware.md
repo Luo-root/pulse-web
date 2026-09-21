@@ -111,10 +111,20 @@ app.CORS(
 )
 ```
 
-`CORS(opts ...web.CORSOption)` is implemented in this package with **zero third-party dependencies** — CORS is this framework's own business and you should not have to install a package for it. Call it at assembly time, **before** your routes are registered (the same rule as `Use`), and it works on groups too. It does two things:
+`CORS(opts ...web.CORSOption)` is implemented in this package with **zero third-party dependencies** — CORS is this framework's own business and you should not have to install a package for it. It does two things:
 
 1. pushes the CORS middleware into the onion — real requests carry CORS headers;
 2. **adds a matching `OPTIONS` route for every route you register afterwards** — that is how a preflight reaches the onion.
+
+**Mounting rules (one allow-list per mux)**:
+
+| What you want | How to write it |
+|---|---|
+| One policy for the whole site | `app.CORS(...)` first, then `Group` / register routes |
+| Cover one prefix only | Mount on **that group alone**: after `api := app.Group("/api")`, call `api.CORS(...)`; nothing on the parent |
+| A node that already has CORS | Calling `CORS` on a group derived from it is an **assembly-time panic** — parent and child share one mux, and two policies on it only fight |
+
+Same rule as `Use`: **group first, then `CORS` does not take effect** (a group snapshots its middleware and observers at `Group` time). One ordering tip: put `CORS(...)` **before** your other `Use` calls — it is itself a `Use`, and whichever comes first sits on the outside, so mount it first if you want preflights to skip auth and friends.
 
 ### Why that extra `OPTIONS` is needed
 
@@ -126,13 +136,14 @@ Route matching runs before middleware (see "What it does not do", item 1): with 
 | `OPTIONS /api` (a bare OPTIONS) | 405 + `Allow: GET, HEAD` | the same 405 + `Allow: GET, HEAD`; the difference is that it enters the onion and the body is the framework's unified error body |
 | `GET /nope` (matches no route) | 404 | **404 (unchanged)** |
 
-That last row is where a measurement changed the design: the lazier version is to register one catch-all `OPTIONS /{path...}`, but `{path...}` matches every path, so ServeMux reads "path matched, method did not" as 405 — **every unmatched request site-wide would turn from 404 into 405**. The framework therefore adds `OPTIONS` per registered path, and `TestCORSUnmatchedRouteHasNoCORSHeaders` pins that 404.
+That last row is where a measurement changed the design: the lazier version is to register one catch-all `OPTIONS /{path...}`, and it has two hard problems — (1) `{path...}` matches every path, so ServeMux reads "path matched, method did not" as 405, and **every unmatched request site-wide turns from 404 into 405**; (2) it **conflicts with the `<prefix>/` pattern that `Static` registers** (`<prefix>/` matches more methods, `/{path...}` has the more specific path, and neither is more specific overall), so registering both is an **assembly-time panic** — in either order. The framework therefore adds `OPTIONS` per registered path, and `TestCORSUnmatchedRouteHasNoCORSHeaders` pins that 404.
 
 ### Semantics that matter
 
 - **A rejected preflight is a 403**, not a silently thinner response: if the origin, the method or a requested header is not on the list you get `403` plus the framework's unified error body (`cors_origin_not_allowed` / `cors_method_not_allowed` / `cors_header_not_allowed`). Both shapes are a CORS failure in the browser, but this one is **visible to people and to monitoring** — `error.type` lands in the access record.
 - **`CORSAllowOrigins("*")` and `CORSAllowCredentials()` cannot be combined**: that pair means "any website may call this service with credentials", which is a vulnerability rather than a configuration, so assembly panics; list the sites you mean instead.
-- Methods default to `GET` / `POST` / `HEAD` (the Fetch simple methods); requested headers default to empty — only headers on the CORS safelist pass. `CORSAllowHeaders("*")` allows any request header.
+- Methods default to `GET` / `POST` / `HEAD` (the Fetch simple methods); **requested headers default to `Accept` / `Content-Type`** — `application/json` is not on the CORS safelist (only form-urlencoded / multipart / text/plain are), and browsers send `Access-Control-Request-Headers: content-type` for a JSON POST, so a JSON API that only configures origins just works without `CORSAllowHeaders`. `CORSAllowHeaders("*")` allows any request header.
+- **The generated `OPTIONS` carries only the global and group middleware**, never the per-route middleware of the route that triggered it: an `OPTIONS` is not a stand-in for its `GET` / `POST`, so an auth guard on `GET /x` does not block `OPTIONS /x`.
 - Origins are compared as strings, after normalising case and a trailing slash (`https://App.Example.com/` equals `https://app.example.com`).
 - **Only what was asked for is echoed**: `Access-Control-Allow-Methods` returns the one method this request asked about, `Allow-Headers` returns the headers it asked about (normalised, de-duplicated). The response stays minimal and no unasked-for capability is advertised.
 - A preflight **does not check whether the target route exists** — the usual CORS middleware semantics; whether the real request finds a handler is a separate question.
@@ -164,7 +175,7 @@ If you already run `rs/cors` there is no need to switch for its own sake, but on
 |---|---|---|---|
 | Wrap `Handler()` | ✅ | ❌ the framework never learns (no trace, no access record) | CORS just has to work; you do not look at preflight traffic |
 | Register `OPTIONS` per route | ✅ | ✅ (`http.route` is the real route) | Few routes, fixed paths |
-| One catch-all `OPTIONS /{path...}` | ✅ | ✅ (`http.route` is the catch-all pattern) | One line covers every path, including preflights to unregistered ones; **the price is that unmatched requests site-wide turn from 404 into 405** |
+| One catch-all `OPTIONS /{path...}` | ✅ | ✅ (`http.route` is the catch-all pattern) | One line covers every path, including preflights to unregistered ones. **Two prices**: unmatched requests site-wide turn from 404 into 405; and it **conflicts with `Static`'s prefix pattern** (registering both is an assembly-time panic) — so do not pick it if you mount static files |
 
 The catch-all looks like this (`Use` must come **before** routes are registered):
 
@@ -192,7 +203,8 @@ What was measured (`TestMatrixRsCorsPreflightCatchAllRoute`, `TestMatrixRsCorsPr
 - the preflight gets `204` plus `Access-Control-Allow-Origin/Methods/Headers`, **and enters the framework's collection layer**: `http.route` records the catch-all pattern `/{path...}` rather than the target route — the price of the catch-all; per-route registration records the real route;
 - on the wrapped-outside route the preflight carries **no** `X-Trace-Id` and leaves no access record — the "framework never learns" square in the table above;
 - a bare `OPTIONS` (no `Access-Control-Request-Method`) is not a preflight and lands on that handler, which answers 405 — change it if you want other semantics;
-- a path with an explicitly registered `OPTIONS /x` still goes to that route (ServeMux prefers the more specific pattern).
+- a path with an explicitly registered `OPTIONS /x` still goes to that route (ServeMux prefers the more specific pattern);
+- the catch-all **cannot coexist with `Static`**: `Static` registers `<prefix>/`, and neither pattern is more specific than `OPTIONS /{path...}`, so registering both is an **assembly-time panic** (in either order). If you mount static files, use "register `OPTIONS` per route" — or just switch to the built-in `app.CORS(...)`.
 
 Both ways stay documented because plenty of projects are already on them; **new projects should use `app.CORS`** — the same semantics, one dependency fewer, and no extra route to maintain just so preflights show up in your telemetry.
 

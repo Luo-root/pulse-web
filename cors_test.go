@@ -12,14 +12,15 @@ import (
 )
 
 // 本文件覆盖一方 CORS 的面（cors.go）：实际请求 / 预检 / 三种拒绝 / 裸 OPTIONS /
-// 通配来源 / 装配期校验 / 分组 / 兜底路由与显式路由的优先级 / 观测（预检进访问记录、
-// 拒绝带 error.type）。边界：`Adapt` 与生态中间件的对照在 interop/middleware_test.go。
+// 通配来源 / 装配期校验 / 挂载口径（整站一份、只在分组、先 Group 后挂）/
+// 伴生 OPTIONS 的链与优先级 / 观测（预检进访问记录、拒绝带 error.type）。
+// 边界：`Adapt` 与生态中间件的对照在 interop/middleware_test.go。
 
 const corsOrigin = "https://app.example.com"
 
 // corsEngine 造一个已经挂上 CORS 的引擎。**必须在注册业务路由之前**调用 CORS
-// （它内部就是 Use + 挂一张观察表，之后的每次注册都会被它看一眼），所以这个 helper
-// 只挂 CORS，路由留给用例自己加。
+// （它内部就是 Use + 登记一个 routeObserver，之后的每次注册都会被它看一眼），所以这个
+// helper 只挂 CORS，路由留给用例自己加。
 func corsEngine(t *testing.T, opts ...CORSOption) (*Engine, *observability.MemorySink) {
 	t.Helper()
 	e, sink := newTestEngine(t)
@@ -357,8 +358,8 @@ func TestCORSRegisteredTwicePanics(t *testing.T) {
 	e.CORS(CORSAllowOrigins(corsOrigin))
 }
 
-// TestCORSOnGroup：分组同样能用，兜底路由落在分组前缀下——组外的 OPTIONS 不受影响，
-// 照旧由 ServeMux 答 405。
+// TestCORSOnGroup：**只在分组上挂**这条口径——分组的路径补 `OPTIONS`，组外的路径不受
+// 影响（那条路径没注册过任何方法，也就没被补，ServeMux 照旧答 404）。
 func TestCORSOnGroup(t *testing.T) {
 	e, _ := newTestEngine(t)
 	api := e.Group("/api")
@@ -376,10 +377,116 @@ func TestCORSOnGroup(t *testing.T) {
 
 	out := doReq(e, http.MethodOptions, "/outside", nil, "Origin", corsOrigin,
 		"Access-Control-Request-Method", "POST")
-	// 组外连路径都不匹配（不是「路径匹配但方法不对」那种 405），所以是 404——
-	// 兜底路由在 /api 前缀下，管不到这里。
+	// /outside 没注册过任何方法 → 没被补 OPTIONS → 路径压根不匹配（不是「路径匹配但方法
+	// 不对」那种 405），所以是 404。与 TestCORSPreflightOnUnregisteredPathIs404 同一件事。
 	if out.Code != http.StatusNotFound {
-		t.Errorf("分组外的预检状态码 = %d，want 404（兜底路由在 /api 前缀下，管不到这里）", out.Code)
+		t.Errorf("分组外的预检状态码 = %d，want 404（那条路径没注册过方法，因此没被补 OPTIONS）", out.Code)
+	}
+}
+
+// TestCORSAllowHeadersDefault：默认请求头表放行 `Accept` / `Content-Type`——只配来源的
+// JSON API 挂上就能用。
+//
+// 这条是评审点名的：`application/json` **不在** CORS 安全列表里（安全列表只认
+// form-urlencoded / multipart / text/plain），浏览器对 JSON POST 会带
+// `Access-Control-Request-Headers: content-type` 发预检；默认空表会让「只写了
+// CORSAllowOrigins 的 JSON API」预检全 403，与「一方件、挂上就用」直接冲突。
+func TestCORSAllowHeadersDefault(t *testing.T) {
+	e, _ := corsEngine(t, CORSAllowOrigins(corsOrigin))
+	e.POST("/api/json", func(c *Ctx) error { return c.NoContent(http.StatusOK) })
+
+	rec := corsPreflight(e, "/api/json", corsOrigin, http.MethodPost, "content-type")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("默认表下 JSON 预检状态码 = %d，want 204（body=%q）", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Headers"); got != "content-type" {
+		t.Errorf("Access-Control-Allow-Headers = %q，want 只回被问到的那一个", got)
+	}
+
+	// 默认表不是 `*`：没配过的头照样拒。
+	if rec := corsPreflight(e, "/api/json", corsOrigin, http.MethodPost, "x-evil"); rec.Code != http.StatusForbidden {
+		t.Errorf("未配过的请求头预检状态码 = %d，want 403", rec.Code)
+	}
+}
+
+// TestCORSAfterGroupIsNotSeenByGroup：与 `Use` 同款——**先 `Group` 再挂不生效**。
+// 分组在 `Group` 时就拷走了当时的中间件与观察者，所以子组的路由既不补 `OPTIONS`、
+// 也不带 CORS 中间件，跨源预检退化成「没挂 CORS 时」的样子。口径写在 `CORS` 的 godoc
+// 里：先 CORS，再派生分组。
+func TestCORSAfterGroupIsNotSeenByGroup(t *testing.T) {
+	e, _ := newTestEngine(t)
+	api := e.Group("/api")
+	e.CORS(CORSAllowOrigins(corsOrigin)) // 只写在父上，且晚于 Group
+	api.GET("/users", func(c *Ctx) error { return c.NoContent(http.StatusOK) })
+
+	// 没补 OPTIONS：`GET /api/users` 的路径匹配、方法不匹配 → ServeMux 直接 405，洋葱内看不见。
+	rec := corsPreflight(e, "/api/users", corsOrigin, http.MethodGet, "")
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("子组的预检状态码 = %d，want 405（子组看不到后挂的观察者，没人给它补 OPTIONS）", rec.Code)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("子组的预检不该带 CORS 头（子组看不到后挂的中间件），实际 %q", got)
+	}
+
+	get := doReq(e, http.MethodGet, "/api/users", nil, "Origin", corsOrigin)
+	if got := get.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("子组的实际请求同样不该带 CORS 头，实际 %q", got)
+	}
+}
+
+// TestCORSOnCorsNodePanics：一个 mux 一份白名单——已经挂过 CORS 的节点（含从它派生的
+// 分组）再调是装配期错误。父子共享同一个 mux，两份策略只会打架。
+func TestCORSOnCorsNodePanics(t *testing.T) {
+	e, _ := newTestEngine(t)
+	e.CORS(CORSAllowOrigins(corsOrigin))
+	api := e.Group("/api")
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatalf("父节点挂过 CORS 之后，子组再挂应当 panic")
+		}
+		if msg, _ := r.(string); !strings.Contains(msg, "已经挂过 CORS") {
+			t.Errorf("panic 消息 = %q，want 提到已经挂过 CORS", msg)
+		}
+	}()
+	api.CORS(CORSAllowOrigins("https://other.example.com"))
+}
+
+// TestCORSAutoOptionsKeepsEngineChainOnly：伴生 `OPTIONS` 的链只取本节点当下的全局 +
+// 分组中间件，**不带**触发它的那条业务路由的 per-route 中间件。
+//
+// 反例正是「拿错链」的后果：`GET /x` 上挂了守卫（返回 403），预检与裸 `OPTIONS` 不该被
+// 它挡下——`OPTIONS` 不是 `GET` 的替身。
+func TestCORSAutoOptionsKeepsEngineChainOnly(t *testing.T) {
+	e, _ := newTestEngine(t)
+	e.CORS(CORSAllowOrigins(corsOrigin))
+	e.Use(func(c *Ctx, next Handler) error { // 全局：挂在 CORS 之后，属伴生路由的链
+		c.SetHeader("X-Tag-Global", "1")
+		return next(c)
+	})
+	e.GET("/x", func(c *Ctx) error { return c.NoContent(http.StatusOK) },
+		func(c *Ctx, next Handler) error { // per-route 守卫
+			c.SetHeader("X-Tag-Route", "1")
+			return Forbidden("route_guard", nil)
+		})
+
+	// 裸 OPTIONS（不是预检）会走到伴生路由的 handler：405，而不是守卫的 403。
+	rec := doReq(e, http.MethodOptions, "/x", nil)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("裸 OPTIONS 状态码 = %d，want 405（per-route 守卫不该在伴生链上；body=%q）",
+			rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Tag-Global"); got != "1" {
+		t.Errorf("全局中间件没进伴生链（X-Tag-Global=%q）", got)
+	}
+	if got := rec.Header().Get("X-Tag-Route"); got != "" {
+		t.Errorf("per-route 中间件混进了伴生链（X-Tag-Route=%q）", got)
+	}
+
+	// 顺带：那条业务路由自己照常吃守卫。
+	if rec := doReq(e, http.MethodGet, "/x", nil); rec.Code != http.StatusForbidden {
+		t.Errorf("GET /x 状态码 = %d，want 403（per-route 守卫仍在自己的链上）", rec.Code)
 	}
 }
 
@@ -498,8 +605,10 @@ func TestCORSOriginTrailingSlashAndCase(t *testing.T) {
 // （框架「不搬动路由」那条边界的同一处），于是它的响应一个 CORS 头都没有：跨源请求
 // 打到一个不存在的路径时，浏览器看到的是 CORS 失败而不是那个 404。
 //
-// 兜底路由只管 OPTIONS，管不到这里；要覆盖它得让整条路由链搬动到中间件之后——那是
-// 另一个量级的改动，不在本功能的范围内。修了这条边界时，这条断言会红。
+// 这条路没注册过任何方法，也就没被补 `OPTIONS`，所以是 404 而不是 405——这也是「不回归
+// 到兜底 `OPTIONS /{path...}`」的守卫：退回兜底那条写法会把这里变成 405。要连这条也
+// 覆盖，得让整条路由链搬动到中间件之后——那是另一个量级的改动，不在本功能的范围内。
+// 修了这条边界时，这条断言会红。
 func TestCORSUnmatchedRouteHasNoCORSHeaders(t *testing.T) {
 	e, _ := corsEngine(t, CORSAllowOrigins(corsOrigin))
 

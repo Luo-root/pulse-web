@@ -141,6 +141,39 @@ func TestGroupAndMiddlewareOrder(t *testing.T) {
 	}
 }
 
+// recordingObserver 是 routeObserver 的测试替身：只记下自己看到了哪些模式。
+type recordingObserver struct{ seen []string }
+
+func (o *recordingObserver) observe(_ *Engine, pattern string) {
+	o.seen = append(o.seen, pattern)
+}
+
+// TestGroupCopiesObservers：观察者表按节点拷贝，**不共享 backing array**。
+//
+// 与 `mw` 同款但更容易踩：`mw` 每次 `Use` 都重建 slice，而 observers 是 append——两个
+// 节点共享同一个底层数组时，一边 append 会悄悄改掉另一边已登记的元素。这类损坏不报错、
+// 不变红，只让某个一方件静默看不到注册，所以单独钉一条。
+//
+// 白盒（同包）：先把父表做成 len < cap，再让「子先 append、父后 append」，直接把互相踩
+// 的效果摆出来。
+func TestGroupCopiesObservers(t *testing.T) {
+	e, _ := newTestEngine(t)
+	e.observers = make([]routeObserver, 0, 4) // len 0 / cap 4：共享时就一定有格子被踩
+	pa, pb, pc := &recordingObserver{}, &recordingObserver{}, &recordingObserver{}
+	e.addRouteObserver(pa)
+
+	api := e.Group("/api")
+	api.addRouteObserver(pb) // 共享底层数组时写进父表的第 2 格
+	e.addRouteObserver(pc)   // 共享时把上一行写进去的 pb 覆盖掉
+
+	if len(e.observers) != 2 || e.observers[1] != pc {
+		t.Fatalf("父表 = %v，want [pa pc]", e.observers)
+	}
+	if len(api.observers) != 2 || api.observers[1] != pb {
+		t.Errorf("子表 = %v，want [pa pb]（共享 backing array 时这里会变成 pc）", api.observers)
+	}
+}
+
 func TestMiddlewareShortCircuit(t *testing.T) {
 	e, _ := newTestEngine(t)
 	reached := false

@@ -47,8 +47,12 @@ func CORSAllowOrigins(origins ...string) CORSOption {
 	}
 }
 
-// CORSAllowMethods 设置实际请求允许用的方法，默认 `GET` / `POST` / `HEAD`（Fetch 的
-// simple methods）。给 `"*"` 表示任意方法。
+// CORSAllowMethods 设置实际请求允许用的方法。它是**覆盖**而不是追加（默认表非空：
+// `GET` / `POST` / `HEAD`），因为只有覆盖才收得窄——调两次以最后一次为准。给 `"*"`
+// 表示任意方法。
+//
+// 与它对照：`CORSAllowOrigins` / `CORSAllowHeaders` 是**在已有表上追加**（它们的默认
+// 表是空的或极小，追加才是自然写法）。
 func CORSAllowMethods(methods ...string) CORSOption {
 	return func(c *corsConfig) {
 		c.methods = map[string]struct{}{}
@@ -67,7 +71,13 @@ func CORSAllowMethods(methods ...string) CORSOption {
 }
 
 // CORSAllowHeaders 设置预检里允许客户端携带的请求头（`Access-Control-Request-Headers`
-// 那一串），默认空——即只允许 CORS 安全列表内的头。给 `"*"` 表示任意请求头。
+// 那一串），**在默认表上追加**（默认 `Accept` / `Content-Type`）。给 `"*"` 表示任意请求头。
+//
+// 默认表不是空的，这一条是有意的：CORS 安全列表只认 `application/x-www-form-urlencoded`
+// / `multipart/form-data` / `text/plain` 三种 `Content-Type`，**`application/json` 不在
+// 里面**——浏览器对 JSON POST 会带 `Access-Control-Request-Headers: content-type` 发预检。
+// 默认空表的后果是「只配了来源的 JSON API，预检全 403」，与「一方件、挂上就用」直接冲突，
+// 所以默认面与 `rs/cors` 对齐：常见 SPA 只写 `CORSAllowOrigins` 就够。
 //
 // 名字按 HTTP 语义**大小写不敏感**（两边都规范化成小写再比）。
 func CORSAllowHeaders(headers ...string) CORSOption {
@@ -124,8 +134,10 @@ func CORSMaxAge(d time.Duration) CORSOption {
 //
 // 第二条是本框架特有的一半：路由匹配先于中间件（见「中间件与 stdlib 互操作」里的
 // 「不搬动路由」），只注册了 `GET /api` 时 `OPTIONS /api` 会被 ServeMux 直接 405 掉，
-// 预检根本到不了中间件。补出来的那条 OPTIONS 路由带着**同一条链**（全局 + 分组中间件），
-// 于是预检照常进访问日志与 Trace——外包 `Handler()` 那条老路做不到这一点。
+// 预检根本到不了中间件。补出来的那条走**本节点当下**的全局 + 分组中间件，于是预检照常
+// 进访问日志与 Trace——外包 `Handler()` 那条老路做不到这一点。它**不**带那条触发它的
+// 业务路由的 per-route 中间件：`OPTIONS` 不是 `GET`/`POST` 的替身（否则 `GET /x` 上的
+// 鉴权守卫会把 `OPTIONS /x` 也挡掉）。见 `TestCORSAutoOptionsKeepsEngineChainOnly`。
 //
 //	app.CORS(
 //	    web.CORSAllowOrigins("https://app.example.com"),
@@ -133,11 +145,20 @@ func CORSMaxAge(d time.Duration) CORSOption {
 //	    web.CORSMaxAge(10*time.Minute),
 //	)
 //
-// 装配期调用，且要在注册业务路由**之前**（与 Use 同一规矩）。分组同样可用：
+// **挂载口径（一个 mux 一份白名单）**：
 //
-//	api := app.Group("/api")
-//	api.CORS(web.CORSAllowOrigins("https://app.example.com"))
-//	api.GET("/users", listUsers)   // 同时得到 OPTIONS /api/users
+//   - **整站一份**：先 `app.CORS(...)`，再 `Group` / 注册路由。
+//   - **只覆盖某个前缀**：**只**在那个分组上 `CORS`，父上不挂——
+//     `api := app.Group("/api"); api.CORS(...)`。
+//   - 已经挂过 CORS 的节点（含从它派生的分组）再调 `CORS` 是**装配期 panic**：那不是
+//     「分组各自的策略」，而是同一条路由上两份策略打架。
+//
+// 与 `Use` 同款：**先 `Group` 再 `CORS` 不生效**（分组在 `Group` 时就拷走了当时的
+// 中间件与观察者），所以顺序永远是「先 CORS，再派生分组/注册路由」。
+//
+// 还有一条顺序建议：**把 `CORS(...)` 写在其它 `Use` 之前**。它自己就是一次 `Use`，
+// 谁在前面谁在外层——想让预检不被鉴权之类的全局中间件挡下，就先挂 CORS（预检由它在
+// 洋葱外层当场答掉，后面的中间件根本看不到这条请求）。
 //
 // 补出来的那条 OPTIONS 只做两件事：真预检（带 `Access-Control-Request-Method`）由中间件
 // 当场答 `204`；**裸 OPTIONS**（没有那个头）则由它自己答 `405` + `Allow`，与 ServeMux
@@ -147,9 +168,12 @@ func CORSMaxAge(d time.Duration) CORSOption {
 //
 // 三条边界写在这里，免得踩：
 //
-//   - **不注册兜底 `OPTIONS /{path...}`**。那种写法看着更省事，但 `{path...}` 匹配任意
-//     路径，ServeMux 会把「路径匹配、方法不匹配」判成 405——**全站未匹配的请求都会从
-//     404 变成 405**（实测：注册兜底之后 `GET /nope` 返回 405）。所以按路径逐条补。
+//   - **不注册兜底 `OPTIONS /{path...}`**。那条不只是一处代价，而是两条硬伤：① `{path...}`
+//     匹配任意路径，ServeMux 会把「路径匹配、方法不匹配」判成 405——**全站未匹配的请求
+//     都会从 404 变成 405**（实测：注册兜底之后 `GET /nope` 返回 405）；② 它与 `Static`
+//     挂的 `"<prefix>/"` **在 ServeMux 上直接冲突**：`"/assets/"` 匹配的方法更多、
+//     `"OPTIONS /{path...}"` 的路径更具体，谁都不比谁更具体，两条都注册就是装配期 panic
+//     （两个注册顺序都一样）。所以按已注册路径逐条补——静态前缀那条天然不参与（见下）。
 //   - **预检被拒是 403，不是静默少几个头**。来源 / 方法 / 请求头任一不在白名单，返回
 //     `403` + 框架统一错误体（`cors_origin_not_allowed` 等），于是**拒绝对浏览器与监控
 //     都看得见**（`error.type` 会进访问记录），而不是像生态件那样静默中止。
@@ -166,14 +190,23 @@ func CORSMaxAge(d time.Duration) CORSOption {
 // `Static` 挂的 `"<prefix>/"` 不带方法，本来就吃得住 `OPTIONS`，预检照常由中间件在洋葱
 // 内答掉、照常进访问记录——那条路径不需要、也不会被补一条同名 `OPTIONS`（补了会遮蔽
 // FileServer 自己的 404/405 语义）。见 `TestCORSPreflightOnStaticPrefix`。
+//
+// 实现上它是一次 `addRouteObserver` + 一次 `Use`——「需要钩注册的一方件」都走这条包内缝，
+// 而不是给 Engine 加专属字段（见 `routeObserver`）。
 func (e *Engine) CORS(opts ...CORSOption) {
-	if e.cors != nil {
-		panic("web: 这个引擎已经挂过 CORS 了")
+	// 一个 mux 只留一份白名单：父子节点共享的是同一个 mux，两份策略只会打架。
+	for _, o := range e.observers {
+		if _, dup := o.(*corsRoutes); dup {
+			panic("web: 这个引擎（或它的父分组）已经挂过 CORS 了——一个 mux 一份白名单。" +
+				"要只覆盖某个前缀，就只在那个分组上挂 CORS，父上不挂")
+		}
 	}
 	cfg := &corsConfig{
-		origins:     map[string]struct{}{},
-		methods:     map[string]struct{}{http.MethodGet: {}, http.MethodPost: {}, http.MethodHead: {}},
-		requestHdrs: map[string]struct{}{},
+		origins: map[string]struct{}{},
+		methods: map[string]struct{}{http.MethodGet: {}, http.MethodPost: {}, http.MethodHead: {}},
+		// 默认不是空的：`application/json` 不在 CORS 安全列表里，JSON POST 的预检会带
+		// `Access-Control-Request-Headers: content-type`（见 CORSAllowHeaders 的说明）。
+		requestHdrs: map[string]struct{}{"accept": {}, "content-type": {}},
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -188,7 +221,7 @@ func (e *Engine) CORS(opts ...CORSOption) {
 			"那个组合等于允许任何网站带凭据访问；要开放给多个站点请逐个列出")
 	}
 
-	e.cors = &corsRoutes{paths: map[string]*corsPath{}}
+	e.addRouteObserver(&corsRoutes{paths: map[string]*corsPath{}})
 	e.Use(corsMiddleware(cfg))
 }
 
@@ -207,8 +240,8 @@ type corsPath struct {
 	userOptions bool                // 用户自己注册了 OPTIONS：不再补
 }
 
-// observe 在每次注册路由时被调用（仅当引擎挂了 CORS）：记下方法，必要时补一条 OPTIONS。
-func (rs *corsRoutes) observe(e *Engine, pattern string, mw []Middleware) {
+// observe 实现 routeObserver：每注册一条路由被叫一次，记下方法，必要时补一条 OPTIONS。
+func (rs *corsRoutes) observe(e *Engine, pattern string) {
 	method, path := splitPattern(pattern)
 	if path == "" {
 		return
@@ -237,9 +270,11 @@ func (rs *corsRoutes) observe(e *Engine, pattern string, mw []Middleware) {
 		return
 	}
 	p.autoDone = true
-	// 链与触发它的那条路由相同：全局与分组中间件照常参与（CORS 中间件就在里面），
-	// 预检因此进得了洋葱、进得了访问记录。
-	e.handle(http.MethodOptions+" "+path, compose(e.chainMW(mw), p.bareOptions()))
+	// 链取**本节点当下**的全局 + 分组中间件（`e.mw`），**不取**触发它的那条业务路由的
+	// per-route 中间件：`OPTIONS` 不是 `GET`/`POST` 的替身（否则 `GET /x` 上的鉴权守卫
+	// 会把 `OPTIONS /x` 也挡掉）。CORS 中间件就在 `e.mw` 里，预检因此进得了洋葱、
+	// 进得了访问记录。见 `routeObserver` 与 `TestCORSAutoOptionsKeepsEngineChainOnly`。
+	e.handle(http.MethodOptions+" "+path, compose(e.mw, p.bareOptions()))
 }
 
 func (rs *corsRoutes) get(path string) *corsPath {
