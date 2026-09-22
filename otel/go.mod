@@ -3,7 +3,7 @@ module github.com/Luo-root/pulse-web/otel
 go 1.27.0
 
 require (
-	github.com/Luo-root/pulse v0.2.4
+	github.com/Luo-root/pulse v0.2.5
 	github.com/Luo-root/pulse-web v0.0.0
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/sdk v1.46.0
