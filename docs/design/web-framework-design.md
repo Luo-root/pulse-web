@@ -485,10 +485,10 @@ func Adapt(mw func(http.Handler) http.Handler) Middleware    // stdlib 中间件
 ### CORS
 
 ```go
-func (e *Engine) CORS(opts ...CORSOption)             // 装配期调用，与 Use 同一规矩；分组同样可用
+func (e *Engine) CORS(opts ...CORSOption)             // 装配期调用（与 Use 同规矩）；整站一份或只挂某分组，已挂过的节点再调 panic
 func CORSAllowOrigins(origins ...string) CORSOption   // 必填（否则装配期 panic）；"*" = 任意来源
 func CORSAllowMethods(methods ...string) CORSOption   // 默认 GET / POST / HEAD（Fetch simple methods）
-func CORSAllowHeaders(headers ...string) CORSOption   // 默认空 = 只放行 CORS 安全列表内的头
+func CORSAllowHeaders(headers ...string) CORSOption   // 默认 Accept / Content-Type（追加式；JSON POST 挂上就能过）
 func CORSExposeHeaders(headers ...string) CORSOption  // Access-Control-Expose-Headers
 func CORSAllowCredentials() CORSOption                // 与 CORSAllowOrigins("*") 互斥（装配期 panic）
 func CORSMaxAge(d time.Duration) CORSOption           // 秒；<= 0 不写这个头

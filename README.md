@@ -114,7 +114,7 @@ app.CORS(
 )
 ```
 
-Call it at assembly time, before your routes (the same rule as `Use`); it works on groups too. A preflight rejected by the allow-list is a `403` with the framework's error body rather than a silently thinner response, so rejections are visible to your monitoring. CSRF, auth and rate limiting are **not** in this box — those stay ecosystem pieces.
+Call it at assembly time, before your routes (the same rule as `Use`). **One policy per mux**: mount it once for the whole site, or mount it on a single group to cover just that prefix — calling it again on a node that already has it (or on a group derived from one) panics at assembly time, because two policies would fight over the same mux (the table of mount points is in the [middleware guide](https://luo-root.github.io/pulse-web/en/guide/middleware)). A preflight rejected by the allow-list is a `403` with the framework's error body rather than a silently thinner response, so rejections are visible to your monitoring. CSRF, auth and rate limiting are **not** in this box — those stay ecosystem pieces.
 
 ### Request binding and body limits
 
