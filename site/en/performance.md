@@ -2,9 +2,9 @@
 
 This page answers two questions: **what does a request path cost**, and **where does the observability money go**. Every table comes with a command to reproduce it.
 
-**Version**: pulse-web's `main` (no new tag since v0.1.0; depends on pulse v0.2.4). **This section is re-measured whenever the default sink or the request path changes, and at tag time** (the next round lands with v0.2.0) — and only paired ratios from the same round are compared.
+**Version**: pulse-web's `v0.2.0` (depends on pulse v0.2.4). **This section is re-measured whenever the default sink or the request path changes, and at tag time** — and only paired ratios from the same round are compared.
 
-**This round**: 2026-09-20 · i9-14900HX / 32 logical cores / Go 1.27 / Windows amd64 · **on AC power**.
+**This round**: 2026-09-22 · i9-14900HX / 32 logical cores / Go 1.27 / Windows amd64 · **on AC power**.
 
 ## How to read this page
 
@@ -86,7 +86,7 @@ go test -run '^$' -bench 'BenchmarkSinkWrite_ConsoleVsUpstream|BenchmarkRequestP
 
 For choosing a sink see [observability](/en/guide/observability); when throughput matters, wrap the slow sink in `observability.NewAsyncSink`.
 
-## Real load against gin (2026-09-20, on AC power)
+## Real load against gin (2026-09-22, on AC power)
 
 This section answers "**is it on par with gin**". The measurement code is `loadtest/` **in this repository** — a separate module carrying the gin dependency (the core module keeps zero third-party dependencies and makes no exception just to be compared against gin). Only the protocol and conclusions are kept here.
 
@@ -94,16 +94,16 @@ Protocol: two separate processes sharing one `http.ListenAndServe` bootstrap wit
 
 | Pairing | Concurrency | pulse-web RPS | gin RPS | pulse/gin | pulse p99 | gin p99 |
 |---|---|---|---|---|---|---|
-| `bare` | 64 | 27494 | 31043 | **0.89x** | 11.32ms | 11.60ms |
-| `bare` | 256 | 36036 | 37951 | **0.95x** | 31.18ms | 37.99ms |
-| `obs` | 64 | 25332 | 29616 | **0.85x** | 11.49ms | 11.63ms |
-| `obs` | 256 | 33437 | 36882 | **0.91x** | 32.16ms | 39.94ms |
+| `bare` | 64 | 55579 | 59296 | **0.94x** | 4.89ms | 4.81ms |
+| `bare` | 256 | 57919 | 59258 | **0.98x** | 20.03ms | 24.43ms |
+| `obs` | 64 | 51841 | 58060 | **0.90x** | 4.96ms | 5.02ms |
+| `obs` | 256 | 58336 | 59406 | **0.99x** | 19.20ms | 24.54ms |
 
-- **The bare pairing is on par**: 0.89–0.95×; the p99 is lower on both concurrency levels (11.32ms vs 11.60ms, 31.18ms vs 37.99ms). The pairing is `gin.New()` ↔ `web.New(web.Minimal())` — neither side carries default middleware.
-- **The observability pairing** (`gin.Default()` ↔ `web.New()`, both sides with their default middleware): 0.85× / 0.91×. On this pairing pulse-web additionally does three things gin does not — a TraceID, the route template (`/users/{id}` rather than the concrete path), and error classification; for reference, gin's own default middleware costs 4.6% / 2.8% between these two pairings.
-- **What carries the protocol is the pairing, not the absolute values**: the same cell moved from 28k to 78k between sessions (this round's absolute RPS is about half of the previous round's — machine state, nothing else), so only the paired ratio within one round counts (whole-machine drift such as the power state cancels out). **The two earlier independent sessions agree item by item** (0.90/0.91, 0.95/0.95, 0.81/0.82, 0.92/0.93) — that is what makes this more trustworthy than the absolute values.
-- The round before that (2026-09-14) had the observability pairing at **0.65× / 0.88×** — that round used the **then-current** default sink `SlogSink`. With the default now `ConsoleSink` and the same protocol re-run, you get 0.82× / 0.93×. Absolute values are not comparable across rounds; only the paired ratio from the same round is.
-- This round (2026-09-20) was re-run twice, and the later run is the one recorded: first because the response writer **opened up `Hijack`** (a change on the request path; 0.90× / 0.94×, 0.87× / 0.92×), then a re-check after the review fix to the post-hijack write protection (0.89× / 0.95×, 0.85× / 0.91×) — both land in the same noise band, and **the conclusion is unchanged**. On 2026-09-21 the `Adapt` refill fix (also on the request path) triggered one more re-run (0.90× / 0.93×, 0.86× / 0.93×), again inside that band.
+- **The bare pairing is on par**: 0.94–0.98×; at c=256 the p99 is lower (20.03ms vs 24.43ms), at c=64 the two sides are level (4.89ms vs 4.81ms). The pairing is `gin.New()` ↔ `web.New(web.Minimal())` — neither side carries default middleware.
+- **The observability pairing** (`gin.Default()` ↔ `web.New()`, both sides with their default middleware): 0.90× / 0.99×. On this pairing pulse-web additionally does three things gin does not — a TraceID, the route template (`/users/{id}` rather than the concrete path), and error classification; for reference, gin's own default middleware costs 4.6% / 2.8% between these two pairings.
+- **What carries the protocol is the pairing, not the absolute values**: the same cell moved from 28k to 78k between sessions (the previous round, 2026-09-20, had about half of this round's absolute RPS — machine state, nothing else), so only the paired ratio within one round counts (whole-machine drift such as the power state cancels out). **The two earlier independent sessions agree item by item** (0.90/0.91, 0.95/0.95, 0.81/0.82, 0.92/0.93) — that is what makes this more trustworthy than the absolute values.
+- The earlier round (2026-09-14) had the observability pairing at **0.65× / 0.88×** — that round used the **then-current** default sink `SlogSink`. The round the default became `ConsoleSink` (2026-09-16) re-ran the same protocol at 0.82× / 0.93×, and later rounds drifted slowly upward inside the noise band to this round's 0.90× / 0.99×. Absolute values are not comparable across rounds; only the paired ratio from the same round is.
+- The 2026-09-20 round was re-run twice, and the later run was the one recorded then: first because the response writer **opened up `Hijack`** (a change on the request path; 0.90× / 0.94×, 0.87× / 0.92×), then a re-check after the review fix to the post-hijack write protection (0.89× / 0.95×, 0.85× / 0.91×) — both land in the same noise band, and **the conclusion is unchanged**. On 2026-09-21 the `Adapt` refill fix (also on the request path) triggered one more re-run (0.90× / 0.93×, 0.86× / 0.93×); **on 2026-09-22 the v0.2.0 release re-ran the same protocol** — that is the table above (0.94× / 0.98×, 0.90× / 0.99×). Every round has landed inside the same noise band.
 - The measurement code used to live on a side branch, so when the default sink changed it **kept silently measuring the old default** — no error, no warning. It now follows the main branch, and CI covers its build / vet / test separately so it cannot rot unnoticed.
 
 Reproduce:

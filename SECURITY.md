@@ -5,13 +5,12 @@ Both halves are equivalent: English first, 中文在后.
 
 ## Supported versions
 
-**There is no tagged release yet.** Until the first `vX.Y.Z` tag exists, `main` is the only
-supported version — the rows below apply from that first tag onward.
+`main` and the newest `v0.x` release are supported.
 
 | Version | Supported |
 | --- | --- |
 | `main` | ✅ |
-| newest `v0.x` release (see [Releases](https://github.com/Luo-root/pulse-web/releases)) | ✅ *(from the first tag onward)* |
+| newest `v0.x` release (see [Releases](https://github.com/Luo-root/pulse-web/releases)) | ✅ |
 | older `0.x` releases | ❌ |
 
 Fixes land on `main` and in the newest release. There are no backports during the `0.x` line,
@@ -29,8 +28,9 @@ Report privately by email to **3029295957@qq.com**, including:
 - any fix or mitigation you already have in mind;
 - how you want to be credited, or say that you would rather not be.
 
-GitHub's private vulnerability reporting is **not enabled** on this repository, so email is the
-private channel. If that changes, this section will be updated.
+GitHub's private vulnerability reporting is **also enabled** on this repository — use the
+"Report a vulnerability" button on the Security tab to open a private advisory. That and email
+are both private channels; pick whichever you prefer.
 
 ## What to expect
 
@@ -137,13 +137,12 @@ Pulse-Web 目前仍在 1.0 之前（`v0.x`）。本文件说明漏洞上报方�
 
 ### 支持范围
 
-**目前还没有 tag 过的 release。** 在首个 `vX.Y.Z` 之前，唯一受支持的版本是 `main`；
-下表自首个 tag 起生效。
+`main` 与最新的 `v0.x` release 均在支持范围内。
 
 | 版本 | 是否支持 |
 | --- | --- |
 | `main` | ✅ |
-| 最新的 `v0.x` release（见 [Releases](https://github.com/Luo-root/pulse-web/releases)） | ✅（自首个 tag 起） |
+| 最新的 `v0.x` release（见 [Releases](https://github.com/Luo-root/pulse-web/releases)） | ✅ |
 | 更早的 `0.x` 版本 | ❌ |
 
 修复落在 `main` 与最新一版 release 上。`0.x` 期间不做 backport，所以旧版本上的修复就是升级到最新版。
@@ -160,7 +159,8 @@ Pulse-Web 目前仍在 1.0 之前（`v0.x`）。本文件说明漏洞上报方�
 - 你已经有思路的修复或缓解方式；
 - 是否愿意被致谢、以什么名义。
 
-本仓库**未启用** GitHub 私密漏洞报告，所以邮箱是当前的私密渠道。若之后启用了，本节会同步更新。
+本仓库也启用了 GitHub 私密漏洞报告——在 Security 页点「Report a vulnerability」即可开私密报告。
+两个渠道都是私密的，任选其一；入口不可用时用邮箱。
 
 ### 你会得到什么
 
