@@ -102,6 +102,20 @@ app.Use(auth)                                   // 全局
 app.POST("/admin/purge", purge, BodyLimit(1<<10)) // 单条路由
 ```
 
+### CORS
+
+CORS 是自带的：`app.CORS(...)` 不引入任何第三方依赖，而且做到了生态件做不到的那一件事——注册每条业务路由时**顺带补一条同名 `OPTIONS` 路由**，于是浏览器预检真的进得了洋葱，访问日志与 Trace 里和别的请求一样看得见。
+
+```go
+app.CORS(
+	web.CORSAllowOrigins("https://app.example.com"),
+	web.CORSAllowCredentials(),
+	web.CORSMaxAge(10*time.Minute),
+)
+```
+
+装配期调用、写在注册业务路由之前（与 `Use` 同一规矩）。**一个 mux 一份白名单**：整站一份就挂最外，只覆盖某个前缀就**只**挂那个分组——已经挂过的节点（含它派生的分组）再调是装配期 panic，两份策略在同一个 mux 上只会打架（口径表见[中间件指南](https://luo-root.github.io/pulse-web/guide/middleware)）。被白名单拒掉的预检是 `403` + 框架统一错误体，而不是「静默少几个响应头」——拒绝因此对监控可见。CSRF、鉴权与限流**不在**这个盒子里，它们仍归生态件。
+
 ### 请求绑定与上限
 
 `c.Bind` 按 `Content-Type` 分派（JSON、XML、form-urlencoded、multipart），请求没有 body 时自动落到 query。失败按语义返回错误：400 `invalid_body`、413 `body_too_large`、415 `unsupported_media_type`。
@@ -242,7 +256,7 @@ app.Use(web.Adapt(chiMW.Logger))                                 // 生态中间
 http.Handle("/app/", http.StripPrefix("/app", app.Handler()))    // 引擎作为 http.Handler 出去
 ```
 
-三个方向都是**缝**、不是实现：`Wrap` 接 stdlib handler、`Adapt` 把 `func(http.Handler) http.Handler` 形状的生态中间件（logger / 鉴权 / 限流 / 指标计数……）接进洋葱内、`Handler()` 反向导出。哪个中间件该进洋葱、哪个该外包 `Handler()`（比如要拦预检的 CORS），判据见[指南「stdlib 中间件接入」](https://luo-root.github.io/pulse-web/guide/middleware)。
+三个方向都是**缝**、不是实现：`Wrap` 接 stdlib handler、`Adapt` 把 `func(http.Handler) http.Handler` 形状的生态中间件（logger / 鉴权 / 限流 / 指标计数……）接进洋葱内、`Handler()` 反向导出。哪个中间件该进洋葱、哪个该外包 `Handler()`，判据见[指南「stdlib 中间件接入」](https://luo-root.github.io/pulse-web/guide/middleware)。**CORS 是例外**：它由框架自带（`app.CORS(...)`）——预检在中间件之前就被路由器分派，那条缝只有框架自己补得上。
 
 它**不是**什么：不是自带一整套社区中间件目录的微框架。如果你要的是生态、是团队最高的熟悉度，gin、chi、echo 是更明显的选择。Pulse-Web 面向的是那些宁可把依赖面控制在「标准库加两个包」、并且想要开箱即得的观测能力的服务。
 

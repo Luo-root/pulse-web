@@ -278,6 +278,11 @@ type Engine struct {
 	prefix string
 	mw     []Middleware
 
+	// observers 是**包内**的路由观察者：每注册一条路由都会被叫一次，好让「需要钩注册的
+	// 一方件」补自己的伴生路由（CORS 就是第一个消费者：按已注册路径补 OPTIONS）。
+	// 与 mw 同款**按节点生效**——Group 时按值拷贝，先 Group 再挂的一方件对既存分组不生效。
+	observers []routeObserver
+
 	life *lifecycle
 }
 
@@ -286,6 +291,30 @@ type lifecycle struct {
 	mu         sync.Mutex
 	onShutdown func(context.Context) error
 	disposed   bool
+}
+
+// routeObserver 是**包内**的扩展缝：凡是「挂上去之后还要参与路由注册」的一方件（例：
+// CORS 要给每条路由补一条 `OPTIONS`）都实现它，而不是往 Engine 上加一个专属字段、在
+// `register` 里写死一次判断。CORS 是第一个消费者，不是唯一可能的那一个。
+//
+// 它**不导出**，这是刻意的：公开一个 `OnRegister(func(...))` 等于给「装配期任意改写
+// 路由表」发许可证，而这里真正被证明需要的只有一件事——一方件能补**自己的**伴生路由。
+// 所以也没有插件目录、没有注册清单。
+//
+// 两件约定：
+//
+//   - 要补路由就自己调 `e.handle`（直接挂 mux，不再触发观察）；用 `e.register` 会递归。
+//   - 伴生路由的链取 `e.mw`（全局 + 本节点分组），**不取**那条触发它的业务路由的
+//     per-route 中间件——伴生路由不是那条路由的替身（见 `Engine.CORS` 的 godoc）。
+//     这也是签名里没有 per-route `mw` 的原因：给了它，第一个消费者就会拿错。
+type routeObserver interface {
+	observe(e *Engine, pattern string)
+}
+
+// addRouteObserver 登记一个观察者。语义与 `Use` 同款：**按节点生效**——之后从本节点
+// 派生的分组看得到，之前已经派生的看不到（与「先 Group 再 Use 不生效」同一条规矩）。
+func (e *Engine) addRouteObserver(o routeObserver) {
+	e.observers = append(e.observers, o)
 }
 
 // New 创建 Engine：自建 kernel root（或接入 WithRoot 传入的），
@@ -408,6 +437,10 @@ func (e *Engine) Group(prefix string, mw ...Middleware) *Engine {
 	g := *e
 	g.prefix = e.prefix + prefix
 	g.mw = e.chainMW(mw)
+	// 观察者与 mw 一样按节点拷贝：一来「先 Group 再挂」与 `Use` 同型（看不到），
+	// 二来 slice 必须复制本身——两个节点共享 backing array 时，一边 append 会
+	// 悄悄改掉另一边已登记的元素。
+	g.observers = append([]routeObserver(nil), e.observers...)
 	return &g
 }
 
@@ -432,7 +465,17 @@ func (e *Engine) chainMW(extra []Middleware) []Middleware {
 }
 
 func (e *Engine) register(pattern string, h Handler, mw []Middleware) {
-	chain := compose(e.chainMW(mw), h)
+	// 让包内观察者先看一眼：CORS 要按已注册路径补 OPTIONS（预检进洋葱用），也要挡下
+	// 与它撞车的注册。没挂观察者的引擎在这里只多一次空 slice 的循环。
+	for _, o := range e.observers {
+		o.observe(e, pattern)
+	}
+	e.handle(pattern, compose(e.chainMW(mw), h))
+}
+
+// handle 把编译好的链挂到 mux 上。与 register 分开是为了让 CORS 自己补的
+// OPTIONS 路由走同一条装配路径、又不再次触发 CORS 的观察逻辑（那会递归）。
+func (e *Engine) handle(pattern string, chain Handler) {
 	e.mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c := ctxFromRequest(r)
 		if c == nil {
