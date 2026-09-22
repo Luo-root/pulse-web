@@ -1,5 +1,5 @@
-github.com/Luo-root/pulse v0.2.4 h1:rzyMC+Yu8tEzzvTBEtZTCYykaguQIpqrYQfITsmy5Ac=
-github.com/Luo-root/pulse v0.2.4/go.mod h1:YTDWt+18dcgtPyerUbS9F3rSgML19T1AM24p5rH5Gmg=
+github.com/Luo-root/pulse v0.2.5 h1:NW9IyNnwscU843x32l9j3T5KynkpCmw/82Yd442n+mw=
+github.com/Luo-root/pulse v0.2.5/go.mod h1:sLMg53OwV4WfZQyTyyxpNfXWIZSZ6mIxce/cd/zb8C0=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/go-logr/logr v1.2.2/go.mod h1:jdQByPbusPIv2/zmleS9BjJVeZ6kBagPoEUsqbVz/1A=

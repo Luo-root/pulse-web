@@ -7,7 +7,7 @@ module github.com/Luo-root/pulse-web/loadtest
 go 1.27.0
 
 require (
-	github.com/Luo-root/pulse v0.2.4
+	github.com/Luo-root/pulse v0.2.5
 	github.com/Luo-root/pulse-web v0.0.0
 	github.com/gin-gonic/gin v1.12.0
 )

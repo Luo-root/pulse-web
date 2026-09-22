@@ -3,7 +3,7 @@ module github.com/Luo-root/pulse-web/interop
 go 1.27.0
 
 require (
-	github.com/Luo-root/pulse v0.2.4
+	github.com/Luo-root/pulse v0.2.5
 	github.com/Luo-root/pulse-web v0.0.0
 	github.com/coder/websocket v1.8.15
 	github.com/go-chi/chi/v5 v5.3.2
