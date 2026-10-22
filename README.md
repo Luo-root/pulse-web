@@ -11,6 +11,11 @@
   <a href="https://luo-root.github.io/pulse-web/"><img alt="Docs: English | 中文" src="https://img.shields.io/badge/docs-English%20%7C%20%E4%B8%AD%E6%96%87-2563eb.svg"></a>
 </div>
 
+<p align="center">
+  <a href="https://github.com/Luo-root/pulse-web/stargazers"><img src="https://img.shields.io/github/stars/Luo-root/pulse-web?style=social" alt="Stars"></a>
+  <a href="https://github.com/Luo-root/pulse-web/graphs/contributors"><img src="https://img.shields.io/github/contributors/Luo-root/pulse-web?style=social" alt="Contributors"></a>
+</p>
+
 <br />
 
 **English** | [中文](README_zh.md)
@@ -277,3 +282,13 @@ Non-trivial changes start as an issue; the rules are in [CONTRIBUTING.md](CONTRI
 ## License
 
 [MIT](LICENSE)
+
+## ⭐ 支持 pulse-web
+
+构建于 Pulse 内核与可观测能力之上的通用 Go Web 框架。
+
+如果你在用 Go 写服务，并且想要一套自带工作流与可观测能力的 Web 框架，Star 一下能帮它被更多人看到 —— 对个人维护的开源项目帮助很大。
+
+- 遇到问题或想要功能：[提交 issue](https://github.com/Luo-root/pulse-web/issues)
+- 觉得好用但暂时没需求：点右上角的 ⭐ 就够了
+- 想参与开发：[贡献指南](CONTRIBUTING.md)
